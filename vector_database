@@ -1,0 +1,44 @@
+from qdrant_client import QdrantClient
+from qdrant_client.models import PointStruct, Distance, VectorParams
+from sentence_transformers import SentenceTransformer
+
+notes = [
+    {"id": 1, "text": "Stayed up till 2am scrolling again, didn't mean to. Need a better wind-down routine."},
+    {"id": 2, "text": "Assignment due Friday for COMP3300, still need to write the discussion section."},
+    {"id": 3, "text": "Really enjoyed the run this morning, felt clear-headed for the whole day afterwards."},
+    {"id": 4, "text": "Meeting with Alex went well, he liked the creative selection approach and wants more demos."},
+    {"id": 5, "text": "Feeling anxious about how much time I spend checking notifications instead of focusing."},
+    {"id": 6, "text": "Bought groceries, need to remember to meal prep on Sunday instead of ordering food again."},
+    {"id": 7, "text": "Good study session in the library today, phone was in my bag the whole time."},
+    {"id": 8, "text": "Team standup - Josh is exploring XR glasses, Georgia is looking at ESP32 boards."},
+]
+
+# Real semantic embedding model - runs entirely on-device, no API calls.
+model = SentenceTransformer("all-MiniLM-L6-v2")
+vector_size = model.get_sentence_embedding_dimension()
+
+texts = [n["text"] for n in notes]
+vectors = model.encode(texts, normalize_embeddings=True)
+
+client = QdrantClient(path="./nova_vector_db")
+collection = "nova_notes"
+if client.collection_exists(collection):
+    client.delete_collection(collection)
+client.create_collection(collection_name=collection, vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE))
+client.upsert(collection_name=collection, points=[PointStruct(id=n["id"], vector=vec.tolist(), payload={"text": n["text"]}) for n, vec in zip(notes, vectors)])
+print(f"Indexed {len(notes)} notes into local vector DB\n")
+
+demo_queries = [
+    "distracted by my phone lately",
+    "something I need to finish for uni",
+    "exercise made me feel good",
+    "what's on the team's plate right now",
+]
+
+for query in demo_queries:
+    qv = model.encode(query, normalize_embeddings=True)
+    hits = client.query_points(collection_name=collection, query=qv.tolist(), limit=1).points
+    print(f'Query: "{query}"')
+    for hit in hits:
+        print(f"   [{hit.score:.3f}] {hit.payload['text']}")
+    print()
