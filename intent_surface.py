@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import time
 from dotenv import load_dotenv
+import langchain
 
 load_dotenv()
 
