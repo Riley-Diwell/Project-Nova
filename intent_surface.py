@@ -5,12 +5,13 @@ from google import genai
 from google.genai import types
 import numpy as np
 import pandas as pd
-import time
 from dotenv import load_dotenv
-import langchain
+import time
 
 load_dotenv()
 
+
+timestamp = time.localtime()
 decision_log = pd.DataFrame(columns=['Timestamp', 'Immediate context', 'Importance of immediate context', 'Behvaioural context', 'Importance of behavioural context', 'Physiological context', 'Importance of physiological context', 'User intent', 'Final decision', 'Future impacts'])
 print(decision_log)
 
@@ -35,52 +36,49 @@ def generate(user_input):
         system_instruction=[
             types.Part.from_text(text=
                                  
-"""You are the AI assistant for a new novel personal computing device that manages attention, autonomy and privacy. Please write with Australian English spelling. 
+f"""You are the AI assistant for a new novel personal computing device that manages attention, autonomy and privacy. Please write with Australian English spelling. Assume the timezone is Sydney Australian time. Assume location is unknown. 
 
 The user will ask for questions and information relating to oral functions on a mobile phone. Your job is to:
 - Determine the user’s intent. This is done through layers of information as seen below. 
 1. Immediate context. What app are they asking for? What task are they asking for? What time of day are they asking and where are they asking from?
 2. Behavioural information. (the users routines, past information and previous corrections)
 3. physiological signals (take inputs from electronic components If available that provide information about the user's posture, gaze and voice tone)
+
+
 - Determine if we have enough information to provide a response.
-    - If yes, determine the available UI component that best matches the user’s intent, and generate a brief JSON description of the response.
+    - If yes, provide a description of the context gathered, and generate a brief JSON description of the response.
     - If not, ask for additional information
 - Return a response in JSON with the following format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting):
 
-{
-    “intent”: “string: description of user intent”,
-    “UI”: “string: name of UI component”,
-    “rationale”: “string: why you chose this pattern”,
-    “data”: { object with structured data }
-}
+Record the Immediate context in the following JSON format: 
 
-You must also record a log of all decisions made and WHY, in the following JSON format:
-{
-"immediate context": "string description of immediate context",
-"importance of immediate context": "percentage weighting for immediate context in decision process",
-"behavioural information": "string description of behavioural information",
-"importance of behavioural information": "percentage weighting for behavioural information in decision process",
-"physiological signals": "string description of behavioural information",
-"importance of physiological signals": "percentage weighting for behavioural information in decision process",
-"user intent": “string: description of user intent”,
-"final decision made": "string description of final decision made",
-"future impacts": "string description of how this will impact future interactions"
-}
+{{
+'time': 'string: HH:MM AM/PM (derived from {timestamp})',
+'today': 'string: day dd month (derived from {timestamp})',
+'location': 'string: location, else N/A',
+'current events': 'string: current event in calendar, else N/A',
+'future events': 'string: events occuring before midnight today, else 'N/A'
+'prompt': 'string: 'prompt',
+'task': 'string: task requested by user',
+'application': 'string: application requested by user'
+}}
 
-## Available UI design patterns
-Important!! You may use only these UI components based on the user intent and the content to display. You must choose from these patterns for the UI property of your response:
+Record the behavioural context in the following JSON format: 
 
-### Quick Filter
-- A set of buttons that show category suggestions (e.g., “Nearby Restaurants,” “Historic Landmarks,” “Easy Walks”). Selecting a filter typically displays a card feed, list selector, or map.
-- User intent: Looking for high-level suggestions for the kind of activities to explore.
+{{
+'user routines at current time': 'string: description of previous user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {timestamp}), else if no data, N/A',
+'user routines at current day': 'string: description of previous user routines/prompts/behaviours experienced during day (day derived from {timestamp}), else if no data, N/A',
+'past information': 'string: description of any relevant past information, else N/A',
+'previous corrections': 'string: 'previous user corrections from similar prompts, else N/A'
+}}
 
-### Map
-- Interactive map displaying locations as pins. Selecting a pin opens a preview card with more details and actions.
-- User intent: Seeking nearby points of interest and spatial exploration
-
-### Card Feed
-- A list of visual cards to recommend destinations or events. Card types include restaurants, shops, events, and sights. Each card contains an image, short description, and action buttons (e.g., “Add” and “More info” ).
-- User intent: Discover and browse recommendations."""),
+Record the physiological context in the following JSON format: 
+{{
+'input type: 'string: text OR voice OR silent speech OR buttons OR no input (system predictive), else N/A',
+'input tone': 'string: make an educated guess if input type is text OR voice, neutral is a valid answer. else N/A'
+}}
+"""
+            )
         ],
     )
     
