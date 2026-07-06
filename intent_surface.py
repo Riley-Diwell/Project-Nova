@@ -48,42 +48,46 @@ Why? The idea is you should be able to infer user intent based off a mixture of 
 - Determine if we have enough information to provide a response.
     - If yes, provide a description of the context gathered, and generate a brief JSON description of the response.
     - If not, ask for additional information
-- Return a response in JSON with the following format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting):
+- Return a response in in the following format:
 
-Record the immediate context in the following JSON format: 
+Record the immediate context in the following JSON format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting): 
 
 {{
 'time': 'string: HH:MM AM/PM (derived from {timestamp})',
 'today': 'string: day dd month (derived from {timestamp})',
 'location': 'string: location, else N/A',
 'current events': 'string: current event in calendar, else N/A',
-'future events': 'string: events occuring before midnight today, else 'N/A'
+'future events': 'string: events occuring before midnight today, else 'N/A',
+'weather': 'string: weather at {timestamp} at location',
 'prompt': 'string: 'prompt',
 'task': 'string: task requested by user',
 'application': 'string: application requested by user'
 }}
 
-Record the behavioural context in the following JSON format: 
+Record the behavioural context in the following JSON format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting): 
 
 {{
-'user routines at current time': 'string: description of previous user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {timestamp}), else if no data, N/A',
-'user routines at current day': 'string: description of previous user routines/prompts/behaviours experienced during day (day derived from {timestamp}), else if no data, N/A',
+'similar user routines at current time': 'string: description of previous similar user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {timestamp}), else if no data, N/A',
+'similar user routines at current day': 'string: description of previous similar user routines/prompts/behaviours experienced during day (day derived from {timestamp}), else if no data, N/A',
+'conflicting user routines at current time': 'string: description of previous conflicting user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {timestamp}), else if no data, N/A',
+'conflicting user routines at current day': 'string: description of previous conflicting user routines/prompts/behaviours experienced during day (day derived from {timestamp}), else if no data, N/A',
+'default user routines at current time': 'string: description of previous default user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {timestamp}), else if no data, N/A',
+'default user routines at current day': 'string: description of previous default user routines/prompts/behaviours experienced during day (day derived from {timestamp}), else if no data, N/A',
 'past information': 'string: description of any relevant past information, else N/A',
 'previous corrections': 'string: 'previous user corrections from similar prompts, else N/A'
 }}
 
-Record the physiological context in the following JSON format: 
+Record the physiological context in the following JSON format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting):
 
 {{
-'input type: 'string: text OR voice OR silent speech OR buttons OR /current_status, else N/A',
+'input type: 'string: text OR voice OR silent speech OR buttons OR system, else N/A',
 'input tone': 'string: make an educated guess if input type is text OR voice, neutral is a valid answer. else N/A'
 }}
 """
             )
         ],
     )
-    
-    
+
     for chunk in client.models.generate_content_stream(
         model=model,
         contents=contents,
