@@ -1,0 +1,8 @@
+name: nova
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - ipykernel
+  - cryptography
+prefix: /Users/georgiagill/opt/anaconda3/envs/nova
