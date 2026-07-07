@@ -9,10 +9,8 @@ from google.genai import types
 from dotenv import load_dotenv
 import time
 import datetime
-
 import geocoder
 import requests
-
 
 # load environment where the API keys are stored
 load_dotenv()
@@ -27,7 +25,7 @@ def check_location():
     # https://stackoverflow.com/questions/24906833/how-to-access-current-location-of-any-user-using-python accessed 07/07/2026
     # https://medium.com/@asir9637/location-tracking-made-easy-python-and-gps-coordinates-7966fb6557c4 accessed 07/07/2026
     try: 
-        location = geocoder.ip('me') 
+        location = geocoder.ip('me') # debug: IP isn't necessarily accurate description of location. will need to work on this
         lat, long = location.latlng
         print(location, lat, long)
         return location, lat, long
@@ -144,11 +142,9 @@ Record the physiological context in the following JSON format (IMPORTANT: All re
         if text := chunk.text:
             print(text, end="")
 
-
 # main loop
 if __name__ == "__main__":
     print("Hello!")
     while True:
         user_input = input()
         generate(user_input)
-
