@@ -8,12 +8,34 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 import time
-import datetime
 import geocoder
 import requests
+import sqlite3
 
 # load environment where the API keys are stored
 load_dotenv()
+
+
+# define FSM states
+states = ['init', 'adaptive_interface', 'command_driven_interface', 'default']
+current_state = 'init'
+
+def change_state(user_input):
+    if user_input == '/reset':
+        current_state = 'init'
+        return current_state
+    elif user_input == '/user_override':
+        current_state = 'command_driven_interface'
+        return current_state
+    elif user_input == '/power_on':
+        current_state = 'default'
+        return current_state
+    elif user_input == '/current_status':
+        current_state = 'default'
+        return current_state
+    else:
+        current_state = 'adaptive_interface'
+        return current_state
 
 # define variables
 # time
@@ -46,7 +68,6 @@ def check_weather():
         owm_url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={long}&appid={openweathermap_api_key}"
         owm_response = requests.get(owm_url)
         owm_response_json = owm_response.json()
-        sunset_utc = datetime.datetime.fromtimestamp(owm_response_json["sys"]["sunset"])
         weather = {
             "temp": owm_response_json["main"]["temp"] - 273.15, # convert to celsius
             "description": owm_response_json["weather"][0]["description"],
@@ -56,9 +77,12 @@ def check_weather():
         weather = 'unknown'
     return weather
 
+# defining persistent memory with SQlite
+# https://pythonforthelab.com/blog/storing-data-with-sqlite/
+
 
 # define the AI function with the model, thinking level, API key and the system instruction
-def generate(user_input):
+def gather_context(user_input):
     client = genai.Client(
        api_key=os.environ.get("GEMINI_API_KEY")
     )
@@ -81,10 +105,13 @@ def generate(user_input):
                                  
 f"""You are the AI assistant for a new novel personal computing device that manages attention, autonomy and privacy. Please write with Australian English spelling. Assume the timezone is Sydney Australian time. 
 
-The user will ask for questions and information relating to oral functions on a mobile phone. Your job is to determine the user’s intent. This is done through layers of information as seen below. 
+The user will ask for questions and information relating to oral functions on a mobile phone. Your job is to gather context. This is done through layers of information as seen below. 
     1. Immediate context. What app are they asking for? What task are they asking for? What time of day are they asking and where are they asking from?
     2. Behavioural information. (the users routines, past information and previous corrections)
     3. physiological signals (take inputs from electronic components If available that provide information about the user's posture, gaze and voice tone)
+
+Why does this matter? 
+Your outputs will be fed into another LLM client that looks at the current context and infers intent. 
 
 If input = /current_status: 
 Your job is to return the following outputs. 
@@ -104,14 +131,104 @@ Record the immediate context in the following JSON format (IMPORTANT: All respon
 'location': 'string: {check_location()}',
 'current events': 'string: current event in calendar, else N/A',
 'future events': 'string: events occuring before midnight today, else 'N/A',
-'weather': 'string: temperature, description (derived from {check_weather()}). N/A is not an acceptable answer.',
+'weather': 'string: temperature, description (derived from {check_weather()}). If {check_location()} is unknown, weather should also be unknown. N/A is not an acceptable answer.',
 'prompt': 'string: 'prompt',
 'task': 'string: task requested by user',
 'application': 'string: application requested by user'
 }}
 
-Record the behavioural context in the following JSON format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting): 
+Record the physiological context in the following JSON format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting):
 
+{{
+'input type: 'string: text OR voice OR silent speech OR buttons OR system, else N/A',
+'input tone': 'string: make an educated guess if input type is text OR voice, neutral is a valid answer. else N/A',
+'heart rate':'int: data from external device, else N/A',
+'gaze': 'string: description of attentiveness using data from external device, else N/A',
+'posture': 'string: description of posture using data from external device, else N/A'
+}}
+
+
+"""
+            )
+        ],
+    )
+
+    for chunk in client.models.generate_content_stream(
+        model=model,
+        contents=contents,
+        config=generate_content_config,
+    ):
+        if text := chunk.text:
+            print(text, end="")
+
+
+def check_previous_behavioural_patterns(context):
+    client = genai.Client(
+       api_key=os.environ.get("GEMINI_API_KEY")
+    )
+
+    model = "gemini-3.1-flash-lite"
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(text=user_input),
+            ],
+        ),
+    ]
+    generate_content_config = types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(
+            thinking_level="MEDIUM",
+        ),
+        system_instruction=[
+            types.Part.from_text(text=
+                                 
+f"""You are the AI assistant for a new novel personal computing device that manages attention, autonomy and privacy. Please write with Australian English spelling. Assume the timezone is Sydney Australian time. 
+
+Inputs: 
+
+You will receive information about the immediate context and the physiological context of the user, recorded in the following JSON format. 
+
+{{
+'time': 'string: HH:MM AM/PM (derived from {time.localtime()})',
+'today': 'string: day dd month (derived from {time.localtime()})',
+'location': 'string: {check_location()}',
+'current events': 'string: current event in calendar, else N/A',
+'future events': 'string: events occuring before midnight today, else 'N/A',
+'weather': 'string: temperature, description (derived from {check_weather()}). If {check_location()} is unknown, weather should also be unknown. N/A is not an acceptable answer.',
+'prompt': 'string: 'prompt',
+'task': 'string: task requested by user',
+'application': 'string: application requested by user'
+}}
+
+{{
+'input type: 'string: text OR voice OR silent speech OR buttons OR system, else N/A',
+'input tone': 'string: make an educated guess if input type is text OR voice, neutral is a valid answer. else N/A',
+'heart rate':'int: data from external device, else N/A',
+'gaze': 'string: description of attentiveness using data from external device, else N/A',
+'posture': 'string: description of posture using data from external device, else N/A'
+}}
+
+Your job:
+- Query a relational database to infer information about the user's behavioural data. 
+
+The queries must inform the following JSON format. 
+Assume the relational database stores immediate context, behavioural context and physiological context all in key-value pairs, as shown. 
+You must target a particular key and ask what value it may have. 
+
+The relational databse will also return a confidence threshold relating to how relevant the returned result is. The confidence threshold will either be 'CONFIDENT', 'UNCERTAIN', or 'ABSTAIN'. 
+Prioritise using confident results, only use uncertain if there's nothing else available. Do not use abstain results. 
+
+Important note, if you cannot access any relevant data, please return N/A in all fields. 
+
+## Query patterns
+- For entries with a timestamp +- 30 minutes of {time.localtime()}, what are some examples of similar tasks?
+- For entries with a timestamp +- 30 minutes of {time.localtime()}, what are some examples of similar applications?
+- For entries with a timestamp +- 30 minutes of {time.localtime()}, what are some examples of conflicting tasks?
+- For entries with a timestamp +- 30 minutes of {time.localtime()}, what are some examples of conflicting applications?
+
+
+The output must contain the following information documented in the JSON format. No additional data may be communicated. 
 {{
 'similar user routines at current time': 'string: description of previous similar user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
 'similar user routines at current day': 'string: description of previous similar user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
@@ -121,13 +238,6 @@ Record the behavioural context in the following JSON format (IMPORTANT: All resp
 'default user routines at current day': 'string: description of previous default user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
 'past information': 'string: description of any relevant past information, else N/A',
 'previous corrections': 'string: 'previous user corrections from similar prompts, else N/A'
-}}
-
-Record the physiological context in the following JSON format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting):
-
-{{
-'input type: 'string: text OR voice OR silent speech OR buttons OR system, else N/A',
-'input tone': 'string: make an educated guess if input type is text OR voice, neutral is a valid answer. else N/A'
 }}
 """
             )
@@ -147,4 +257,26 @@ if __name__ == "__main__":
     print("Hello!")
     while True:
         user_input = input()
-        generate(user_input)
+        if user_input == "/reset":
+            print("Are you sure you want to permanently erase your data? You cannot undo this action.")
+        elif user_input == "/user_override":
+            print("You are switching to a command-driven interface.")
+        else:
+            context = gather_context(user_input)
+            check_previous_behavioural_patterns(context)
+
+
+"""
+Record the behavioural context in the following JSON format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting): 
+
+{{
+'similar user routines at current time': 'string: description of previous similar user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
+'similar user routines at current day': 'string: description of previous similar user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
+'conflicting user routines at current time': 'string: description of previous conflicting user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
+'conflicting user routines at current day': 'string: description of previous conflicting user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
+'default user routines at current time': 'string: description of previous default user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
+'default user routines at current day': 'string: description of previous default user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
+'past information': 'string: description of any relevant past information, else N/A',
+'previous corrections': 'string: 'previous user corrections from similar prompts, else N/A'
+}}
+"""
