@@ -27,7 +27,6 @@ class State:
         self.system_input = system_input,
         self.update_context = update_context
 
-
 # initialise state objects that indicate what inputs and outputs are necessary
 init = State('init', 1, 0, 1, 1, 1, 0)
 adaptive_interface = State('adaptive_interface', 1, 1, 1, 1, 0, 1)
