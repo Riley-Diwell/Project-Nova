@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 import time
 import geocoder
 import requests
-import sqlite3
 
 # load environment where the API keys are stored
 load_dotenv()
@@ -177,8 +176,6 @@ Record the physiological context in the following JSON format (IMPORTANT: All re
 'gaze': 'string: description of attentiveness using data from external device, else N/A',
 'posture': 'string: description of posture using data from external device, else N/A'
 }}
-
-
 """
             )
         ],
