@@ -13,7 +13,6 @@ notes = [
     {"id": 8, "text": "Team standup - Josh is exploring XR glasses, Georgia is looking at ESP32 boards."},
 ]
 
-# Real semantic embedding model - runs entirely on-device, no API calls.
 # model = SentenceTransformer("all-MiniLM-L6-v2")     # 384 dimensionality
 model = SentenceTransformer("BAAI/bge-large-en-v1.5")     # 384 dimensionality
 vector_size = model.get_sentence_embedding_dimension()
@@ -29,13 +28,7 @@ client.create_collection(collection_name=collection, vectors_config=VectorParams
 client.upsert(collection_name=collection, points=[PointStruct(id=n["id"], vector=vec.tolist(), payload={"text": n["text"]}) for n, vec in zip(notes, vectors)])
 print(f"Indexed {len(notes)} notes into local vector DB\n")
 
-# --- Confidence bands -------------------------------------------------------
-# Because embeddings are normalised and distance is cosine, scores are
-# comparable across queries, so fixed thresholds are meaningful. These values
-# are calibrated for bge-large-en-v1.5: unrelated pairs still score ~0.4-0.5
-# (embedding anisotropy), clearly relevant pairs score ~0.65+. Recalibrate if
-# you change models: run known relevant and irrelevant query/note pairs and
-# put the thresholds in the gap between the two score distributions.
+# confidence intervals
 CONFIDENT = 0.65   # >= this: trust the answer
 UNCERTAIN = 0.55   # between: show it, but flag it
                    # < UNCERTAIN: abstain ("I don't have a memory of that")
