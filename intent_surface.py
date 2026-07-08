@@ -17,24 +17,42 @@ load_dotenv()
 
 
 # define FSM states
-states = ['init', 'adaptive_interface', 'command_driven_interface', 'default']
-current_state = 'init'
+class State:
+    def __init__(self, name, immediate_context, behavioural_context, physiological_context, user_input, system_input, update_context):
+        self.name = name, # eg ['init', 'adaptive_interface', 'command_driven_interface', 'default']
+        # the following is binary yes no depending on what context and inputs it take
+        self.immediate_context = immediate_context,
+        self.behavioural_context = behavioural_context,
+        self.physiological_context = physiological_context,
+        self.user_input = user_input,
+        self.system_input = system_input,
+        self.update_context = update_context
+
+
+# initialise state objects that indicate what inputs and outputs are necessary
+init = State('init', 1, 0, 1, 1, 1, 0)
+adaptive_interface = State('adaptive_interface', 1, 1, 1, 1, 0, 1)
+command_driven_interface = State('command_driven_interface', 1, 0, 0, 0, 1, 1)
+default = State('default', 1, 1, 1, 0, 1, 0)
+
 
 def change_state(user_input):
     if user_input == '/reset':
-        current_state = 'init'
+        print("Are you sure you want to permanently erase your data? You cannot undo this action.")
+        current_state = init
         return current_state
     elif user_input == '/user_override':
-        current_state = 'command_driven_interface'
+        print("You are switching to a command-driven interface.")
+        current_state = command_driven_interface
         return current_state
     elif user_input == '/power_on':
-        current_state = 'default'
+        current_state = default
         return current_state
     elif user_input == '/current_status':
-        current_state = 'default'
+        current_state = default
         return current_state
     else:
-        current_state = 'adaptive_interface'
+        current_state = adaptive_interface
         return current_state
 
 # define variables
@@ -137,6 +155,19 @@ Record the immediate context in the following JSON format (IMPORTANT: All respon
 'application': 'string: application requested by user'
 }}
 
+Record the behavioural context in the following JSON format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting): 
+
+{{
+'similar user routines at current time': 'string: description of previous similar user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
+'similar user routines at current day': 'string: description of previous similar user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
+'conflicting user routines at current time': 'string: description of previous conflicting user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
+'conflicting user routines at current day': 'string: description of previous conflicting user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
+'default user routines at current time': 'string: description of previous default user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
+'default user routines at current day': 'string: description of previous default user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
+'past information': 'string: description of any relevant past information, else N/A',
+'previous corrections': 'string: 'previous user corrections from similar prompts, else N/A'
+}}
+
 Record the physiological context in the following JSON format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting):
 
 {{
@@ -162,121 +193,11 @@ Record the physiological context in the following JSON format (IMPORTANT: All re
             print(text, end="")
 
 
-def check_previous_behavioural_patterns(context):
-    client = genai.Client(
-       api_key=os.environ.get("GEMINI_API_KEY")
-    )
-
-    model = "gemini-3.1-flash-lite"
-    contents = [
-        types.Content(
-            role="user",
-            parts=[
-                types.Part.from_text(text=user_input),
-            ],
-        ),
-    ]
-    generate_content_config = types.GenerateContentConfig(
-        thinking_config=types.ThinkingConfig(
-            thinking_level="MEDIUM",
-        ),
-        system_instruction=[
-            types.Part.from_text(text=
-                                 
-f"""You are the AI assistant for a new novel personal computing device that manages attention, autonomy and privacy. Please write with Australian English spelling. Assume the timezone is Sydney Australian time. 
-
-Inputs: 
-
-You will receive information about the immediate context and the physiological context of the user, recorded in the following JSON format. 
-
-{{
-'time': 'string: HH:MM AM/PM (derived from {time.localtime()})',
-'today': 'string: day dd month (derived from {time.localtime()})',
-'location': 'string: {check_location()}',
-'current events': 'string: current event in calendar, else N/A',
-'future events': 'string: events occuring before midnight today, else 'N/A',
-'weather': 'string: temperature, description (derived from {check_weather()}). If {check_location()} is unknown, weather should also be unknown. N/A is not an acceptable answer.',
-'prompt': 'string: 'prompt',
-'task': 'string: task requested by user',
-'application': 'string: application requested by user'
-}}
-
-{{
-'input type: 'string: text OR voice OR silent speech OR buttons OR system, else N/A',
-'input tone': 'string: make an educated guess if input type is text OR voice, neutral is a valid answer. else N/A',
-'heart rate':'int: data from external device, else N/A',
-'gaze': 'string: description of attentiveness using data from external device, else N/A',
-'posture': 'string: description of posture using data from external device, else N/A'
-}}
-
-Your job:
-- Query a relational database to infer information about the user's behavioural data. 
-
-The queries must inform the following JSON format. 
-Assume the relational database stores immediate context, behavioural context and physiological context all in key-value pairs, as shown. 
-You must target a particular key and ask what value it may have. 
-
-The relational databse will also return a confidence threshold relating to how relevant the returned result is. The confidence threshold will either be 'CONFIDENT', 'UNCERTAIN', or 'ABSTAIN'. 
-Prioritise using confident results, only use uncertain if there's nothing else available. Do not use abstain results. 
-
-Important note, if you cannot access any relevant data, please return N/A in all fields. 
-
-## Query patterns
-- For entries with a timestamp +- 30 minutes of {time.localtime()}, what are some examples of similar tasks?
-- For entries with a timestamp +- 30 minutes of {time.localtime()}, what are some examples of similar applications?
-- For entries with a timestamp +- 30 minutes of {time.localtime()}, what are some examples of conflicting tasks?
-- For entries with a timestamp +- 30 minutes of {time.localtime()}, what are some examples of conflicting applications?
-
-
-The output must contain the following information documented in the JSON format. No additional data may be communicated. 
-{{
-'similar user routines at current time': 'string: description of previous similar user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
-'similar user routines at current day': 'string: description of previous similar user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
-'conflicting user routines at current time': 'string: description of previous conflicting user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
-'conflicting user routines at current day': 'string: description of previous conflicting user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
-'default user routines at current time': 'string: description of previous default user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
-'default user routines at current day': 'string: description of previous default user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
-'past information': 'string: description of any relevant past information, else N/A',
-'previous corrections': 'string: 'previous user corrections from similar prompts, else N/A'
-}}
-"""
-            )
-        ],
-    )
-
-    for chunk in client.models.generate_content_stream(
-        model=model,
-        contents=contents,
-        config=generate_content_config,
-    ):
-        if text := chunk.text:
-            print(text, end="")
-
 # main loop
 if __name__ == "__main__":
     print("Hello!")
     while True:
         user_input = input()
-        if user_input == "/reset":
-            print("Are you sure you want to permanently erase your data? You cannot undo this action.")
-        elif user_input == "/user_override":
-            print("You are switching to a command-driven interface.")
-        else:
-            context = gather_context(user_input)
-            check_previous_behavioural_patterns(context)
-
-
-"""
-Record the behavioural context in the following JSON format (IMPORTANT: All responses MUST be in this JSON format with no additional text or formatting): 
-
-{{
-'similar user routines at current time': 'string: description of previous similar user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
-'similar user routines at current day': 'string: description of previous similar user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
-'conflicting user routines at current time': 'string: description of previous conflicting user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
-'conflicting user routines at current day': 'string: description of previous conflicting user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
-'default user routines at current time': 'string: description of previous default user routines/prompts/behaviours experienced at HH:MM AM/PM (time derived from {time.localtime()}), else if no data, N/A',
-'default user routines at current day': 'string: description of previous default user routines/prompts/behaviours experienced during day (day derived from {time.localtime()}), else if no data, N/A',
-'past information': 'string: description of any relevant past information, else N/A',
-'previous corrections': 'string: 'previous user corrections from similar prompts, else N/A'
-}}
-"""
+        change_state(user_input)
+        gather_context(user_input)
+            
