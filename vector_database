@@ -14,13 +14,14 @@ notes = [
 ]
 
 # Real semantic embedding model - runs entirely on-device, no API calls.
-model = SentenceTransformer("all-MiniLM-L6-v2")
+# model = SentenceTransformer("all-MiniLM-L6-v2")     # 384 dimensionality
+model = SentenceTransformer("BAAI/bge-large-en-v1.5")     # 384 dimensionality
 vector_size = model.get_sentence_embedding_dimension()
 
 texts = [n["text"] for n in notes]
 vectors = model.encode(texts, normalize_embeddings=True)
 
-client = QdrantClient(path="./nova_vector_db")
+client = QdrantClient(path="./nova_vector_db_bge")
 collection = "nova_notes"
 if client.collection_exists(collection):
     client.delete_collection(collection)
@@ -28,17 +29,45 @@ client.create_collection(collection_name=collection, vectors_config=VectorParams
 client.upsert(collection_name=collection, points=[PointStruct(id=n["id"], vector=vec.tolist(), payload={"text": n["text"]}) for n, vec in zip(notes, vectors)])
 print(f"Indexed {len(notes)} notes into local vector DB\n")
 
+# --- Confidence bands -------------------------------------------------------
+# Because embeddings are normalised and distance is cosine, scores are
+# comparable across queries, so fixed thresholds are meaningful. These values
+# are calibrated for bge-large-en-v1.5: unrelated pairs still score ~0.4-0.5
+# (embedding anisotropy), clearly relevant pairs score ~0.65+. Recalibrate if
+# you change models: run known relevant and irrelevant query/note pairs and
+# put the thresholds in the gap between the two score distributions.
+CONFIDENT = 0.65   # >= this: trust the answer
+UNCERTAIN = 0.55   # between: show it, but flag it
+                   # < UNCERTAIN: abstain ("I don't have a memory of that")
+
+
+def confidence_label(score: float) -> str:
+    if score >= CONFIDENT:
+        return "CONFIDENT"
+    if score >= UNCERTAIN:
+        return "UNCERTAIN"
+    return "ABSTAIN"
+
+
 demo_queries = [
     "distracted by my phone lately",
     "something I need to finish for uni",
     "exercise made me feel good",
     "what's on the team's plate right now",
+    "how many bananas in banana bread"
 ]
 
 for query in demo_queries:
     qv = model.encode(query, normalize_embeddings=True)
-    hits = client.query_points(collection_name=collection, query=qv.tolist(), limit=1).points
+    hits = client.query_points(collection_name=collection, query=qv.tolist(), limit=3).points
     print(f'Query: "{query}"')
+
+    if not hits or confidence_label(hits[0].score) == "ABSTAIN":
+        print("   [ABSTAIN] I don't have a memory of that.")
+        print()
+        continue
+
     for hit in hits:
-        print(f"   [{hit.score:.3f}] {hit.payload['text']}")
+        label = confidence_label(hit.score)
+        print(f"   [{hit.score:.3f}] [{label}] {hit.payload['text']}")
     print()
