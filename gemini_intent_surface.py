@@ -137,7 +137,7 @@ class Behavioural_context(BaseModel):
 class Physiological_context(BaseModel):
     input_type : str = Field(description = "text OR voice OR silent speech OR buttons OR system")
     input_tone : str = Field(description = "make an educated guess if input type is text OR voice, neutral is a valid answer")
-    heart_rate : int = Field(description = "data from external device, N/A if there's no data")
+    heart_rate : str = Field(description = "data from external device, N/A if there's no data")
     gaze : str = Field(description = "description of attentiveness using data from external device, N/A if there's no data")
     posture : str = Field(description = "description of posture using data from external device, N/A if there's no data")
 
