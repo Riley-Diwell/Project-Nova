@@ -1,11 +1,10 @@
 
-# pip install google-genai
+# pip install python-dotenv geocoder requests
 
 
 # import necessary libraries
 import os
-from google import genai
-from google.genai import types
+import json
 from dotenv import load_dotenv
 import time
 import geocoder
@@ -79,47 +78,42 @@ location,lat,long = check_location()
 
 # weather https://max-coding.medium.com/create-a-weather-map-using-openweather-api-in-python-f048473ca6ae
 def check_weather():
-    if lat != None:
-        openweathermap_api_key = os.environ.get("openweathermap_api_key")
-        owm_url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={long}&appid={openweathermap_api_key}"
-        owm_response = requests.get(owm_url)
+    if lat == None:
+        return 'unknown'
+
+    openweathermap_api_key = os.environ.get("openweathermap_api_key")
+    if not openweathermap_api_key:
+        print("<[WARN] OpenWeatherMap - no api key found in environment (openweathermap_api_key)>")
+        return 'unknown'
+
+    owm_url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={long}&appid={openweathermap_api_key}"
+    try:
+        owm_response = requests.get(owm_url, timeout=10)
         owm_response_json = owm_response.json()
-        weather = {
-            "temp": owm_response_json["main"]["temp"] - 273.15, # convert to celsius
-            "description": owm_response_json["weather"][0]["description"],
-            "icon": owm_response_json["weather"][0]["icon"]
-        }
-    else:
-        weather = 'unknown'
-    return weather
+    except requests.RequestException as e:
+        print(f"<[WARN] OpenWeatherMap - request failed: {e}>")
+        return 'unknown'
+
+    # OWM signals errors with a non-200 'cod' and a 'message' instead of weather data
+    if owm_response.status_code != 200 or "main" not in owm_response_json:
+        print(f"<[WARN] OpenWeatherMap - {owm_response_json.get('cod', owm_response.status_code)}: "
+              f"{owm_response_json.get('message', 'unexpected response')}>")
+        return 'unknown'
+
+    return {
+        "temp": owm_response_json["main"]["temp"] - 273.15, # convert to celsius
+        "description": owm_response_json["weather"][0]["description"],
+        "icon": owm_response_json["weather"][0]["icon"]
+    }
 
 # defining persistent memory with SQlite
 # https://pythonforthelab.com/blog/storing-data-with-sqlite/
 
 
-# define the AI function with the model, thinking level, API key and the system instruction
 def gather_context(user_input):
-    client = genai.Client(
-       api_key=os.environ.get("GEMINI_API_KEY")
-    )
+    model = "qwen3.5:4b"                   
 
-    model = "gemini-3.1-flash-lite"
-    contents = [
-        types.Content(
-            role="user",
-            parts=[
-                types.Part.from_text(text=user_input),
-            ],
-        ),
-    ]
-    generate_content_config = types.GenerateContentConfig(
-        thinking_config=types.ThinkingConfig(
-            thinking_level="MEDIUM",
-        ),
-        system_instruction=[
-            types.Part.from_text(text=
-                                 
-f"""You are the AI assistant for a new novel personal computing device that manages attention, autonomy and privacy. Please write with Australian English spelling. Assume the timezone is Sydney Australian time. 
+    system_instruction = f"""You are the AI assistant for a new novel personal computing device that manages attention, autonomy and privacy. Please write with Australian English spelling. Assume the timezone is Sydney Australian time. 
 
 The user will ask for questions and information relating to oral functions on a mobile phone. Your job is to gather context. This is done through layers of information as seen below. 
     1. Immediate context. What app are they asking for? What task are they asking for? What time of day are they asking and where are they asking from?
@@ -176,18 +170,24 @@ Record the physiological context in the following JSON format (IMPORTANT: All re
 'posture': 'string: description of posture using data from external device, else N/A'
 }}
 """
-            )
-        ],
+
+    response = requests.post(
+        "http://localhost:11434/api/chat",
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_input},
+            ],
+            "think": False,
+            "stream": True,
+            "options": {"num_ctx": 16384},
+        },
+        stream=True,
     )
-
-    for chunk in client.models.generate_content_stream(
-        model=model,
-        contents=contents,
-        config=generate_content_config,
-    ):
-        if text := chunk.text:
+    for chunk in response.iter_lines():
+        if chunk and (text := json.loads(chunk).get("message", {}).get("content")):
             print(text, end="")
-
 
 # main loop
 if __name__ == "__main__":
