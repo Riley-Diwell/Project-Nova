@@ -1,10 +1,11 @@
 
-# pip install python-dotenv geocoder requests
+# pip install google-genai
 
 
 # import necessary libraries
 import os
-import json
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 import time
 import geocoder
@@ -44,33 +45,19 @@ location,lat,long = check_location()
 
 # weather https://max-coding.medium.com/create-a-weather-map-using-openweather-api-in-python-f048473ca6ae
 def check_weather():
-    if lat == None:
-        return 'unknown'
-
-    openweathermap_api_key = os.environ.get("openweathermap_api_key")
-    if not openweathermap_api_key:
-        print("<[WARN] OpenWeatherMap - no api key found in environment (openweathermap_api_key)>")
-        return 'unknown'
-
-    owm_url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={long}&appid={openweathermap_api_key}"
-    try:
-        owm_response = requests.get(owm_url, timeout=10)
+    if lat != None:
+        openweathermap_api_key = os.environ.get("openweathermap_api_key")
+        owm_url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={long}&appid={openweathermap_api_key}"
+        owm_response = requests.get(owm_url)
         owm_response_json = owm_response.json()
-    except requests.RequestException as e:
-        print(f"<[WARN] OpenWeatherMap - request failed: {e}>")
-        return 'unknown'
-
-    # OWM signals errors with a non-200 'cod' and a 'message' instead of weather data
-    if owm_response.status_code != 200 or "main" not in owm_response_json:
-        print(f"<[WARN] OpenWeatherMap - {owm_response_json.get('cod', owm_response.status_code)}: "
-              f"{owm_response_json.get('message', 'unexpected response')}>")
-        return 'unknown'
-
-    return {
-        "temp": owm_response_json["main"]["temp"] - 273.15, # convert to celsius
-        "description": owm_response_json["weather"][0]["description"],
-        "icon": owm_response_json["weather"][0]["icon"]
-    }
+        weather = {
+            "temp": owm_response_json["main"]["temp"] - 273.15, # convert to celsius
+            "description": owm_response_json["weather"][0]["description"],
+            "icon": owm_response_json["weather"][0]["icon"]
+        }
+    else:
+        weather = 'unknown'
+    return weather
 
 
 
@@ -93,6 +80,43 @@ command_driven_interface = State('command_driven_interface', 1, 0, 0, 0, 1, 1)
 default = State('default', 1, 1, 1, 0, 1, 0)
 
 # define schema structure
+# https://opper.ai/blog/schema-based-prompting
+
+'''
+{
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "immediate context": {
+                "type": "object",
+                "properties" : {
+                    "task" : {"type":"string"},
+                    "application" : {"type:application"}
+                }
+
+
+
+            }
+        }
+    },
+
+    "output_schema": {
+        "type": "object",
+        "properties": {
+            "immediate context": {
+                "type": "object",
+                "properties" : {
+                    "task" : {"type":"string"},
+                    "application" : {"type:string"},
+                    "prompt" : {"type":"string"}
+                }
+    }, "required" : ["task", "application", "prompt"],
+    "instructions": "Translate the input text to the target language.",
+        }
+    }
+}
+'''
+
 # https://ai.google.dev/gemini-api/docs/structured-output
 class Immediate_context(BaseModel):
     time : str = Field(description = f"HH:MM derived from {time.localtime()}")
@@ -113,7 +137,7 @@ class Behavioural_context(BaseModel):
 class Physiological_context(BaseModel):
     input_type : str = Field(description = "text OR voice OR silent speech OR buttons OR system")
     input_tone : str = Field(description = "make an educated guess if input type is text OR voice, neutral is a valid answer")
-    heart_rate : int = Field(description = "data from external device, N/A if there's no data")
+    heart_rate : str = Field(description = "data from external device, N/A if there's no data")
     gaze : str = Field(description = "description of attentiveness using data from external device, N/A if there's no data")
     posture : str = Field(description = "description of posture using data from external device, N/A if there's no data")
 
@@ -142,14 +166,35 @@ def change_state(user_input):
         current_state = adaptive_interface
         return current_state
 
+
+
 # defining persistent memory with SQlite
 # https://pythonforthelab.com/blog/storing-data-with-sqlite/
 
 
+# define the AI function with the model, thinking level, API key and the system instruction
 def gather_context(user_input):
-    model = "qwen3.5:4b"                   
+    client = genai.Client(
+       api_key=os.environ.get("GEMINI_API_KEY")
+    )
 
-    system_instruction = f"""You are the AI assistant for a new novel personal computing device that manages attention, autonomy and privacy. Please write with Australian English spelling. Assume the timezone is Sydney Australian time. 
+    model = "gemini-3.1-flash-lite"
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(text=user_input),
+            ],
+        ),
+    ]
+    generate_content_config = types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(
+            thinking_level="MEDIUM",
+        ),
+        system_instruction=[
+            types.Part.from_text(text=
+                                 
+f"""You are the AI assistant for a new novel personal computing device that manages attention, autonomy and privacy. Please write with Australian English spelling. Assume the timezone is Sydney Australian time. 
 
 The user will ask for questions and information relating to oral functions on a mobile phone. Your job is to gather context. This is done through layers of information as seen below. 
     1. Immediate context. What app are they asking for? What task are they asking for? What time of day are they asking and where are they asking from?
@@ -162,32 +207,26 @@ Your outputs will be fed into another LLM client that looks at the current conte
 - Determine if we have enough information to provide a response.
     - If yes, provide a description of the context gathered, and generate a brief JSON description of the response.
     - If not, ask for additional information
-- Return a response as defined by the response schema. Do not output anything else. 
+- Return a response as defined by the response schema
 
 Rules:
 - Never make up information. If you don't know information, provide an N/A response. 
 - Write with Australian English spelling
 
 """
+            )
+        ],
+        response_mime_type = "application/json",
+        response_schema=Context
 
-    response = requests.post(
-        #"http://localhost:11434/api/chat",
-        "http://100.72.108.91:11434/api/chat",
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": user_input},
-            ],
-            "format":Context.model_json_schema(),
-            "think": False,
-            "stream": True,
-            "options": {"num_ctx": 16384},
-        },
-        stream=True,
     )
-    for chunk in response.iter_lines():
-        if chunk and (text := json.loads(chunk).get("message", {}).get("content")):
+
+    for chunk in client.models.generate_content_stream(
+        model=model,
+        contents=contents,
+        config=generate_content_config,
+    ):
+        if text := chunk.text:
             print(text, end="")
 
 # main loop
