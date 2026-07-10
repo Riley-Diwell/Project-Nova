@@ -1,0 +1,135 @@
+===============================================================================
+ SILENT SPEECH INTERPRETER - ATTRIBUTIONS, SOFTWARE, AND THIRD-PARTY CREDITS
+===============================================================================
+Last updated: 2026-07-10
+
+This file records (1) the software/libraries the project runs on, (2) any
+third-party code, models, or constants used, and (3) external work that
+inspired the design. It is intended for academic-integrity / capstone
+disclosure.
+
+Summary: All Python source in src/ was written originally for this project.
+No source code was copied from other repositories. The project DEPENDS ON
+open-source libraries (via pip) and uses ONE pretrained model asset from
+Google (MediaPipe FaceLandmarker). Details below.
+
+
+-------------------------------------------------------------------------------
+1. RUNTIME ENVIRONMENT
+-------------------------------------------------------------------------------
+- OS:            Windows 11
+- Language:      Python 3.12.10
+- Environment:   local virtual environment (.venv); all processing runs
+                 on-device / offline (no cloud services, no accounts, no user
+                 data transmitted).
+
+
+-------------------------------------------------------------------------------
+2. THIRD-PARTY LIBRARIES (open-source, installed via pip)
+-------------------------------------------------------------------------------
+Library            Version      License        Used for
+-----------------  -----------  -------------  ----------------------------------
+mediapipe          0.10.35      Apache-2.0     Face/lip landmark detection
+opencv-python      5.0.0.93     Apache-2.0     Webcam capture, image ops, GUI
+numpy              2.5.1        BSD-3-Clause   Arrays / numerical math
+scikit-learn       1.9.0        BSD-3-Clause   PCA + SVM decoder, evaluation
+scipy              1.18.0       BSD-3-Clause   (scikit-learn dependency)
+joblib             1.5.3        BSD-3-Clause   Saving/loading the trained model
+cmudict            1.1.3        (see sec. 4)   CMU Pronouncing Dictionary access
+vosk               0.3.45       Apache-2.0     Offline speech-to-text (alt ASR)
+faster-whisper     1.2.1        MIT            Offline speech-to-text (auto-labeler)
+torch (CPU)        2.13.0       BSD-3-Clause   Phoneme CTC model (CNN+BiGRU+CTC)
+h5py               3.16.0       BSD-3-Clause   HDF5 single-file dataset store
+matplotlib         3.11.0       PSF/BSD        (pulled in by mediapipe)
+sounddevice        0.5.5        MIT            (pulled in by mediapipe)
+
+A complete, pinned dependency list is in requirements.txt.
+
+
+-------------------------------------------------------------------------------
+3. THIRD-PARTY PRETRAINED MODEL ASSET
+-------------------------------------------------------------------------------
+- File:     models/face_landmarker.task  (~3.7 MB)
+- Source:   Google MediaPipe, downloaded once from the public CDN:
+            https://storage.googleapis.com/mediapipe-models/face_landmarker/
+            face_landmarker/float16/1/face_landmarker.task
+- License:  Apache-2.0 (MediaPipe model). No account or login required.
+- Use:      On-device inference of 478 facial landmarks per frame, from which
+            this project extracts the 40 lip landmarks. Runs fully offline.
+
+- File:     models/vosk-model-small-en-us-0.15/  (~40 MB)
+- Source:   Alpha Cephei / Vosk, https://alphacephei.com/vosk/models (public,
+            no account).  License: Apache-2.0.
+- Use:      Offline speech-to-text with word timestamps (alternate ASR backend).
+
+- Model:    Whisper "base.en" (via faster-whisper / CTranslate2)
+- Source:   OpenAI Whisper weights, auto-downloaded once from the Hugging Face
+            Hub (public, no account). License: MIT.
+- Use:      Offline speech-to-text used to AUTO-LABEL training data when the
+            user speaks a word out loud. Primary ASR backend. Runs on CPU.
+
+
+-------------------------------------------------------------------------------
+4. THIRD-PARTY CONSTANTS & DATA
+-------------------------------------------------------------------------------
+- Lip landmark index lists (OUTER_LIP / INNER_LIP in src/signal_source.py and
+  src/lip_landmarks.py) are the canonical MediaPipe FaceMesh 468/478-point
+  topology indices for the lip contour. These are published constants that
+  identify which landmark numbers correspond to the lips; they are data, not
+  copied source code.
+
+- CMU Pronouncing Dictionary (CMUdict): ~126k English word -> ARPAbet phoneme
+  pronunciations, used in src/phoneme_lexicon.py for phoneme<->word lookup.
+  The CMUdict DATA is under a permissive BSD-2-Clause-style license from
+  Carnegie Mellon University and is redistributable (incl. commercially).
+  Accessed here via the `cmudict` pip package (v1.1.3), which bundles the data
+  and works offline. NOTE: verify the pip wrapper package's own license before
+  redistributing; the raw CMUdict data file can be vendored directly instead if
+  a permissive-only dependency chain is required.
+    Source: http://www.speech.cs.cmu.edu/cgi-bin/cmudict
+
+
+-------------------------------------------------------------------------------
+5. ALGORITHMS IMPLEMENTED FROM STANDARD REFERENCES (original code)
+-------------------------------------------------------------------------------
+- Kalman filter (src/kalman.py): NumPy implementation of the standard
+  linear Kalman filter with a per-channel constant-velocity (white-noise
+  acceleration) model.
+- Decoder (src/decoder.py): pipeline built on scikit-learn primitives
+  (StandardScaler + PCA + SVM) with velocity-augmented, length-normalized
+  trajectory features. Original composition.
+
+
+-------------------------------------------------------------------------------
+6. CONCEPTUAL REFERENCES / DESIGN INSPIRATION (read, NOT copied)
+-------------------------------------------------------------------------------
+These informed the architecture; no code or weights from them are in this repo.
+They are recorded for the later EMG phase and for the written report.
+
+- VALLR: Visual ASR Language Model for Lip Reading (ICCV 2025) - phoneme-then-
+  LLM decoding architecture. arXiv:2503.21408
+- D. Gaddy, "Digital Voicing of Silent Speech" (EMNLP 2020) and "An Improved
+  Model for Voicing Silent Speech" (ACL 2021). Code + EMG dataset + weights:
+    https://github.com/dgaddy/silent_speech
+    https://zenodo.org/records/4064409  (facial EMG dataset)
+    https://doi.org/10.5281/zenodo.6747411  (pretrained models)
+  Intended as the reference architecture/data for the future EMG modality.
+- "Can LLMs Understand Unvoiced Speech?" (2025) - arXiv:2506.00304
+- "Silent Speech Interfaces in the Era of LLMs" survey (2026) - arXiv:2603.11877
+- Auto-AVSR (mpc001) and AV-HuBERT (Meta) - surveyed as pretrained lip-reading
+  options; NOT used in this codebase.
+
+
+-------------------------------------------------------------------------------
+7. ORIGINAL CODE
+-------------------------------------------------------------------------------
+  camera.py           webcam open/backend helper
+  list_cameras.py     camera probe / diagnostics
+  lip_landmarks.py    live lip-landmark tracker
+  signal_source.py    modality-agnostic SignalSource interface + WebcamLipSource
+  kalman.py           Kalman smoother (see section 5)
+  record_session.py   labeled data recorder (manual pacing + redo)
+  audit_data.py       dataset quality audit
+  decoder.py          feature extraction + PCA/SVM decoder + evaluation
+  demo_live.py        live demo with human-in-the-loop reinforcement
+===============================================================================
