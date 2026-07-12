@@ -117,11 +117,27 @@ default = State('default', 1, 1, 1, 0, 1, 0)
 }
 '''
 
+# consider where I'm getting the tools - what already exists?
+# can i host these tools on a server somewhere? create http request?
+# check location() points to a server with all of our tools on it
+# you can give pydantic all of the tools and it decides what to use --> i dont have to statically define it in different rows
+# this is where the observe, think, act comes in --> it does this until it hits a stop condition
+# anthropic has a framework that exposes all tools over a server and they all give the same schema of response
+# request a service with a known schema 
+# what protocols am I using? --> retrieve relavent context. MCP
+# action: conpnect MCP servers to this 
+# Jay is running a 4-bit model
+# consider quantisation 
+# this is the restriction of small local AI
+# qwen still beats the original ChatGPT --> we need to focus on very specific instructions --> agentic harness
+# benchmark against claude --> 30 tokens per second output
+# look at google standards 
+
 # https://ai.google.dev/gemini-api/docs/structured-output
 class Immediate_context(BaseModel):
     time : str = Field(description = f"HH:MM derived from {time.localtime()}")
     day : str = Field(description = f"Day of the week, DD Month derived from {timestamp}")
-    location : str = Field(description = f"location derived from {check_location()}")
+    location : str = Field(description = f"location derived from {check_location()}") # manual explicit statement of the tool
     current_events : str = Field(description = "current events derived from calendar, N/A if there's no data")
     future_events : str = Field(description = "events occuring before midnight today, N/A if there's no data")
     weather : str = Field(description = f"temperature, description (derived from {check_weather()})")
@@ -237,3 +253,10 @@ if __name__ == "__main__":
         current_state = change_state(user_input)
         print(f"The current state is {current_state}")
         gather_context(user_input)
+
+# 2022 reAct paper
+# observe, think, act
+#  these can be nested/abstracted
+# I have done this 
+# know the state --> make a state estimate , get relavent context to update the state
+# encouragement: where do behavioural and psychological things can come from
