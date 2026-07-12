@@ -72,8 +72,6 @@ def check_weather():
         "icon": owm_response_json["weather"][0]["icon"]
     }
 
-
-
 # define FSM states
 class State:
     def __init__(self, name, immediate_context, behavioural_context, physiological_context, user_input, system_input, update_context):
@@ -186,9 +184,14 @@ Rules:
         },
         stream=True,
     )
+    buffer = ""
     for chunk in response.iter_lines():
         if chunk and (text := json.loads(chunk).get("message", {}).get("content")):
             print(text, end="")
+            buffer += text
+
+    result = Context.model_validate_json(buffer)
+    return result        
 
 # main loop
 if __name__ == "__main__":
@@ -196,5 +199,5 @@ if __name__ == "__main__":
     while True:
         user_input = input()
         current_state = change_state(user_input)
-        print(f"The current state is {current_state}")
+        print(f"The current state is {current_state.name}")
         gather_context(user_input)
