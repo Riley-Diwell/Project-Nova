@@ -5,3 +5,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+silent_speech/.venv
+silent_speech/run_demo.sh
+silent_speech/snapshots/
+**/__pycache__/
