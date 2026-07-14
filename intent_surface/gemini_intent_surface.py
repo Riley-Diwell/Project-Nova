@@ -19,8 +19,6 @@ import asyncio
 load_dotenv()
 
 # mcp connection
-#base_url = "http://localhost:8000/api"
-#mcp_path = "/mcp"
 mcp_url = "http://localhost:8000/mcp"
 
 system_prompt =    """You are the AI assistant for a new novel personal computing device that manages attention, autonomy and privacy. Please write with Australian English spelling. Assume the timezone is Sydney Australian time. 
@@ -28,7 +26,7 @@ system_prompt =    """You are the AI assistant for a new novel personal computin
 The user will ask for questions and information relating to oral functions on a mobile phone. Your job is to gather context. This is done through layers of information as seen below. 
     1. Immediate context. What app are they asking for? What task are they asking for? What time of day are they asking and where are they asking from?
     2. Behavioural information. (the users routines, past information and previous corrections)
-    3. physiological signals (take inputs from electronic components If available that provide information about the user's posture, gaze and voice tone)
+    3. Physiological signals (take inputs from electronic components If available that provide information about the user's posture, gaze and voice tone)
 
 Why does this matter? 
 Your outputs will be fed into another LLM client that looks at the current context and infers intent. 
@@ -62,53 +60,11 @@ adaptive_interface = State('adaptive_interface', 1, 1, 1, 1, 0, 1)
 command_driven_interface = State('command_driven_interface', 1, 0, 0, 0, 1, 1)
 default = State('default', 1, 1, 1, 0, 1, 0)
 
-# define schema structure
-# https://opper.ai/blog/schema-based-prompting
-
-'''
-{
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "immediate context": {
-                "type": "object",
-                "properties" : {
-                    "task" : {"type":"string"},
-                    "application" : {"type:application"}
-                }
 
 
-
-            }
-        }
-    },
-
-    "output_schema": {
-        "type": "object",
-        "properties": {
-            "immediate context": {
-                "type": "object",
-                "properties" : {
-                    "task" : {"type":"string"},
-                    "application" : {"type:string"},
-                    "prompt" : {"type":"string"}
-                }
-    }, "required" : ["task", "application", "prompt"],
-    "instructions": "Translate the input text to the target language.",
-        }
-    }
-}
-'''
-
-# consider where I'm getting the tools - what already exists?
-# can i host these tools on a server somewhere? create http request?
-# check location() points to a server with all of our tools on it
-# you can give pydantic all of the tools and it decides what to use --> i dont have to statically define it in different rows
-# this is where the observe, think, act comes in --> it does this until it hits a stop condition
 # anthropic has a framework that exposes all tools over a server and they all give the same schema of response
 # request a service with a known schema 
 # what protocols am I using? --> retrieve relavent context. MCP
-# action: conpnect MCP servers to this 
 # Jay is running a 4-bit model
 # consider quantisation 
 # this is the restriction of small local AI
@@ -165,13 +121,11 @@ def change_state(user_input):
         current_state = adaptive_interface
         return current_state
 
-
-
 # defining persistent memory with SQlite
 # https://pythonforthelab.com/blog/storing-data-with-sqlite/
 
 
-# define the AI function with the model, thinking level, API key and the system instruction
+"""# define the AI function with the model, thinking level, API key and the system instruction
 mcp_client = Client(mcp_url)
 async def gather_context(user_input, current_state):
     client = genai.Client(
@@ -200,6 +154,113 @@ async def gather_context(user_input, current_state):
             
         )
     )
+"""
+
+# ------- add this helper above gather_context -------
+def clean_schema(schema):
+    """Strip JSON Schema fields Gemini's function-calling API rejects."""
+    if not isinstance(schema, dict):
+        return schema
+    unsupported = {"additionalProperties", "$schema", "$defs", "default",
+                   "title", "$id", "$ref"}
+    cleaned = {}
+    for k, v in schema.items():
+        if k in unsupported:
+            continue
+        if isinstance(v, dict):
+            cleaned[k] = clean_schema(v)
+        elif isinstance(v, list):
+            cleaned[k] = [clean_schema(x) if isinstance(x, dict) else x for x in v]
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
+# ------- module-level clients (create once, reuse) -------
+mcp_client = Client(mcp_url)
+gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+
+# ------- the new gather_context -------
+async def gather_context(user_input, current_state):
+    # 1. Get MCP tools and convert them to Gemini function declarations ourselves
+    tool_list = await mcp_client.list_tools()
+    gemini_tools = types.Tool(function_declarations=[
+        {
+            "name": t.name,
+            "description": t.description,
+            "parameters": clean_schema(t.inputSchema),
+        }
+        for t in tool_list
+    ])
+
+    contents = [types.Content(role="user", parts=[types.Part(text=user_input)])]
+
+    # 2. Observe / think / act loop
+    while True:
+        response = await gemini_client.aio.models.generate_content(
+            model="gemini-3.1-flash-lite",     # start with the model from the docs
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                tools=[gemini_tools],       # <-- our cleaned tools, NOT mcp_client.session
+            ),
+        )
+
+        # Add Gemini's turn to the conversation
+        contents.append(response.candidates[0].content)
+
+        # Find any tool calls Gemini asked for this turn
+        function_calls = [
+            p.function_call
+            for p in response.candidates[0].content.parts
+            if p.function_call
+        ]
+
+        if not function_calls:
+            break  # no more tools requested; we're done
+
+        # 3. Execute each tool via MCP, feed results back
+        tool_results = []
+        for fc in function_calls:
+            print(f"  → calling {fc.name}({dict(fc.args)})")
+            result = await mcp_client.call_tool(fc.name, dict(fc.args))
+            text = result.content[0].text if result.content else ""
+            tool_results.append(
+                types.Part.from_function_response(
+                    name=fc.name,
+                    response={"result": text},
+                )
+            )
+        contents.append(types.Content(role="user", parts=tool_results))
+
+    gathered_info = response.text
+
+    shape_prompt = (
+        f"The user asked: {user_input!r}\n\n"
+        f"You gathered this context:\n{response.text}\n\n"
+        f"Fill out the Context schema based on this information. "
+        f"Use 'N/A' for any field where data wasn't gathered."
+    )
+
+
+
+    # === Stage 2: shape the free-text answer into a Context object ===
+    # No tools, no MCP session — just structured output.
+
+
+    shaped = await gemini_client.aio.models.generate_content(
+        model="gemini-3.1-flash-lite",
+        contents=shape_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction="You reshape gathered context into a structured schema. "
+                               "Australian English. Never invent data — use N/A when missing.",
+            response_mime_type="application/json",
+            response_schema=Context,
+        ),
+    )
+
+    return shaped.parsed
 
 async def main():
     print("Hello!")
@@ -213,15 +274,8 @@ async def main():
             print(f"The current state is {current_state.name}")
 
             context = await gather_context(user_input, current_state) # wait until you get context
-            print(context.model_dump_json(indent=2))
+            print(context)
 
 # main loop
 if __name__ == "__main__":
     asyncio.run(main())
-
-# 2022 reAct paper
-# observe, think, act
-#  these can be nested/abstracted
-# I have done this 
-# know the state --> make a state estimate , get relavent context to update the state
-# encouragement: where do behavioural and psychological things can come from
