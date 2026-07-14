@@ -10,6 +10,7 @@ import asyncio
 mcp = FastMCP("Context Server")
 
 # create tools
+
 # immediate context tools
 @mcp.tool(tags={"immediate"})
 async def get_time() -> dict:
