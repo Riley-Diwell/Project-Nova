@@ -61,17 +61,6 @@ command_driven_interface = State('command_driven_interface', 1, 0, 0, 0, 1, 1)
 default = State('default', 1, 1, 1, 0, 1, 0)
 
 
-
-# anthropic has a framework that exposes all tools over a server and they all give the same schema of response
-# request a service with a known schema 
-# what protocols am I using? --> retrieve relavent context. MCP
-# Jay is running a 4-bit model
-# consider quantisation 
-# this is the restriction of small local AI
-# qwen still beats the original ChatGPT --> we need to focus on very specific instructions --> agentic harness
-# benchmark against claude --> 30 tokens per second output
-# look at google standards 
-
 # https://ai.google.dev/gemini-api/docs/structured-output
 class Immediate_context(BaseModel):
     time : str = Field(description = f"Current local time")
@@ -181,17 +170,41 @@ mcp_client = Client(mcp_url)
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 
+def allowed_tags(state):
+    tags = set()
+    if state.immediate_context==1:     
+        tags.add("immediate")
+    if state.behavioural_context==1:   
+        tags.add("behavioural")
+    if state.physiological_context==1: 
+        tags.add("physiological")
+    return tags
+
+def get_tags(t):
+    meta = getattr(t, "meta", None) or {}
+    return set(meta.get("fastmcp", {}).get("tags", []))
+
+
+
 # ------- the new gather_context -------
 async def gather_context(user_input, current_state):
     # 1. Get MCP tools and convert them to Gemini function declarations ourselves
     tool_list = await mcp_client.list_tools()
+    tags = allowed_tags(current_state)
+    filtered = [t for t in tool_list if tags & get_tags(t)]
+
+    if not filtered:
+        print(f"WARNING: no tools matched state {current_state.name} "
+        f"(available: {[t.name for t in tool_list]})")
+        filtered = tool_list
+
     gemini_tools = types.Tool(function_declarations=[
         {
             "name": t.name,
             "description": t.description,
             "parameters": clean_schema(t.inputSchema),
         }
-        for t in tool_list
+        for t in filtered
     ])
 
     contents = [types.Content(role="user", parts=[types.Part(text=user_input)])]
@@ -204,6 +217,7 @@ async def gather_context(user_input, current_state):
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 tools=[gemini_tools],       # <-- our cleaned tools, NOT mcp_client.session
+                thinking_config=types.ThinkingConfig(thinking_level="MEDIUM")
             ),
         )
 
@@ -224,7 +238,7 @@ async def gather_context(user_input, current_state):
         tool_results = []
         for fc in function_calls:
             print(f"  → calling {fc.name}({dict(fc.args)})")
-            result = await mcp_client.call_tool(fc.name, dict(fc.args))
+            result = await mcp_client.call_tool_mcp(fc.name, dict(fc.args))
             text = result.content[0].text if result.content else ""
             tool_results.append(
                 types.Part.from_function_response(
@@ -243,11 +257,8 @@ async def gather_context(user_input, current_state):
         f"Use 'N/A' for any field where data wasn't gathered."
     )
 
-
-
     # === Stage 2: shape the free-text answer into a Context object ===
     # No tools, no MCP session — just structured output.
-
 
     shaped = await gemini_client.aio.models.generate_content(
         model="gemini-3.1-flash-lite",
@@ -279,3 +290,5 @@ async def main():
 # main loop
 if __name__ == "__main__":
     asyncio.run(main())
+
+# mcp server experiences reliability issues --> for example sometimes it just decides to not call get time, get location etc and just makes up an (incorrect) time, location etc
