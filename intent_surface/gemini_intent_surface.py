@@ -7,16 +7,16 @@ import os
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-import time
 
 from pydantic import BaseModel, Field
-from typing import List, Optional
 
 from fastmcp import Client
 import asyncio
 
 # load environment where the API keys are stored
 load_dotenv()
+
+
 
 # mcp connection
 mcp_url = "http://localhost:8000/mcp"
@@ -27,6 +27,12 @@ The user will ask for questions and information relating to oral functions on a 
     1. Immediate context. What app are they asking for? What task are they asking for? What time of day are they asking and where are they asking from?
     2. Behavioural information. (the users routines, past information and previous corrections)
     3. Physiological signals (take inputs from electronic components If available that provide information about the user's posture, gaze and voice tone)
+
+How do you do your job?
+    1. Identify what relevant contextual layer you must gather. This is done based off state. 
+    2. Call tools relating to both relevant context layer and also the user prompt. Do not hallcuinate information. If there is not a tool for a task, 
+    mark the output as N/A. Do not call tools that are not relevant to the task. 
+    3. Repeat this process until all relevant context is gathered.     
 
 Why does this matter? 
 Your outputs will be fed into another LLM client that looks at the current context and infers intent. 
@@ -74,6 +80,7 @@ class Immediate_context(BaseModel):
     application : str = Field(description=f"application requested by user, derived from the user_input")
 
 class Behavioural_context(BaseModel):
+    user_persona : str = Field(description = "A small statemnent that describes the user's core habits, commitments and personality traits")
     similar_routines : str = Field(description = "description of previous similar user routines/prompts/behaviours experienced at a similar time and day, N/A if there's no data")
     conflicting_routines : str = Field(description = "description of previous similar user routines/prompts/behaviours experienced at a similar time and day, N/A if there's no data")
     previous_corrections : str = Field(description = "previous user corrections from similar prompts, tasks or applications, N/A if there's no data")
@@ -113,38 +120,6 @@ def change_state(user_input):
 # defining persistent memory with SQlite
 # https://pythonforthelab.com/blog/storing-data-with-sqlite/
 
-
-"""# define the AI function with the model, thinking level, API key and the system instruction
-mcp_client = Client(mcp_url)
-async def gather_context(user_input, current_state):
-    client = genai.Client(
-       api_key=os.environ.get("GEMINI_API_KEY")
-    )
-
-    model = "gemini-3.1-flash-lite"
-
-    contents = [
-        types.Content(
-            role="user",
-            parts=[
-                types.Part.from_text(text=user_input),
-            ],
-        ),
-    ]
-    response = await client.aio.models.generate_content( # changed from content stream to content, await
-        model=model,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-          #  response_mime_type = "application/json",
-           # response_schema=Context,
-            tools=[mcp_client.session],
-            thinking_config=types.ThinkingConfig(thinking_level="MEDIUM")
-            
-        )
-    )
-"""
-
 # ------- add this helper above gather_context -------
 def clean_schema(schema):
     """Strip JSON Schema fields Gemini's function-calling API rejects."""
@@ -165,7 +140,7 @@ def clean_schema(schema):
     return cleaned
 
 
-# ------- module-level clients (create once, reuse) -------
+# ------------- module-level clients ---------- -------
 mcp_client = Client(mcp_url)
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
@@ -197,6 +172,8 @@ async def gather_context(user_input, current_state):
         print(f"WARNING: no tools matched state {current_state.name} "
         f"(available: {[t.name for t in tool_list]})")
         filtered = tool_list
+    print(f"[state={current_state.name}] sending {len(filtered)}/{len(tool_list)} tools: "
+      f"{[t.name for t in filtered]}")
 
     gemini_tools = types.Tool(function_declarations=[
         {
@@ -216,8 +193,8 @@ async def gather_context(user_input, current_state):
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
-                tools=[gemini_tools],       # <-- our cleaned tools, NOT mcp_client.session
-                thinking_config=types.ThinkingConfig(thinking_level="MEDIUM")
+                tools=[gemini_tools]       # <-- our cleaned tools, NOT mcp_client.session
+                #thinking_config=types.ThinkingConfig(thinking_level="MEDIUM")
             ),
         )
 
