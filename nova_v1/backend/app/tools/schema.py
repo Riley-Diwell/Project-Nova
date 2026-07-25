@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 class ToolSchema(BaseModel):
     name: str = Field(
         ...,
-        pattern=r"^[a-zA-Z0-9_-]{1,128}$",
+        pattern=r"^[a-zA-Z0-9_-]{1,128}$",      # allowed characters
         description=(
             "Unique name used to call this tool"
         ),
@@ -44,8 +44,8 @@ class ToolSchema(BaseModel):
     )
     gain: float = Field(
         ...,
-        ge=0.0,
-        le=1.0,
+        ge=0.0,     # greater than or equal to
+        le=1.0,     # less than or equal to
         description=(
             "Current tool gain value between 0 and 1."
         ),
