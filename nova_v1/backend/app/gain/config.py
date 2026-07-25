@@ -1,5 +1,7 @@
 """
 Constants used for the controller gain.
+
+Called by controller_gain.py.
 """
 
 from typing import Final
