@@ -32,8 +32,24 @@ system_prompt = f"""{default_system_prompt}
 
 You will receive input in the format of {UserStateInput}. Your job is to look at the current user state and 
 make provide a one sentence summary of the current user state. 
-
-User state 
-"""
+""" # debug, need to do more research how to 'classify' user state
 
 # call ai client
+def generate_response(user_input):
+    response = client.responses.parse(
+        model=model,
+        instructions = system_prompt,
+        text_format = UserStateOutput,
+        input = user_input
+    )
+    print(response)
+    return response
+
+# test user_input_state
+
+
+if __name__ == '__main__': # debug, integrate
+    print("Hello!")
+    user_input = input()
+    generate_response(user_input)
+    

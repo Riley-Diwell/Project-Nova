@@ -1,4 +1,1 @@
-default_system_prompt = """
-Please write with Australian-English spelling and grammar. 
-"""
-
+default_system_prompt = "Please write with Australian-English spelling and grammar."
