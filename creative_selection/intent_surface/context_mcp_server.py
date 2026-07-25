@@ -1,3 +1,5 @@
+# pip install google-maps-places
+
 # import necessary libraries
 from fastmcp import FastMCP
 from datetime import datetime
@@ -5,6 +7,7 @@ import requests
 import geocoder
 import os
 import json
+from google.maps import places_v2
 import asyncio
 
 # create an MCP server
@@ -37,6 +40,11 @@ async def check_location() -> tuple:
         lat = None
         long = None
         return location, lat, long
+
+@mcp.tool(tags={"immediate"})
+async def check_location_type(lat:float, long:float) -> str:
+    """Based on latitude and longitude coordinates, it determines the type of location (eg residential, business, education etc).
+    Call when needing an understanding of how the type of location determines user behaviour."""
 
 
 @mcp.tool(tags={"immediate"})
