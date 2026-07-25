@@ -33,21 +33,32 @@ model = 'gpt-5.6-luna'
 system_prompt = f"""{default_system_prompt}
 
 You will receive input in the format of {UserStateInput}. Your job is to look at the current user state and 
-provide a one sentence summary of the current user state. 
+provide a one sentence summary of the current user state. Please also assign a confidence score on this answer. 
+Confidence should be based on how much data was available to you, and how believable the behaviour is. If you are
+making any inferences about the user's activities or mental state, the confidence should be lower. 
+
+Assign the user state to inferred_user_state and confidence to state_confidenc in the output schema. 
 """ # debug, need to do more research how to 'classify' user state
 
 # call ai client
-def generate_response(user_input):
+def estimate_user_state(user_input):
     response = client.responses.parse(
         model=model,
         instructions = system_prompt,
-        #text_format = UserStateOutput,
+        text_format = UserStateOutput,
         input = user_input
     )
-    print(response)
-    response.metadata['log']
+   # response = client.completions.create(
+    #    model=model,
+     #   instructions = system_prompt,
+        #text_format = UserStateOutput,
+      #  input = user_input
+    #)
+    print(response.output_text)
+    print("Response metadata:")
     return response
 
+'''
 def calculate_confidence_linear_probs(log_probs): # debug from https://gautam75.medium.com/unlocking-llm-confidence-through-logprobs-54b26ed1b48a accessed 25/07/2026
     linear_probs = np.round(np.exp(log_probs)*100,2)
     confidence = np.mean(linear_probs)
@@ -64,10 +75,27 @@ def calculate_log_probs(response):
 
     print("Joint prob:", np.round(joint_logprob/count , 2), "%")
 
+
+def generate_response(user_input):
+    return client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_input},
+        ]#,
+       # logprobs=True,
+       # top_logprobs=5,   # optional; lets you inspect alternatives
+    )
+
+def sequence_confidence(response):
+    tokens = response.choices[0].logprobs.content
+    logprobs = np.array([t.logprob for t in tokens])
+    # geometric mean of token probs = length-normalized joint probability
+    return float(np.exp(logprobs.mean()))   # 0-1, higher = more confident
+'''
 if __name__ == '__main__': # debug, integrate
     print("Hello!")
     while True:
         user_input = input()
-        response = generate_response(user_input)
-        calculate_log_probs(response)
-    
+        user_state = estimate_user_state(user_input)
+        #print(sequence_confidence)
