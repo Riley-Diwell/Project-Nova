@@ -1,5 +1,5 @@
 """
-event_schema.py - Section 5.2: State Estimator  (Georgia)
+schemas/event.py - Section 5.2: State Estimator  (Georgia)
 
 WHAT THIS FILE IS
 Defines schemas for events. 
@@ -68,8 +68,18 @@ class AccelerometerEvent(BaseEvent):
     type: Literal["accelerometer"] = "accelerometer"
     threshold: str  # theshold name, eg walking, running etc
 
+class ScreenEvent(BaseEvent):
+    """
+    This event is triggered when the status of the phone screen changes. Statuses could be:
+    - on
+    - off
+    - unknown
+    """
+    type: Literal["screen"] = "screen"
+    status: str
 
 # define user events
+# in the future can add in button event
 class VoiceEvent(BaseEvent):
     """
     This event is triggered when the Nova System receives a voice input. 
