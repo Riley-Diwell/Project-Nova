@@ -28,4 +28,4 @@ Android companion application:
 Automated tests for components and integration.
 
 ### docs
-documentation
+Documentation
