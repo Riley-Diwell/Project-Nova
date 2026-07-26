@@ -7,7 +7,7 @@ WHAT THIS FILE IS
 FastAPI entrypoint. Exposes POST /event as the single wire seam between
 Riley's Android client and the backend.
     1. Currently returns a placeholder EventOut.
-    2. 
+    2. The intent surface loop is wired in
 
 Run:
     cd backend/app && uvicorn main:app --reload
@@ -26,6 +26,7 @@ from fastapi import FastAPI
 from schemas.event import Event
 from schemas.event_out import EventOut
 from schemas.user_state import UserState
+from intent_surface import loop
 
 # initialise app
 app = FastAPI(title="NOVA V1")
@@ -46,9 +47,10 @@ async def receive_event(event: Event) -> EventOut:
         confidence=0.0,
         predicted_next_state=None,
     )
+    intent = loop.run(placeholder_state)
     return EventOut(
         event_id=event.id,
-        speech="",
-        actions=[],
+        speech=intent.speech,
+        actions=intent.actions,
         user_state=placeholder_state,
     )
