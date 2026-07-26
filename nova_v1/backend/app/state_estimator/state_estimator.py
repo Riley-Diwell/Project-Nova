@@ -24,7 +24,8 @@ load_dotenv()
 
 # import nova libraries
 from schemas.default_system_prompt import default_system_prompt
-from schemas.user_state import UserStateInput, UserStateOutput
+from schemas.user_state import UserStateOutput
+from schemas.event import Event
 
 # set up ai parameters
 client = OpenAI(
@@ -34,7 +35,7 @@ client = OpenAI(
 model = 'gpt-5.6-luna'
 system_prompt = f"""{default_system_prompt}
 
-You will receive input in the format of {UserStateInput.model_json_schema()}. Your job is to look at the current user state and 
+You will receive input in the format of {Event}. Your job is to look at the current user state and 
 provide a one sentence summary of the current user state. Please also assign a confidence score between 0-1 for this answer. 
 Confidence should be based on how much data was available to you, and how believable the behaviour is. If you are
 making any inferences about the user's activities or mental state, the confidence should be lower. 

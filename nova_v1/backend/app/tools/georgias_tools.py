@@ -14,9 +14,16 @@ WHO USES THIS
 
 """
 
+# import necessary libraries and set up environment
 from typing import Any
 from fastmcp import FastMCP
 import requests
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+import googlemaps
+gmaps = googlemaps.Client(key=os.environ.get('google_maps_api_key'))
 
 # debug add this stuff in when Naoise has finalised this
 '''from ..base import BaseTool
@@ -42,9 +49,10 @@ class DemoTool(BaseTool):
 mcp = FastMCP("Context Server")
 
 # create contextual tools
-@mcp.tool(tags={"immediate"})
+@mcp.tool()
 async def check_weather(lat: float, long: float) -> dict:
-    """ Checks the weather depending on the current location. Check when the user's query depends on their location, activity planning or outfit planning. """
+    """ Checks the weather depending on the current location. 
+    Use when the user's query depends on their location, activity planning or outfit planning. """
     try:
         openweathermap_api_key = os.environ.get("openweathermap_api_key")
         owm_url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={long}&appid={openweathermap_api_key}"
@@ -63,3 +71,13 @@ async def check_weather(lat: float, long: float) -> dict:
 if __name__ == "__main__":
     # run with HTTP transport
     mcp.run(transport="http", host="localhost", port=8000)
+
+
+# location
+@mcp.tool()
+async def get_address(lat: float, long: float) -> str:
+    """Uses lat and long coordinates to reverse geocode an address result. 
+    Use when context around location is required. """
+    reverse_geocode_result = gmaps.reverse_geocode((lat, long))
+    return reverse_geocode_result
+
