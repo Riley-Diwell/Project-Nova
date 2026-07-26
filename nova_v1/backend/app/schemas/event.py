@@ -20,18 +20,19 @@ from datetime import datetime
 from typing import Annotated, Literal, Union
 from uuid import UUID
 from pydantic import BaseModel, Discriminator, Field
-from .base_context import BaseContext
 
 # define events
 # define system events
 class BaseEvent(BaseModel):
     """
     This is basic information that all event classes have to include:
-    an event ID and a timestamp. 
+    an event ID and a timestamp.
+
+    Ambient context (calendar, location, DND, etc.) is NOT attached here —
+    it will arrive via a separate SignalSnapshot alongside the event.
     """
     id: UUID
     timestamp: datetime
-    context: BaseContext # base context to be appended. debug: come back and check this 
 
 class TimeEvent(BaseEvent):
     """
