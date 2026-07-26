@@ -52,7 +52,7 @@ mcp_url = "http://localhost:8000/mcp"
 mcp_client = Client(mcp_url)
 
 # call ai client
-async def estimate_user_state(user_input):
+def estimate_user_state(user_input):
     tool_list = [
     {
         "type": "mcp",
@@ -61,27 +61,27 @@ async def estimate_user_state(user_input):
         "require_approval": "never",
     }
 ]
-    response = await client.responses.parse(
+    response = client.responses.parse(
         model=model,
         instructions = system_prompt,
         text_format = UserStateOutput,
-        input = user_input,
-        tools=tool_list
+        input = user_input#,
+        #tools=tool_list
     )
 
     print(response.output_text)
     print("Response metadata:")
     return response
 
-async def main():
-    async with mcp_client:
-        while True:
-            user_input = await asyncio.to_thread(input, "> ") # wait unil you get user input, the ">" allows for http pings to keep the connection alive
-            if user_input.strip().lower() in {"/quit", "/exit", "/reset"}: # exit condition
-                break
-            user_state = await estimate_user_state(user_input)
+def main():
+    #async with mcp_client:
+    while True:
+        user_input = input() #asyncio.to_thread(input, "> ") # wait unil you get user input, the ">" allows for http pings to keep the connection alive
+        if user_input.strip().lower() in {"/quit", "/exit", "/reset"}: # exit condition
+            break
+        user_state =  estimate_user_state(user_input)
 
 if __name__ == '__main__': # debug, integrate
     print("Hello!")
-    asyncio.run(main())
+    main()
     #print(sequence_confidence)
