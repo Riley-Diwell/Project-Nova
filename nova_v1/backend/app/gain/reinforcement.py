@@ -9,14 +9,6 @@ Over time, Function tools learn whether they should act proactively or not.
 
 Only proactive actions should be reinforced. A reactive action does not provide feedback
 about whether Nova should act automatically.
-
-
-
-
-gain_store.py isn't implemented yet. Once it exists, the intended wiring
-is: call gain_store.save(gain) after adjust() here, so a reinforcement
-step persists across restarts — see registry.py for the matching
-load-side TODO. Not wired in yet.
 """
 
 from enum import Enum
