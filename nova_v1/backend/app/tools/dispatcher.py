@@ -1,7 +1,7 @@
 """
 Runs NOVA Function tools.
 
-The dispatcher decides when a tool should run.
+The dispatcher is used to decide when a tool should run.
 
 There are two ways a tool can be called:
 
