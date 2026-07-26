@@ -1,7 +1,7 @@
 """
 state_estimator/next_state_estimator.py - Section 5.2: State Estimator  (Georgia)
 
-STATUS: working draft
+STATUS: wip
 
 WHAT THIS FILE IS
 brief description
