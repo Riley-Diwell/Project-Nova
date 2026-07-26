@@ -4,19 +4,11 @@ intent_surface/loop.py - Section 5.3: Intent Surface  (Georgia)
 STATUS: wip
 
 WHAT THIS FILE IS
-The intent surface's tool-calling loop. Takes a UserState, hands it to
-Claude with a small set of tools, and returns {speech, actions[]} for
-the /event response.
-    1. B4: one hardcoded local tool (echo_context) exists to prove the
-       scaffolding works end-to-end. `actions` is always empty until
-       real action-producing tools land in C.
-    2. Loop iterates until the model returns stop_reason == "end_turn"
-       or MAX_ITERATIONS is hit — the latter is a safety net, not an
-       expected exit.
-    3. C4 will replace the hardcoded tool with MCP-discovered tools.
+brief description
+    1. 
 
 WHO USES THIS
-- Georgia: main.py's /event handler will call run(user_state) in B5
+- Georgia: main.py's /event handler will call run(user_state) 
 """
 
 # import necessary libraries
