@@ -64,7 +64,8 @@ async def check_weather(lat: float, long: float) -> dict:
             "description": owm_response_json["weather"][0]["description"],
             "icon": owm_response_json["weather"][0]["icon"]
         }
-    except:
+    except Exception as e:
+        print({"error": str(e)})
         weather = 'N/A'
     return weather
 
