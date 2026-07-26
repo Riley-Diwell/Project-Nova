@@ -18,22 +18,6 @@ from typing import Literal
 from uuid import UUID
 from pydantic import BaseModel
 
-# create user state input schema
-class UserStateInput(BaseModel):
-    """
-    debug fill this in later
-    """
-    id: UUID
-    timestamp: datetime
-    location : str
-    screen : Literal["on", "off", "unknown"]
-    calendar: Literal["free", "in_event", "event_starting_soon"]
-    accelerometer: Literal["stationary", "walking", "running", "cycling", "driving"]
-    #state_confidence: float # 0-1
-    # debug note: should this be a combination of confidence of all data, or just the inferred state?
-    #predicted_next_state : 
-
-
 # create user state output schema
 class NextUserStateOutput(BaseModel):
     """
