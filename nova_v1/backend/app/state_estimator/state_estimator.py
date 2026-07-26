@@ -26,7 +26,7 @@ load_dotenv()
 
 # import nova libraries
 from schemas.default_system_prompt import default_system_prompt
-from schemas.user_state import UserStateOutput
+from schemas.user_state import UserState
 from schemas.event import Event
 
 # set up ai parameters
@@ -64,7 +64,7 @@ def estimate_user_state(user_input):
     response = client.responses.parse(
         model=model,
         instructions = system_prompt,
-        text_format = UserStateOutput,
+        text_format = UserState,
         input = user_input#,
         #tools=tool_list
     )

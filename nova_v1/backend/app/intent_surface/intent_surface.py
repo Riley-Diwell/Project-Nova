@@ -25,7 +25,7 @@ load_dotenv()
 
 # import nova libraries
 from schemas.default_system_prompt import default_system_prompt
-from schemas.user_state import UserStateOutput
+from schemas.user_state import UserState
 
 # set up ai parameters
 client = Anthropic(
@@ -43,7 +43,7 @@ This is an event-based system, where events could be system events (eg location 
 (eg STT input, button press input etc). 
 
 # Input
-You will receieve an input in the form of {UserStateOutput}. Based on this user state, your job is to infer:
+You will receieve an input in the form of {UserState}. Based on this user state, your job is to infer:
 1. What the user may intend to do on their phone now
 2. What the user may intend to do on their phone soon
 
