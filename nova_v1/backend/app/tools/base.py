@@ -1,5 +1,5 @@
 """
-Base class for NOVA Function tools.
+Base class for NOVA tools.
 
 NOVA has three main Function tools:
     - Function 1
@@ -11,13 +11,13 @@ Each Function should have its own class that inherits from BaseTool:
     Function2Tool(BaseTool)
     Function3Tool(BaseTool)
 
-BaseTool provides the common structure shared by all Functions:
+BaseTool provides the common structure shared by all Function tools:
 - a name
 - a description
 - an input schema
 - an invoke() function to run the tool
 
-NOTE: when you are writing a function implement _execute(),
+NOTE: when you are writing a Function tool implement _execute(),
 which contains the actual logic for that specific Function.
 
 Example:

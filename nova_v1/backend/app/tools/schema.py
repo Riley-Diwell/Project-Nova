@@ -1,7 +1,7 @@
 """
-Defines the standard format for describing a tool.
+Defines the standard format for describing a Function tool.
 
-Every tool in Nova has a ToolSchema which tells the intent surface:
+Every Function tool in Nova has a ToolSchema which tells the registry:
     - what the tool is called
     - what it does
     - what inputs it needs
