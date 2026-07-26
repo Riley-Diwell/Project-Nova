@@ -20,6 +20,7 @@ from fastmcp import FastMCP
 import requests
 import os
 from dotenv import load_dotenv
+import asyncio
 load_dotenv()
 
 import googlemaps
@@ -67,12 +68,6 @@ async def check_weather(lat: float, long: float) -> dict:
         weather = 'N/A'
     return weather
 
-# run the server
-if __name__ == "__main__":
-    # run with HTTP transport
-    mcp.run(transport="http", host="localhost", port=8000)
-
-
 # location
 @mcp.tool()
 async def get_address(lat: float, long: float) -> str:
@@ -80,4 +75,10 @@ async def get_address(lat: float, long: float) -> str:
     Use when context around location is required. """
     reverse_geocode_result = gmaps.reverse_geocode((lat, long))
     return reverse_geocode_result
+
+# run the server
+if __name__ == "__main__":
+    # run with HTTP transport
+    mcp.run(transport="http", host="localhost", port=8000, stateless_http=True)
+
 

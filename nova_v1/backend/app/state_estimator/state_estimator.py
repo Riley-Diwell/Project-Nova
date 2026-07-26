@@ -1,7 +1,7 @@
 """
 state_estimator/state_estimator.py - Section 5.2: State Estimator  (Georgia)
 
-STATUS: working draft
+STATUS: wip
 
 WHAT THIS FILE IS
 brief description
@@ -19,6 +19,8 @@ import os
 from openai import OpenAI
 from math import exp
 import numpy as np
+from fastmcp import Client
+import asyncio
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -41,24 +43,45 @@ Confidence should be based on how much data was available to you, and how believ
 making any inferences about the user's activities or mental state, the confidence should be lower. 
 
 Assign the user state to inferred_user_state and confidence to state_confidence in the output schema. 
+Please carry over any information from the event (eg location, screen status) into the output schema as appropriate. 
+Please use any tools to gather context (eg get location information from latitude and longitude coordinates). 
 """ # debug, need to do more research how to 'classify' user state
 
+# connect to server
+mcp_url = "http://localhost:8000/mcp"
+mcp_client = Client(mcp_url)
+
 # call ai client
-def estimate_user_state(user_input):
-    response = client.responses.parse(
+async def estimate_user_state(user_input):
+    tool_list = [
+    {
+        "type": "mcp",
+        "server_label": "Context Server",
+        "server_url": mcp_url, 
+        "require_approval": "never",
+    }
+]
+    response = await client.responses.parse(
         model=model,
         instructions = system_prompt,
         text_format = UserStateOutput,
-        input = user_input
+        input = user_input,
+        tools=tool_list
     )
 
     print(response.output_text)
     print("Response metadata:")
     return response
 
+async def main():
+    async with mcp_client:
+        while True:
+            user_input = await asyncio.to_thread(input, "> ") # wait unil you get user input, the ">" allows for http pings to keep the connection alive
+            if user_input.strip().lower() in {"/quit", "/exit", "/reset"}: # exit condition
+                break
+            user_state = await estimate_user_state(user_input)
+
 if __name__ == '__main__': # debug, integrate
     print("Hello!")
-    while True:
-        user_input = input()
-        user_state = estimate_user_state(user_input)
-        #print(sequence_confidence)
+    asyncio.run(main())
+    #print(sequence_confidence)
