@@ -1,5 +1,5 @@
 """
-state_estimator/state_estimator.py - Section 5.2: State Estimator  (Georgia)
+state_estimator/next_state_estimator.py - Section 5.2: State Estimator  (Georgia)
 
 STATUS: working draft
 
@@ -34,13 +34,13 @@ client = OpenAI(
 model = 'gpt-5.6-luna'
 system_prompt = f"""{default_system_prompt}
 
-You will receive input in the format of {UserStateOutput}. Your job is to look at the current user state and 
+You will receive input in the format of {UserStateOutput.model_json_schema()}. Your job is to look at the current user state and 
 provide a one sentence prediction of the next user state. Ensure you document when this may happen (eg in the next 10 minutes, 30 minutes etc). 
 Please only make predictions for within the next hour. Please also assign a confidence score between 0-1 for this answer. 
 Confidence should be based on how much data was available to you, and how believable the behaviour is. If you are
 making any inferences about the user's activities or mental state, the confidence should be lower. 
 
-Assign the user state to inferred_next_user_state and confidence to next_state_confidenc in the output schema. 
+Assign the user state to inferred_next_user_state and confidence to next_state_confidence in the output schema. 
 """ # debug, need to do more research how to 'classify' user state
 # debug: can define tools like read next calendar etc etc to improve this
 

@@ -1,7 +1,7 @@
 """
 schemas/event.py - Section 5.2: State Estimator  (Georgia)
 
-STATUS: working draft
+STATUS: wip
 
 WHAT THIS FILE IS
 Defines schemas for events. 
@@ -10,7 +10,7 @@ Defines schemas for events.
        shape through one wire contract.
 
 WHO USES THIS
-- Riley: POSTS events collected via Android using this schema
+- Riley: POSTs events observed via Android using this schema
 - Georgia: state_estimator.py uses these events as input to estimate state
 
 """
@@ -35,8 +35,16 @@ class TimeEvent(BaseEvent):
     """
     This event is triggered when the time since the last TimeEvent exceeds 10 minutes. 
     """
-    type: Literal["timestamp"]
+    type: Literal["timestamp"] = "timestamp"
     timestamp: datetime
+
+class LocationEvent(BaseEvent):
+    """
+    This event is triggered when the user's location changes by 1km. 
+    """
+    type: Literal["location"] = "location"
+    lat: float
+    lng: float
 
 class NotificationEvent(BaseEvent):
     """
@@ -54,7 +62,11 @@ class CalendarTriggerEvent(BaseEvent):
     """
     type: Literal["calendar_trigger"] = "calendar_trigger"
     calendar_event_id: str
-    minutes_until: int
+    calendar_event_name: str
+    calendar_event_duration: float # in hours
+    calendar_event_start: datetime # start datetime
+    calendar_event_end: datetime # end datetime
+    calendar_event_location: str # if location known
 
 class AccelerometerEvent(BaseEvent):
     """
@@ -82,24 +94,26 @@ class ScreenEvent(BaseEvent):
 
 # define user events
 # in the future can add in button event
-class VoiceEvent(BaseEvent):
+class STTEvent(BaseEvent):
     """
-    This event is triggered when the Nova System receives a voice input. 
-    The voice input should undergo speech-to-text conversion. 
+    This event is triggered when the Nova System receives a speech-to-text (STT) input. 
     """
-    type: Literal["voice"] = "voice"
-    text: str                              # STT output
+    type: Literal["STT"] = "STT"
+    text: str                           
 
 
 # combine into a list 
 events = [
     TimeEvent,
+    LocationEvent,
     NotificationEvent,
     CalendarTriggerEvent,
-    VoiceEvent
+    AccelerometerEvent,
+    ScreenEvent,
+    STTEvent
 ]
 
 Event = Annotated[
-    Union[events],
+    Union[tuple(events)],
     Discriminator("type"),
 ]
