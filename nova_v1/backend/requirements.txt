@@ -1,0 +1,7 @@
+supabase>=2.9.0
+pydantic>=2.7.0
+python-dotenv>=1.0.0
+fastembed>=0.4.0
+
+# dev / test
+pytest>=8.0.0
