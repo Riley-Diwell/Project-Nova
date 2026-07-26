@@ -6,11 +6,13 @@ Proof-of-concept implementation of the NOVA system.
 
 ### backend
 Python backend containing:
-- Intent Surface
+- State estimator
+- Intent surface
 - MCP tool interface
-- Controller Gain
+- Controller gain
 - Memory
 - Persona
+- Schemas
 
 ### functions
 Independent NOVA function modules:
@@ -28,4 +30,4 @@ Android companion application:
 Automated tests for components and integration.
 
 ### docs
-Documentation
+documentation

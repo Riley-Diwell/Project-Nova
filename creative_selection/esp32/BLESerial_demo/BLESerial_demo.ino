@@ -33,7 +33,7 @@ void setup() {
   Serial.println("BLESerial demo started.");
 }
 
-void loop() {
+/*void loop() {
   #ifndef ARDUINO_ARCH_ESP32
     ble.update(); // required in Polling mode
   #endif
@@ -52,5 +52,17 @@ void loop() {
     } else {
       ble.println("Unknown command. Type ? for help.");
     }
+  }
+}
+*/
+
+void loop() {
+  if (ble.available()) {
+    char c = ble.read();
+    Serial.print("Got byte: 0x");
+    Serial.print(c, HEX);
+    Serial.print(" = '");
+    Serial.print(c);
+    Serial.println("'");
   }
 }
