@@ -1,6 +1,8 @@
 """
 intent_surface.py - Section 5.3: Intent surface (backend, Claude tool-calling loop) (Georgia)
 
+STATUS: wip
+
 - Responsibility: given {event} + {UserState}, infer intent and select/parameterise 
   a Tool (explicit request → reactive; inferred need → proactive within gain).
 

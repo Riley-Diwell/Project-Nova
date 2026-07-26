@@ -1,6 +1,8 @@
 """
 schemas/event.py - Section 5.2: State Estimator  (Georgia)
 
+STATUS: working draft
+
 WHAT THIS FILE IS
 Defines schemas for events. 
     1. Uses Pydantic BaseModel for validation and JSON (de)serialisation.
