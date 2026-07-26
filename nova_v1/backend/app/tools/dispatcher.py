@@ -46,14 +46,17 @@ There are two ways a tool can be called:
     run immediately          check gain + confidence
                                         |
                                   high enough?
-                                  /       \
-                                yes       no
-                                |          |
-                                v          v
-                            Run tool    Ignore
-
-                            
-
+                                  /           \
+                                yes           no
+                                |              |
+                                v              v
+                            Seek user        Ignore
+                            accept/reject                            
+                           /           \
+                        accept       reject    
+                            |          |
+                            v          v
+                            run      ignore
                             
 Only Function tools registered in ToolRegistry can be
 dispatched here:
@@ -67,12 +70,12 @@ and should not trigger actions by themselves.
 
 
 Does not log to Memory. Per base.py's docstring, outcome logging happens
-at the call site (whoever calls dispatch_reactive/dispatch_proactive),
-once Jay's memory module exists — not hardcoded in here.
+at the call site (whoever calls dispatch_reactive/dispatch_proactive, 
+likely Georgia), once Jay's memory module exists.
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from .registry import ToolRegistry
 from ..gain.config import FIRING_THRESHOLD, clamp
@@ -81,17 +84,16 @@ from ..gain.config import FIRING_THRESHOLD, clamp
 @dataclass(frozen=True)
 class DispatchResult:
     """
-    What happened when a proactive dispatch was attempted. Reactive calls
-    don't need this - they always fire, so they just return the tool's
-    raw output. This exists so a caller (and eventually a Memory logger)
-    can tell "blocked by gain" apart from "the tool returned None."
+    Outcome of a *proposal* check, not an execution. Proactive calls no
+    longer run the tool here - they only decide whether it's worth
+    asking the user. See confirm_proactive() for the actual run, and
+    reinforcer.reinforce() for recording the user's accept/reject.
     """
 
-    fired: bool
+    proposed: bool
     name: str
     effective_gain: float
     state_confidence: float
-    output: Optional[Any] = None
 
 
 class Dispatcher:
@@ -114,11 +116,15 @@ class Dispatcher:
         state_confidence: float,
     ) -> DispatchResult:
         """
-        Inferred need, no explicit request. Fires only if
-        state_confidence * effective_gain >= FIRING_THRESHOLD.
-        Raises KeyError (via the registry) if `name` isn't a registered
-        Function tool - a context/inference tool has no business being
-        passed here at all (see module docstring).
+        Inferred need, no explicit request. Decides whether this is
+        worth *proposing* to the user - it does NOT run the tool.
+
+        proposed=True means state_confidence * effective_gain >=
+        FIRING_THRESHOLD: surface the proposal to the user and wait for
+        accept/reject before calling confirm_proactive().
+
+        Raises KeyError (via the registry) if 'name' isn't a registered
+        Function tool.
         """
         self._require_registered(name)
 
@@ -128,24 +134,26 @@ class Dispatcher:
         # how willing is this tool to act automatically?
         effective_gain = self.registry.get_gain(name).get_effective()
 
-        # confidence is not high enough, do not run the tool
-        if state_confidence * effective_gain < FIRING_THRESHOLD:
-            return DispatchResult(
-                fired=False,
-                name=name,
-                effective_gain=effective_gain,
-                state_confidence=state_confidence,
-            )
-
-        # confidence was high enough, run the tool
-        output = self.registry.get_tool(name).invoke(tool_input)
         return DispatchResult(
-            fired=True,
+            proposed=state_confidence * effective_gain >= FIRING_THRESHOLD,
             name=name,
             effective_gain=effective_gain,
             state_confidence=state_confidence,
-            output=output,
         )
+
+    def confirm_proactive(self, name: str, tool_input: dict[str, Any]) -> Any:
+        """
+        Actually run a proactive tool call - call this only after the
+        user has accepted the proposal from dispatch_proactive(). No
+        gain check here; that already happened when the proposal was
+        made.
+
+        Raises KeyError (via the registry) if 'name' isn't a registered
+        Function tool.
+        """
+        self._require_registered(name)
+        return self.registry.get_tool(name).invoke(tool_input)
+
 
     def _require_registered(self, name: str) -> None:
         """
