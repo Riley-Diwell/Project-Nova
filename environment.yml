@@ -68,6 +68,7 @@ dependencies:
       - cryptography==48.0.1
       - distro==1.9.0
       - docstring-parser==0.18.0
+      - fastmcp==3.4.4
       - filetype==1.2.0
       - future==1.0.0
       - geocoder==1.38.1
