@@ -20,9 +20,11 @@ load-side TODO. Not wired in yet.
 """
 
 from enum import Enum
+from typing import Optional
 
 from ..tools.registry import ToolRegistry
 from .config import REINFORCEMENT_STEP
+from .gain_store import GainStore
 
 
 class Outcome(Enum):
@@ -47,9 +49,10 @@ class Reinforcer:
     """ 
     Changes tool gains based on user feedback.
     """
-    def __init__(self, registry: ToolRegistry) -> None:
-        # use the registry to find tools and their gains.
+    def __init__(self, registry: ToolRegistry, gain_store: Optional[GainStore] = None) -> None:
         self.registry = registry
+        # optional - if set, reinforce() persists the updated gain here
+        self.gain_store = gain_store
 
     def reinforce(self, name: str, outcome: Outcome) -> float:
         """
@@ -68,7 +71,12 @@ class Reinforcer:
         """
         self._require_registered(name)
         gain = self.registry.get_gain(name)
-        return gain.adjust(_DELTA[outcome])
+        new_value = gain.adjust(_DELTA[outcome])
+
+        if self.gain_store is not None:
+            self.gain_store.save(gain)
+
+        return new_value
 
     def _require_registered(self, name: str) -> None:
         """

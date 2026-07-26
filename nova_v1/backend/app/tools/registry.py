@@ -43,6 +43,7 @@ from typing import Optional
 from .base import BaseTool
 from .schema import ToolSchema
 from ..gain.controller_gain import ControllerGain
+from ..gain.gain_store import GainStore
 
 
 @dataclass
@@ -53,17 +54,28 @@ class _Entry:
 
 
 class ToolRegistry:
-    def __init__(self) -> None:
+    def __init__(self, gain_store: Optional[GainStore] = None) -> None:
         self._entries: dict[str, _Entry] = {}
+
+        # optional - if set, register() loads saved gains from here
+        self.gain_store = gain_store
 
     def register(self, tool: BaseTool, gain: Optional[ControllerGain] = None) -> None:
         """
         Add a Function tool to the registry.
 
-        A gain is created automatically if one is not provided.
+        Gain resolution order:
+        1. explicit `gain` argument, if given
+        2. saved gain from `self.gain_store`, if a store is attached and
+           has an entry for this tool
+        3. a fresh default ControllerGain
         """
         if tool.name in self._entries:
             raise ValueError(f"tool '{tool.name}' is already registered")
+
+        if gain is None and self.gain_store is not None:
+            gain = self.gain_store.load(tool.name)
+
         self._entries[tool.name] = _Entry(
             tool=tool,
             gain=gain or ControllerGain(name=tool.name),
