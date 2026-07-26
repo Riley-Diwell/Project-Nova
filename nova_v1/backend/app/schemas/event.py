@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Annotated, Literal, Union
 from uuid import UUID
 from pydantic import BaseModel, Discriminator, Field
+from .base_context import BaseContext
 
 # define events
 # define system events
@@ -30,6 +31,7 @@ class BaseEvent(BaseModel):
     """
     id: UUID
     timestamp: datetime
+    context: BaseContext # base context to be appended. debug: come back and check this 
 
 class TimeEvent(BaseEvent):
     """
@@ -90,7 +92,7 @@ class ScreenEvent(BaseEvent):
     - unknown
     """
     type: Literal["screen"] = "screen"
-    status: str
+    status: bool
 
 # define user events
 # in the future can add in button event

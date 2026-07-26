@@ -33,22 +33,6 @@ class UserStateInput(BaseModel):
     # debug note: should this be a combination of confidence of all data, or just the inferred state?
     #predicted_next_state : 
 
-# create user state output schema
-class UserStateOutput(BaseModel):
-    """
-    debug fill this in later
-    """
-    id: UUID
-    timestamp: datetime
-    location : str
-    screen : Literal["on", "off", "unknown"]
-    calendar: Literal["free", "in_event", "event_starting_soon"]
-    accelerometer: Literal["stationary", "walking", "running", "cycling", "driving"]
-    inferred_user_state: str
-    state_confidence: float # 0-1
-    # debug note: should this be a combination of confidence of all data, or just the inferred state?
-    #predicted_next_state : 
-
 
 # create user state output schema
 class NextUserStateOutput(BaseModel):
@@ -67,3 +51,19 @@ class NextUserStateOutput(BaseModel):
     next_state_confidence: float #0-1
     # debug note: should this be a combination of confidence of all data, or just the inferred state?
     #predicted_next_state :     
+
+# create user state output schema
+class UserStateOutput(BaseModel):
+    """
+    debug fill this in later
+    """
+    id: UUID
+    timestamp: datetime
+    location : str
+    screen : Literal["on", "off", "unknown"]
+    calendar: Literal["free", "in_event", "event_starting_soon"]
+    accelerometer: Literal["stationary", "walking", "running", "cycling", "driving"]
+    inferred_user_state: str
+    state_confidence: float # 0-1
+    # debug note: should this be a combination of confidence of all data, or just the inferred state?
+    predicted_next_state : NextUserStateOutput
