@@ -1,7 +1,7 @@
 """
-Base class for NOVA tools.
+Base class for Nova tools.
 
-NOVA has three main Function tools:
+Nova has three main Function tools:
     - Function 1
     - Function 2
     - Function 3
