@@ -1,6 +1,8 @@
 """
 state_estimator/state_estimator.py - Section 5.2: State Estimator  (Georgia)
 
+STATUS: working draft
+
 WHAT THIS FILE IS
 brief description
 1. 

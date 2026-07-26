@@ -1,6 +1,8 @@
 """
 schemas/user_state.py - Section 5.2: State Estimator  (Georgia)
 
+STATUS: working draft
+
 WHAT THIS FILE IS
 Defines schemas for the current user state. 
     1. Uses Pydantic BaseModel for validation and JSON (de)serialisation.
