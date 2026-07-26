@@ -6,7 +6,7 @@ STATUS: wip
 WHAT THIS FILE IS
 FastAPI entrypoint. Exposes POST /event as the single wire seam between
 Riley's Android client and the backend.
-    1. Currently returns a canned EventOut.
+    1. Currently returns a placeholder EventOut.
     2. 
 
 Run:
