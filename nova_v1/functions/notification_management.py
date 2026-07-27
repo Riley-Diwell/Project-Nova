@@ -4,6 +4,114 @@ Interfaces with the notification batcher (notification_batcher.py).
 
 - Gain should be moderate — Nova can proactively surface a summary
   when context suggests a break (e.g. leaving lecture mode)
+
+  HOW IT CONNECTS TO THE INTENT SURFACE:
+
+  1. REACTIVE:
+     Phrases like "what notifications do I have", "snooze notifications",
+     "clear everything", "what's waiting" should map to this tool.
+
+     dispatcher.dispatch_reactive("notification_management", {
+         "action": "query"                    
+     })
+
+     dispatcher.dispatch_reactive("notification_management", {
+         "action": "snooze",
+         "snooze_minutes": 30                 
+     })
+
+     dispatcher.dispatch_reactive("notification_management", {
+         "action": "acknowledge_all"          
+     })
+
+  2. PROACTIVE:
+     Good triggers
+       - current_events contains "lecture" or "tutorial" ending soon
+       - location changed (user just left campus)
+       - time is a known break point (end of a class hour)
+       - heart rate dropped (user relaxed after a stressful period)
+
+     proposal = dispatcher.dispatch_proactive(
+         "notification_management",
+         {"action": "query"},
+         state_confidence=0.8,   
+     )
+     if proposal.proposed:
+         # V1: always ask the user first
+         if user_said_yes:
+             dispatcher.confirm_proactive("notification_management",
+                                          {"action": "query"})
+             reinforcer.reinforce("notification_management", Outcome.ACCEPTED)
+         else:
+             reinforcer.reinforce("notification_management", Outcome.REJECTED)
+
+THE THREE ACTIONS (subfunctions)
+  "query"
+      Returns everything currently deliverable given the mode.
+      In focus/lecture mode, only high-urgency items are deliverable.
+      In default mode, everything is.
+      Output includes: count, list of notifications with source/summary/urgency,
+      and a spoken string ready to be sent to TTS.
+
+      Example spoken output:
+        "3 notifications waiting: person: are you coming?;
+         Battery at 15%; Team meeting starting in 10 minutes"
+
+  "snooze"  (+ snooze_minutes, default 30)
+      Temporarily extends the batch window so nothing fires for N minutes.
+      Useful when the user wants to keep working without being interrupted
+      even at a natural break point.
+
+      Example spoken output:
+        "Notifications snoozed for 30 minutes."
+
+  "acknowledge_all"
+      Marks everything in the current batch as seen and clears the queue.
+      Call this after the user has heard or read the batch — otherwise the
+      same notifications keep showing up.
+
+      Example spoken output:
+        "Cleared 3 notifications."
+
+WHAT IT RETURNS
+Every action returns a dict with at least:
+  {
+      "success": bool,
+      "spoken":  str,   send this to TTS / BLE back to the device
+      ...action-specific fields...
+  }
+
+For "query" specifically:
+  {
+      "success": True,
+      "count":   3,
+      "batch": [
+          {"source": "messages", "summary": "person: are you coming?", "urgency": "low"},
+          {"source": "system",   "summary": "Battery at 15%",  "urgency": "high"},
+          {"source": "calendar", "summary": "Meeting in 10 min",  "urgency": "high"},
+      ],
+      "spoken": "3 notifications waiting: ..."
+  }
+
+  STARTUP 
+The tool shares the notification batcher instance with nova_main.py.
+Call this once at startup:
+
+    from functions.notification_management import register_batcher
+    register_batcher(your_batcher_instance)
+
+If you don't call this, the tool will create its own batcher — which
+won't have any notifications in it, so query will always return empty.
+
+URGENCY LEVELS
+  critical  — delivered immediately regardless of mode (emergencies, battery dying)
+  high    — delivered at mode boundary or if user checks in
+  low   — held until batch window or user explicitly asks
+  ambient   — never surfaced proactively (social media, newsletters)
+
+The urgency_classifier.py uses the context to decide which level
+each incoming notification gets assigned. The intent surface context directly shapes what Nova treats
+as urgent vs ignorable.
 """
 
 from typing import Any
