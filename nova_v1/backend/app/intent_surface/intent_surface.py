@@ -59,6 +59,9 @@ You will receieve an input in the form of {UserState}. Based on this user state,
 - Call relevant tools if available to support your reaosning
 
 """
+# debug: if theres not enough information call previous episodic event
+# add some concise success criteria to define what the functions does
+
 
 def infer_intent(user_input):
   response = client.messages.create(

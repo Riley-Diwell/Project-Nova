@@ -39,7 +39,7 @@ class TimeEvent(BaseEvent):
     This event is triggered when the time since the last TimeEvent exceeds 10 minutes. 
     """
     type: Literal["timestamp"] = "timestamp"
-    timestamp: datetime
+   # timestamp: datetime
 
 class LocationEvent(BaseEvent):
     """
