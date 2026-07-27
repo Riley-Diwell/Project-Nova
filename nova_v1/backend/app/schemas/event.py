@@ -39,7 +39,6 @@ class TimeEvent(BaseEvent):
     This event is triggered when the time since the last TimeEvent exceeds 10 minutes. 
     """
     type: Literal["timestamp"] = "timestamp"
-   # timestamp: datetime
 
 class LocationEvent(BaseEvent):
     """
@@ -71,7 +70,9 @@ class CalendarTriggerEvent(BaseEvent):
     calendar_event_end: datetime # end datetime
     calendar_event_location: str # if location known
 
-class AccelerometerEvent(BaseEvent):
+class AccelerometerEvent(BaseEvent): 
+    # debug we will need to talk about this calculation, I understand that accelerometers
+    # do not calculate velocity, I understand that they may output x, y, z etc 
     """
     This event is triggered when the user changes a threshold in speed,
     measured by the acceleromter on the Android. 
@@ -88,9 +89,6 @@ class AccelerometerEvent(BaseEvent):
 class ScreenEvent(BaseEvent):
     """
     This event is triggered when the status of the phone screen changes. Statuses could be:
-    - on
-    - off
-    - unknown
     """
     type: Literal["screen"] = "screen"
     status: bool
@@ -103,7 +101,6 @@ class STTEvent(BaseEvent):
     """
     type: Literal["STT"] = "STT"
     text: str                           
-
 
 # combine into a list 
 events = [
