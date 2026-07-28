@@ -26,8 +26,11 @@ from pydantic import BaseModel
 # import nova libraries
 from schemas.user_state import UserState
 from schemas.event import Event
+from gain.gain_store import GainStore
+from gain.overrides import GainOverrides
 from tools.registry import ToolRegistry
 from tools.dispatcher import Dispatcher
+from tools.memory_tool import MemoryTool
 from tools.navigation import NavigationTool
 from tools.notification_management import NotificationManagementTool
 
@@ -68,8 +71,9 @@ SYSTEM_PROMPT = (
     "right tool, or you don't have the information - never return an empty "
     "string. Instead say briefly that you're not sure, and say why (for "
     "example: \"I'm not sure - I don't have a way to add calendar events "
-    "yet.\"). Check recent_episodes before you fall back on that: not being "
-    "told something outright is not the same as having nothing to go on. "
+    "yet.\"). Check recent_episodes and the memory tool before you fall back "
+    "on that: not being told something outright is not the same as having "
+    "nothing to go on. "
     "user_state.current_events/upcoming_events is only a short-range snapshot "
     "(now plus the next couple of hours) - it is NOT the whole calendar. If "
     "the user asks about a range outside that snapshot (today, tomorrow, "
@@ -93,7 +97,13 @@ SYSTEM_PROMPT = (
     "differs each time. Say you don't know only when the history genuinely "
     "has nothing bearing on the question; an empty list means nothing "
     "comparable has been logged yet. They are history, not the current "
-    "situation."
+    "situation. "
+    "recent_episodes is inferred from behaviour; the memory tool is the "
+    "separate notebook of things the user asked you outright to remember. "
+    "Save to it whenever they ask you to remember or note something, and "
+    "recall from it when they ask what they told you or what they noted. "
+    "When both bear on an answer, prefer what they stated over what you "
+    "inferred."
 )
 
 
@@ -145,9 +155,15 @@ GET_CALENDAR_RANGE_TOOL: dict[str, Any] = {
     },
 }
 
-_REGISTRY = ToolRegistry()
+# The gain store is passed in so register() below loads each tool's saved gain
+# rather than starting every tool back at DEFAULT_GAIN - without it the dial in
+# the Android app (GainScreen.kt, via /tools/gain) would reset on each restart.
+_GAIN_STORE = GainStore()
+
+_REGISTRY = ToolRegistry(gain_store=_GAIN_STORE)
 _REGISTRY.register(NavigationTool())
 _REGISTRY.register(NotificationManagementTool())
+_REGISTRY.register(MemoryTool())
 _DISPATCHER = Dispatcher(_REGISTRY)
 
 REGISTRY_TOOLS: list[dict[str, Any]] = [
@@ -158,6 +174,12 @@ REGISTRY_TOOLS: list[dict[str, Any]] = [
 TOOLS: list[dict[str, Any]] = [GET_CURRENT_ADDRESS_TOOL, GET_CALENDAR_RANGE_TOOL, *REGISTRY_TOOLS]
 
 CLIENT_TOOLS: set[str] = {"get_calendar_range"}
+
+# The registry is built here, so this is where the gain package gets pointed at
+# it. main.py's GET/PUT /tools/gain go straight through this - the tuning logic
+# itself lives in gain/overrides.py, next to the reinforcement that moves the
+# same numbers from the other direction.
+GAIN_OVERRIDES = GainOverrides(_REGISTRY, _GAIN_STORE)
 
 
 def _run_local_tool(name: str, tool_input: dict[str, Any], location_ctx: str | None) -> Any:
