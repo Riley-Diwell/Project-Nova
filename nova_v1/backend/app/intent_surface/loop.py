@@ -21,6 +21,8 @@ from pydantic import BaseModel
 
 # import nova libraries
 from schemas.user_state import UserState
+from schemas.event import Event
+from schemas.signals import Signals
 
 load_dotenv()
 
@@ -73,7 +75,7 @@ class IntentResult(BaseModel):
 
 # --- the loop ---------------------------------------------------------------
 
-def run(user_state: UserState) -> IntentResult:
+def run(user_state: UserState, event:Event, signals:Signals) -> IntentResult:
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": user_state.model_dump_json()},
     ]

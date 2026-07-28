@@ -12,8 +12,10 @@ WHO USES THIS
 
 """
 
+# run uvicorn main:app --reload in terminal
+
 # import necessary libraries
-from uuid import UUID
+from uuid import uuid4
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -28,7 +30,7 @@ def state_mapping(Signals):
     Map data from signals into a user state. This is currently a very simple mapping. 
     """
 
-    state = UserState(  id = UUID,
+    state = UserState(  id = uuid4(),
                         timestamp = Signals.timestamp,
                         screen=Signals.screen_status,
                         dnd=Signals.dnd,
