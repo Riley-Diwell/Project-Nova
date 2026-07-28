@@ -23,6 +23,7 @@ import com.example.nova.navigation.NovaDestination
 import com.example.nova.navigation.bottomNavDestinations
 import com.example.nova.ui.screens.DashboardScreen
 import com.example.nova.ui.screens.DeviceScreen
+import com.example.nova.ui.screens.GainScreen
 import com.example.nova.ui.screens.OnboardingScreen
 import com.example.nova.ui.screens.SettingsScreen
 import com.example.nova.ui.screens.StateScreen
@@ -87,6 +88,9 @@ fun NovaApp() {
             }
             composable(NovaDestination.State.route) {
                 StateScreen()
+            }
+            composable(NovaDestination.Gain.route) {
+                GainScreen()
             }
             composable(NovaDestination.Device.route) {
                 DeviceScreen(

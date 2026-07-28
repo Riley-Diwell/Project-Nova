@@ -68,6 +68,16 @@ class MemoryTool(BaseTool):
                 "the relevant one yourself. Call recall before telling the "
                 "user you don't know something about them."
             ),
+            gain_description=(
+                "How readily Nova files and looks things up without being "
+                "asked. At 1.0 any statement the user makes about themselves "
+                "is saved as a note, and any question is treated as a recall - "
+                "answered with the closest match even when nothing matches "
+                "outright. At 0.0 only an explicit instruction counts: 'note "
+                "that', 'remember this', 'what did I note about…'. Everything "
+                "in between raises the bar for acting on speech that was "
+                "probably, but not certainly, meant for Nova."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
