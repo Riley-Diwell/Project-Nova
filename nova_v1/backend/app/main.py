@@ -46,7 +46,5 @@ async def receive_event(input_wrapper:InputWrapper) -> EventOut: # event:Event, 
     intent = loop.run(state, input_wrapper.event, input_wrapper.signals)
     return EventOut(
         event_id=input_wrapper.event.id,
-        speech=intent.speech,
-        actions=intent.actions,
-        user_state=state,
+        speech=intent.speech
     )
