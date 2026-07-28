@@ -78,7 +78,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from .registry import ToolRegistry
-from ..gain.config import FIRING_THRESHOLD, clamp
+
+try:
+    from ..gain.config import FIRING_THRESHOLD, clamp
+except ImportError:  # pragma: no cover
+    from gain.config import FIRING_THRESHOLD, clamp
 
 
 @dataclass(frozen=True)

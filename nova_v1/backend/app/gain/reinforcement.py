@@ -14,9 +14,13 @@ about whether Nova should act automatically.
 from enum import Enum
 from typing import Optional
 
-from ..tools.registry import ToolRegistry
 from .config import REINFORCEMENT_STEP
 from .gain_store import GainStore
+
+try:
+    from ..tools.registry import ToolRegistry
+except ImportError:  # pragma: no cover
+    from tools.registry import ToolRegistry
 
 
 class Outcome(Enum):
