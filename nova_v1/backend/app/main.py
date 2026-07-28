@@ -10,6 +10,8 @@ Riley's Android client and the backend.
 Android computes UserState on-device (UserStateCollector.kt, ~19 fused
 signals) and posts it directly alongside every Event - the backend does not
 re-derive state from raw signals, so there is no separate Signals payload.
+That makes /event the first place UserState exists backend-side, so this is
+where each episode is appended to the Memory log (see _log_episode).
 
 Run:
     cd backend/app && uvicorn main:app --reload
@@ -34,6 +36,8 @@ from intent_surface import loop
 from intent_surface.loop import IntentResult, NeedMoreResult
 from tools.notification_batcher import NotificationBatcher
 from tools.notification_management import register_batcher
+
+import memory
 
 
 @asynccontextmanager
@@ -64,6 +68,26 @@ class ContinueWrapper(BaseModel):
     result: Any
 
 
+# Android determines UserState on-device, so POST /event is where it first
+# reaches the backend - i.e. the point the episodic Memory log is meant to
+# capture (schema.sql: "one row per event, event + the User State it produced").
+# Logged before the loop runs so an episode survives a failing Claude call, and
+# so loop.run() can read prior episodes back as context.
+# Non-fatal: an unconfigured or unreachable Supabase must not fail /event.
+def _log_episode(event: Event, user_state: UserState) -> str | None:
+    try:
+        row_id = memory.write({
+            "event_type": event.type,
+            "event": event.model_dump(mode="json"),
+            "user_state": user_state.model_dump(mode="json"),
+        })
+        print(f"[memory] wrote episode {row_id} (event_type={event.type!r})")
+        return row_id
+    except Exception as e:
+        print(f"[memory] write skipped: {e}")
+        return None
+
+
 def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
     if isinstance(intent, NeedMoreResult):
         return NeedMoreOut(
@@ -86,6 +110,7 @@ async def receive_event(input_wrapper: InputWrapper) -> EventResponse:
     us = input_wrapper.user_state
     print(f"[/event] calendar_ctx={us.calendar_ctx!r} "
           f"current_events={len(us.current_events)} upcoming_events={len(us.upcoming_events)}")
+    _log_episode(input_wrapper.event, us)
     intent = loop.run(input_wrapper.user_state, input_wrapper.event)
     return _to_response(intent)
 
