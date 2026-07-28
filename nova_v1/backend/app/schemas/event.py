@@ -17,7 +17,7 @@ WHO USES THIS
 
 # import important libraries
 from datetime import datetime
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, Union, TypeAlias
 from uuid import UUID
 from pydantic import BaseModel, Discriminator, Field
 
@@ -102,18 +102,16 @@ class STTEvent(BaseEvent):
     type: Literal["STT"] = "STT"
     text: str                           
 
-# combine into a list 
-events = [
-    TimeEvent,
-    LocationEvent,
-    NotificationEvent,
-    CalendarTriggerEvent,
-    AccelerometerEvent,
-    ScreenEvent,
-    STTEvent
-]
-
-Event = Annotated[
-    Union[tuple(events)],
+# discriminated union of every event type.
+Event: TypeAlias = Annotated[
+    Union[
+        TimeEvent,
+        LocationEvent,
+        NotificationEvent,
+        CalendarTriggerEvent,
+        AccelerometerEvent,
+        ScreenEvent,
+        STTEvent,
+    ],
     Discriminator("type"),
 ]
