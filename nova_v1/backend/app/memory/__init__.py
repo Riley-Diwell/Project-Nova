@@ -13,25 +13,21 @@ Two generic helpers, both operating on that table:
   - read(column, value)  pull every row where `column` == `value`; called by the
                          Intent Surface to analyse patterns.
 
-Both are deliberately generic:
-  * write() takes a dict of column -> value, so the State Estimator decides what
-    to log without this module knowing the event shape.
-  * read() takes the column to filter on as an argument - it is NOT fixed - so
-    the same helper serves any lookup (event_type today, tool/outcome later).
-
 Values in `record` must be JSON-serialisable for jsonb columns; callers using
 Pydantic should pass model_dump(mode="json").
 
 Persona (pgvector) and RAG search are out of scope here - built later.
-
-WHO USES THIS
-- Georgia: state_estimator writes entries; intent_surface reads them back
 """
 from __future__ import annotations
 
 from typing import Any
 
-from ..db import get_client
+# Importable both as `app.memory` (scripts/tests) and bare `memory` (the server,
+# launched as uvicorn main:app from backend/app/). See db.py for the same dance.
+try:
+    from ..db import get_client           # app.memory
+except ImportError:                       # pragma: no cover
+    from db import get_client             # memory (cwd = backend/app)
 
 # The episodic Memory table (backend/db/schema.sql). read()/write() default here;
 # pass `table` only if you need to point the same helpers at another table.

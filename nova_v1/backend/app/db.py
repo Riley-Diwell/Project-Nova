@@ -14,7 +14,12 @@ from functools import lru_cache
 
 from supabase import Client, create_client
 
-from .config import settings
+# The backend is launched two ways: as the `app` package (scripts/tests, run from
+# backend/) and bare from backend/app/ (uvicorn main:app). Support both.
+try:
+    from .config import settings          # app.db
+except ImportError:                       # pragma: no cover
+    from config import settings           # db (cwd = backend/app)
 
 
 @lru_cache(maxsize=1)
