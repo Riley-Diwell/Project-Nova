@@ -30,6 +30,7 @@ from gain.gain_store import GainStore
 from gain.overrides import GainOverrides
 from tools.registry import ToolRegistry
 from tools.dispatcher import Dispatcher
+from tools.calendar_tool import CalendarTool
 from tools.memory_tool import MemoryTool
 from tools.navigation import NavigationTool
 from tools.notification_management import NotificationManagementTool
@@ -74,12 +75,19 @@ SYSTEM_PROMPT = (
     "yet.\"). Check recent_episodes and the memory tool before you fall back "
     "on that: not being told something outright is not the same as having "
     "nothing to go on. "
-    "user_state.current_events/upcoming_events is only a short-range snapshot "
-    "(now plus the next couple of hours) - it is NOT the whole calendar. If "
-    "the user asks about a range outside that snapshot (today, tomorrow, "
-    "next week, next month, a specific date), call get_calendar_range rather "
-    "than guessing or claiming you don't have the information - use the "
-    "triggering event's timestamp as 'now' to compute the range. "
+    "CALENDAR AND TIME. Now is user_state.local_time; every event carries "
+    "start_local and end_local, already in the user's timezone. Work only from "
+    "those three. Read the date off start_local to say whether something is "
+    "today or tomorrow, and the clock time off it to say when - do not assume "
+    "the next event in a list is tomorrow, check its date against local_time's "
+    "date. Never date-reckon from the triggering event's timestamp or from any "
+    "*_millis field: those are UTC instants and land on a different calendar "
+    "day from the user's for much of the day. "
+    "current_events/upcoming_events is only the next couple of hours, not the "
+    "calendar. Whenever the user names a day or a span - today, tomorrow, this "
+    "week, a date - call get_calendar_range for that span in local time, even "
+    "if upcoming_events already appears to hold something; that list is a "
+    "preview and is routinely incomplete for the day being asked about. "
     "recent_episodes holds the last few logged episodes of the same event type "
     "(oldest first), each with the event, the user_state at the time, and the "
     "action taken and how it landed (outcome). This is your memory of THIS "
@@ -123,38 +131,6 @@ GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
     },
 }
 
-GET_CALENDAR_RANGE_TOOL: dict[str, Any] = {
-    "name": "get_calendar_range",
-    "description": (
-        "Reads the user's calendar live from their device over an arbitrary "
-        "date range. Call this whenever a calendar question reaches outside "
-        "the current_events/upcoming_events already present in user_state "
-        "(e.g. 'today', 'tomorrow', 'next week', 'next month', a specific "
-        "date). Use the triggering event's timestamp as 'now' to compute "
-        "relative ranges. Never fabricate calendar events you don't have -"
-        " call this instead."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "from_time": {
-                "type": "string",
-                "description": (
-                    "ISO 8601 UTC start of the range, with a 'Z' suffix - same format as "
-                    "the triggering event's timestamp, e.g. 2026-07-28T00:00:00Z"
-                ),
-            },
-            "to_time": {
-                "type": "string",
-                "description": (
-                    "ISO 8601 UTC end of the range, with a 'Z' suffix, e.g. 2026-07-29T00:00:00Z"
-                ),
-            },
-        },
-        "required": ["from_time", "to_time"],
-    },
-}
-
 # The gain store is passed in so register() below loads each tool's saved gain
 # rather than starting every tool back at DEFAULT_GAIN - without it the dial in
 # the Android app (GainScreen.kt, via /tools/gain) would reset on each restart.
@@ -164,6 +140,9 @@ _REGISTRY = ToolRegistry(gain_store=_GAIN_STORE)
 _REGISTRY.register(NavigationTool())
 _REGISTRY.register(NotificationManagementTool())
 _REGISTRY.register(MemoryTool())
+# Runs on the phone, not here (CLIENT_TOOLS below) - registered so it carries a
+# gain, and so gets a dial in the app's Gain tab like the others.
+_REGISTRY.register(CalendarTool())
 _DISPATCHER = Dispatcher(_REGISTRY)
 
 REGISTRY_TOOLS: list[dict[str, Any]] = [
@@ -171,7 +150,10 @@ REGISTRY_TOOLS: list[dict[str, Any]] = [
     for s in _REGISTRY.get_schemas()
 ]
 
-TOOLS: list[dict[str, Any]] = [GET_CURRENT_ADDRESS_TOOL, GET_CALENDAR_RANGE_TOOL, *REGISTRY_TOOLS]
+# get_current_address is a context tool - a lookup with no gain, so it stays out
+# of the registry (see dispatcher.py) and is declared inline above. Everything
+# else Claude can call now comes from the registry, so each one has a dial.
+TOOLS: list[dict[str, Any]] = [GET_CURRENT_ADDRESS_TOOL, *REGISTRY_TOOLS]
 
 CLIENT_TOOLS: set[str] = {"get_calendar_range"}
 

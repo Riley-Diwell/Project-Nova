@@ -30,6 +30,8 @@ class CalendarEventInfo(BaseModel):
     title: str
     start_millis: int
     end_millis: int
+    start_local: Optional[str] = None
+    end_local: Optional[str] = None
     location: Optional[str] = None
     availability: str          # "busy" / "free" / "tentative"
     is_all_day: bool
@@ -50,6 +52,7 @@ class UserState(BaseModel):
     screen: bool = False
     timestamp: int = 0                   # epoch millis
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    local_time: Optional[str] = None
 
     # Phase 2 sensor-inference extension
     motion: Optional[str] = None
