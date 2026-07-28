@@ -31,12 +31,19 @@ from tools.dispatcher import Dispatcher
 from tools.navigation import NavigationTool
 from tools.notification_management import NotificationManagementTool
 
+import memory
+
 load_dotenv()
 
 client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 MODEL = "claude-haiku-4-5"
 MAX_ITERATIONS = 5
+
+# How many past episodes of the same event_type to hand Claude as context.
+# memory.read() returns the whole log, so this is a prompt-size cap, not a query
+# limit - keep it small.
+RECENT_EPISODES = 5
 
 MAPS_API_KEY = os.environ.get("google_maps_api_key")
 
@@ -64,7 +71,12 @@ SYSTEM_PROMPT = (
     "the user asks about a range outside that snapshot (today, tomorrow, "
     "next week, next month, a specific date), call get_calendar_range rather "
     "than guessing or claiming you don't have the information - use the "
-    "triggering event's timestamp as 'now' to compute the range."
+    "triggering event's timestamp as 'now' to compute the range. "
+    "recent_episodes holds the last few logged episodes of the same event type "
+    "(oldest first), each with the event and the user_state at the time. Use "
+    "them to spot patterns and stay consistent with what you did before - they "
+    "are history, not the current situation, and an empty list just means "
+    "nothing comparable has been logged yet."
 )
 
 
@@ -209,12 +221,37 @@ _PENDING_SESSIONS: dict[str, dict[str, Any]] = {}
 
 # --- the loop ---------------------------------------------------------------
 
-def run(user_state: UserState, event: Event) -> IntentResult | NeedMoreResult:
-    payload = {
-        "event": event.model_dump(mode="json"),
-        "user_state": user_state.model_dump(mode="json"),
-    }
+def _recent_episodes(event: Event) -> list[dict[str, Any]]:
+    """
+    The last RECENT_EPISODES logged episodes of this event's type, oldest first,
+    for pattern analysis (schema.sql: "the Intent Surface reads rows back").
 
+    main.py logs the current episode before calling run(), so that row is
+    dropped here - it is already in the payload as `event`, not history.
+    Non-fatal: without Supabase configured this just yields no history.
+    """
+    try:
+        rows = memory.read("event_type", event.type)
+    except Exception as e:
+        print(f"[memory] read skipped: {e}")
+        return []
+
+    current_id = str(event.id)
+    past = [r for r in rows if (r.get("event") or {}).get("id") != current_id]
+    print(f"[memory] {len(past)} past {event.type!r} episodes, using last {RECENT_EPISODES}")
+    return [
+        {
+            "created_at": r.get("created_at"),
+            "event": r.get("event"),
+            "user_state": r.get("user_state"),
+            "action": r.get("action"),
+            "outcome": r.get("outcome"),
+        }
+        for r in past[-RECENT_EPISODES:]
+    ]
+
+
+def run(user_state: UserState, event: Event) -> IntentResult | NeedMoreResult:
     if MOCK_LLM:
         text = getattr(event, "text", None)
         return IntentResult(
@@ -223,6 +260,12 @@ def run(user_state: UserState, event: Event) -> IntentResult | NeedMoreResult:
                    + (f" text={text!r}" if text else ""),
             actions=[],
         )
+
+    payload = {
+        "event": event.model_dump(mode="json"),
+        "user_state": user_state.model_dump(mode="json"),
+        "recent_episodes": _recent_episodes(event),
+    }
 
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": json.dumps(payload)},
