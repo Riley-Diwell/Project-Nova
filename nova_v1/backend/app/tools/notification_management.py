@@ -1,5 +1,4 @@
 """
-
 Interfaces with the notification batcher (notification_batcher.py).
 
 - Gain should be moderate — Nova can proactively surface a summary
@@ -12,16 +11,16 @@ Interfaces with the notification batcher (notification_batcher.py).
      "clear everything", "what's waiting" should map to this tool.
 
      dispatcher.dispatch_reactive("notification_management", {
-         "action": "query"                    
+         "action": "query"
      })
 
      dispatcher.dispatch_reactive("notification_management", {
          "action": "snooze",
-         "snooze_minutes": 30                 
+         "snooze_minutes": 30
      })
 
      dispatcher.dispatch_reactive("notification_management", {
-         "action": "acknowledge_all"          
+         "action": "acknowledge_all"
      })
 
   2. PROACTIVE:
@@ -34,7 +33,7 @@ Interfaces with the notification batcher (notification_batcher.py).
      proposal = dispatcher.dispatch_proactive(
          "notification_management",
          {"action": "query"},
-         state_confidence=0.8,   
+         state_confidence=0.8,
      )
      if proposal.proposed:
          # V1: always ask the user first
@@ -93,15 +92,19 @@ For "query" specifically:
       "spoken": "3 notifications waiting: ..."
   }
 
-  STARTUP 
-The tool shares the notification batcher instance with nova_main.py.
-Call this once at startup:
+  STARTUP
+The tool shares the notification batcher instance with main.py, which
+creates and starts one FastAPI startup:
 
-    from functions.notification_management import register_batcher
-    register_batcher(your_batcher_instance)
+    from tools.notification_management import register_batcher
+    from tools.notification_batcher import NotificationBatcher
 
-If you don't call this, the tool will create its own batcher — which
-won't have any notifications in it, so query will always return empty.
+    batcher = NotificationBatcher()
+    batcher.start()
+    register_batcher(batcher)
+
+If that isn't called, the tool has no batcher to query and 'query' reports
+the notification system as not running.
 
 URGENCY LEVELS
   critical  — delivered immediately regardless of mode (emergencies, battery dying)
@@ -115,7 +118,9 @@ as urgent vs ignorable.
 """
 
 from typing import Any
-from ..base import BaseTool
+
+from .base import BaseTool
+from .notification_batcher import NotificationBatcher
 
 
 class NotificationManagementTool(BaseTool):
@@ -157,13 +162,7 @@ class NotificationManagementTool(BaseTool):
         action         = tool_input.get("action", "query")
         snooze_minutes = int(tool_input.get("snooze_minutes", 30))
 
-        # Import batcher at call time 
-        # and works even if batcher hasn't started yet
-        try:
-            from notification_batcher import NotificationBatcher
-            batcher = _get_batcher()
-        except ImportError:
-            batcher = None
+        batcher = _batcher_instance
 
         if action == "query":
             return _query(batcher)
@@ -180,30 +179,18 @@ class NotificationManagementTool(BaseTool):
         }
 
 
-# nova_main.py creates the batcher — this gets a reference to it.
-# If running by itself or testing a fresh batcher is created.
-_batcher_instance = None
+# main.py creates the batcher at FastAPI startup — this gets a reference to it.
+_batcher_instance: NotificationBatcher | None = None
 
-def register_batcher(batcher) -> None:
-    """Called by nova_main.py to share its batcher instance."""
+def register_batcher(batcher: NotificationBatcher) -> None:
+    """Called by main.py at startup to share its batcher instance."""
     global _batcher_instance
     _batcher_instance = batcher
-
-def _get_batcher():
-    global _batcher_instance
-    if _batcher_instance is None:
-        try:
-            from notification_batcher import NotificationBatcher
-            _batcher_instance = NotificationBatcher()
-            _batcher_instance.start()
-        except ImportError:
-            pass
-    return _batcher_instance
 
 
 #Action handler
 
-def _query(batcher) -> dict:
+def _query(batcher: NotificationBatcher | None) -> dict:
     if batcher is None:
         return {
             "success": True,
@@ -233,7 +220,7 @@ def _query(batcher) -> dict:
     }
 
 
-def _snooze(batcher, minutes: int) -> dict:
+def _snooze(batcher: NotificationBatcher | None, minutes: int) -> dict:
     # Set batch window temporarily next delivery after N minutes
     if batcher:
         batcher.BATCH_WINDOW_MINUTES = minutes
@@ -241,7 +228,7 @@ def _snooze(batcher, minutes: int) -> dict:
     return {"success": True, "snoozed_minutes": minutes, "spoken": spoken}
 
 
-def _acknowledge_all(batcher) -> dict:
+def _acknowledge_all(batcher: NotificationBatcher | None) -> dict:
     if batcher is None:
         return {"success": True, "spoken": "Nothing to clear."}
     batch = batcher.get_pending_batch()
