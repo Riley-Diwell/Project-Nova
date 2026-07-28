@@ -95,12 +95,13 @@ class ScreenEvent(BaseEvent):
 
 # define user events
 # in the future can add in button event
-class STTEvent(BaseEvent):
+class VoiceEvent(BaseEvent):
     """
-    This event is triggered when the Nova System receives a speech-to-text (STT) input. 
+    This event is triggered when the Nova System receives a speech-to-text (STT) input.
+    type is "voice" to match what the Android client actually posts (NovaApiClient.kt).
     """
-    type: Literal["STT"] = "STT"
-    text: str                           
+    type: Literal["voice"] = "voice"
+    text: str
 
 # discriminated union of every event type.
 Event: TypeAlias = Annotated[
@@ -111,7 +112,7 @@ Event: TypeAlias = Annotated[
         CalendarTriggerEvent,
         AccelerometerEvent,
         ScreenEvent,
-        STTEvent,
+        VoiceEvent,
     ],
     Discriminator("type"),
 ]

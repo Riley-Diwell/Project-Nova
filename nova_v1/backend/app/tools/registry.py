@@ -42,8 +42,13 @@ from typing import Optional
 
 from .base import BaseTool
 from .schema import ToolSchema
-from ..gain.controller_gain import ControllerGain
-from ..gain.gain_store import GainStore
+
+try:
+    from ..gain.controller_gain import ControllerGain
+    from ..gain.gain_store import GainStore
+except ImportError:  # pragma: no cover
+    from gain.controller_gain import ControllerGain
+    from gain.gain_store import GainStore
 
 
 @dataclass

@@ -1,0 +1,17 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+python-dotenv>=1.0
+
+# Intent Surface / state estimator
+anthropic>=0.40
+openai>=1.50
+numpy>=1.26
+
+# Tools
+fastmcp>=2.0
+googlemaps>=4.10
+requests>=2.32
+
+# Memory / Persona store
+supabase>=2.9

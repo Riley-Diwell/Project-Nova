@@ -12,12 +12,31 @@ WHO USES THIS
 - 
 """
 
+from typing import Any, Literal, Union
 from uuid import UUID
 from pydantic import BaseModel
-from .user_state import UserState
 
 
 class EventOut(BaseModel):
+    status: Literal["final"] = "final"
     event_id: UUID
     speech: str
+    actions: list[str] = []
+
+
+class NeedMoreOut(BaseModel):
+    """
+    Returned from /event or /event/continue when the Intent Surface needs
+    data that only exists on the device (e.g. a calendar range outside the
+    UserState snapshot) before it can finish answering. Android is expected
+    to resolve `request` on-device and POST the result to /event/continue
+    with this same session_id.
+    """
+    status: Literal["need_more"] = "need_more"
+    event_id: UUID
+    session_id: str
+    request: dict[str, Any]
+
+
+EventResponse = Union[EventOut, NeedMoreOut]
 
