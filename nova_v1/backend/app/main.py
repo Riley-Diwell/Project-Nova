@@ -16,6 +16,8 @@ WHO USES THIS
 - Georgia: 
 """
 
+# debug uvicorn main:app --reload
+
 # import necessary libraries
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -29,6 +31,7 @@ from schemas.signals import Signals
 from schemas.user_state import UserState
 from intent_surface import loop
 from state_estimator.state_estimator_v2 import state_mapping
+import memory
 
 # initialise app
 app = FastAPI(title="NOVA V1")
@@ -42,7 +45,20 @@ class InputWrapper(BaseModel):
 # app.post handles incoming HTTP POST requests
 @app.post("/event", response_model=EventOut)
 async def receive_event(input_wrapper:InputWrapper) -> EventOut: # event:Event, signals:Signals
-    state = state_mapping(input_wrapper.signals)
+    signals=input_wrapper.signals
+    event = input_wrapper.event
+
+    state = state_mapping(signals)
+    
+    # store user state and event to memory
+    memory.write({
+        "event_type":event.type,
+        "event":event.model_dump(mode='json'),
+        "user_state":state.model_dump(mode='json')
+    })
+    
+
+
     intent = loop.run(state, input_wrapper.event, input_wrapper.signals)
     return EventOut(
         event_id=input_wrapper.event.id,

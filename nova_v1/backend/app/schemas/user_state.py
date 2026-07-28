@@ -14,11 +14,14 @@ WHO USES THIS
 
 """
 
+# import necessary libraries
 from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
 from pydantic import BaseModel, Field
 
+# import nova libraries
+from schemas.event import Event
 
 Activity = Literal["stationary", "walking", "running", "cycling", "driving", "unknown"]
 CalendarCtx = Literal["free", "in_event", "event_starting_soon", "unknown"]

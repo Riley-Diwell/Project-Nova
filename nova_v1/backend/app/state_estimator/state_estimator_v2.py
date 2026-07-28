@@ -37,7 +37,8 @@ def state_mapping(Signals):
                         activity = Signals.accelerometer,
                         location_ctx= [Signals.lat, Signals.long],
                         calendar_ctx= "unknown",
-                        confidence=0.0 # placeholder
+                        confidence=0.0 # placeholder,
+                        
                         )
     state.confidence = get_confidence(state)
     return state
@@ -60,7 +61,7 @@ def get_confidence(user_state: UserState):
             else:
                 sum += 1
                 total += 1
-        elif name=="confidence": # skip this one
+        elif name in["confidence", "event"]: # skip this one
             continue
         else:
             sum += 1
@@ -70,4 +71,4 @@ def get_confidence(user_state: UserState):
     else: 
         confidence = 0
     return confidence        
-            
+
