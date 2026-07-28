@@ -21,7 +21,6 @@ from pydantic import BaseModel, Field
 
 
 Activity = Literal["stationary", "walking", "running", "cycling", "driving", "unknown"]
-Screen = Literal["on", "off", "unknown"]
 CalendarCtx = Literal["free", "in_event", "event_starting_soon", "unknown"]
 
 class UserState(BaseModel):
@@ -31,9 +30,9 @@ class UserState(BaseModel):
     id: UUID
     timestamp: datetime
     activity: Activity
-    location_ctx: str
+    location_ctx: list[float] # lat and long
     calendar_ctx: CalendarCtx
     dnd: bool
-    screen: Screen
+    screen: bool
     confidence: float = Field(ge=0.0, le=1.0)
     
