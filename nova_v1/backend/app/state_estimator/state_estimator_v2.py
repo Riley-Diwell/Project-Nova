@@ -28,7 +28,7 @@ def state_mapping(Signals):
     Map data from signals into a user state. This is currently a very simple mapping. 
     """
 
-    state = UserState(  id = UUID
+    state = UserState(  id = UUID,
                         timestamp = Signals.timestamp,
                         screen=Signals.screen_status,
                         dnd=Signals.dnd,
