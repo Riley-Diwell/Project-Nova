@@ -6,6 +6,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.ui.graphics.vector.ImageVector
 
 const val ONBOARDING_ROUTE = "onboarding"
@@ -14,6 +15,7 @@ sealed class NovaDestination(val route: String, val label: String, val icon: Ima
     data object Dashboard : NovaDestination("dashboard", "Dashboard", Icons.Default.Home)
     data object Voice : NovaDestination("voice", "Voice", Icons.Default.Mic)
     data object State : NovaDestination("state", "State", Icons.Default.Sensors)
+    data object Gain : NovaDestination("gain", "Gain", Icons.Default.Tune)
     data object Device : NovaDestination("device", "Device", Icons.Default.Bluetooth)
     data object Settings : NovaDestination("settings", "Profile", Icons.Default.Person)
 }
@@ -23,7 +25,8 @@ sealed class NovaDestination(val route: String, val label: String, val icon: Ima
 val bottomNavDestinations = listOf(
 //    NovaDestination.Dashboard
     NovaDestination.Voice,
-    NovaDestination.State
+    NovaDestination.State,
+    NovaDestination.Gain
 //    NovaDestination.Device,
 //    NovaDestination.Settings
 )
