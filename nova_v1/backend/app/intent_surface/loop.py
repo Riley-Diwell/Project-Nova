@@ -1,11 +1,13 @@
 """
 intent_surface/loop.py - Section 5.3: Intent Surface  (Georgia)
 
-STATUS: wip
+STATUS: working draft
 
 WHAT THIS FILE IS
-brief description
-    1. 
+Uses AI to infer intent. 
+    1. Runs an Anthropic client that receives a user message, an event ID 
+    and some situational context. 
+    2. Runs a tool calling loop to process this data and infer intent. 
 
 WHO USES THIS
 - Georgia: main.py's /event handler will call run(user_state) 

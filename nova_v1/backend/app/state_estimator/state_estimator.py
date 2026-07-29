@@ -1,14 +1,14 @@
 """
 state_estimator/state_estimator.py - Section 5.2: State Estimator  (Georgia)
 
-STATUS: wip
+STATUS: superseded
 
 WHAT THIS FILE IS
-brief description
-1. 
+Uses AI to estimate user state based off contextual signals. 
+
 
 WHO USES THIS
-- 
+- N/A
 
 """
 
