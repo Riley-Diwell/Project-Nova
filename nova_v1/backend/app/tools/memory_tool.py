@@ -70,13 +70,17 @@ class MemoryTool(BaseTool):
             ),
             gain_description=(
                 "How readily Nova files and looks things up without being "
-                "asked. At 1.0 any statement the user makes about themselves "
-                "is saved as a note, and any question is treated as a recall - "
-                "answered with the closest match even when nothing matches "
-                "outright. At 0.0 only an explicit instruction counts: 'note "
-                "that', 'remember this', 'what did I note about…'. Everything "
-                "in between raises the bar for acting on speech that was "
-                "probably, but not certainly, meant for Nova."
+                "asked. At 1.0 anything the user states as a fact is saved as "
+                "a note - about themselves, about the world, in passing, "
+                "whether or not it seems worth keeping and whether or not it "
+                "was addressed to Nova - and any question is treated as a "
+                "recall, answered with the closest match even when nothing "
+                "matches outright. At 0.0 only an explicit instruction "
+                "counts: 'note that', 'remember this', 'what did I note "
+                "about…'. Everything in between raises the bar for acting on "
+                "speech that was probably, but not certainly, meant for Nova. "
+                "Judging a statement too trivial or too obvious to keep is a "
+                "judgement for a lower gain to make, not this one."
             ),
             input_schema={
                 "type": "object",
