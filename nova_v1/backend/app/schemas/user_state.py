@@ -51,6 +51,10 @@ class UserState(BaseModel):
     timestamp: int = 0                   # epoch millis
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
+    # Additive: minutes east of UTC (e.g. 600 for UTC+10) - lets the backend convert
+    # the event's UTC timestamp into the user's actual local time.
+    utc_offset_minutes: int = 0
+
     # Phase 2 sensor-inference extension
     motion: Optional[str] = None
     ambient_light_lux: Optional[float] = None

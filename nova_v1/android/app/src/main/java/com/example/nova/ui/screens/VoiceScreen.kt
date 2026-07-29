@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.nova.network.NovaApiClient
 import com.example.nova.state.CalendarSignal
+import com.example.nova.state.CalendarWriter
 import com.example.nova.state.UserStateCollector
 import kotlinx.coroutines.launch
 import java.io.IOException
@@ -67,6 +68,37 @@ private fun parseIsoToEpochMillis(iso: String): Long =
     }
 
 /**
+ * Executes the backend's queued "calendar.create_event" actions (add_calendar_event in
+ * intent_surface/loop.py) via CalendarWriter, which inserts into the device's Calendar Provider
+ * and syncs onward to whichever account owns that calendar (e.g. Google). Assumes
+ * WRITE_CALENDAR is already granted - callers must check CalendarWriter.hasPermission first.
+ */
+private fun writeCalendarActions(
+    context: android.content.Context,
+    actions: List<NovaApiClient.CalendarAction>,
+): Int {
+    var created = 0
+    for (action in actions) {
+        try {
+            val start = parseIsoToEpochMillis(action.startIso)
+            val end = parseIsoToEpochMillis(action.endIso)
+            val uri = CalendarWriter.createEvent(
+                context = context,
+                title = action.title,
+                startMillis = start,
+                endMillis = end,
+                description = action.description,
+            )
+            if (uri != null) created++
+        } catch (e: DateTimeParseException) {
+            // Skip this one action rather than failing the whole batch - LLM-produced input,
+            // not a validated wire contract.
+        }
+    }
+    return created
+}
+
+/**
  * DESIGN.md §5.1/§5.3: button -> SpeechRecognizer -> POST /event -> TextToSpeech round trip.
  * The transcript + a UserState snapshot go to the backend; the spoken reply is whatever
  * comes back (echo-stub today, Intent Surface once it exists - see backend/app/main.py).
@@ -86,6 +118,18 @@ fun VoiceScreen() {
     var voiceState by remember { mutableStateOf(VoiceState.IDLE) }
     var transcript by remember { mutableStateOf("") }
     var statusText by remember { mutableStateOf("Tap the mic and say something.") }
+    // Holds a finished turn's calendar.create_event actions while we wait on the
+    // WRITE_CALENDAR permission prompt, so they can still be applied once granted.
+    var pendingCalendarActions by remember { mutableStateOf<List<NovaApiClient.CalendarAction>>(emptyList()) }
+
+    val calendarPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted && pendingCalendarActions.isNotEmpty()) {
+            writeCalendarActions(context, pendingCalendarActions)
+        }
+        pendingCalendarActions = emptyList()
+    }
 
     val textToSpeech = remember { arrayOfNulls<TextToSpeech>(1) }
     DisposableEffect(Unit) {
@@ -183,6 +227,15 @@ fun VoiceScreen() {
                                 hops++
                             }
                             val finalResult = result as? NovaApiClient.EventResult.Final
+                            val calendarActions = finalResult?.actions.orEmpty()
+                            if (calendarActions.isNotEmpty()) {
+                                if (CalendarWriter.hasPermission(context)) {
+                                    writeCalendarActions(context, calendarActions)
+                                } else {
+                                    pendingCalendarActions = calendarActions
+                                    calendarPermissionLauncher.launch(Manifest.permission.WRITE_CALENDAR)
+                                }
+                            }
                             statusText = "Heard you."
                             speak(finalResult?.speech ?: "Sorry, I couldn't finish that.")
                         } catch (e: IOException) {
