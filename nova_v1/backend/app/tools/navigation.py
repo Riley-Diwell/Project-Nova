@@ -11,7 +11,7 @@ INPUT
   - arrival_time (optional) - when they need to be there
   - origin (optional) - defaults to the user's current location_ctx,
     injected by intent_surface/loop.py before dispatch (see _run_local_tool)
-  - mode (optional) - transit | walking | driving, defaults to transit
+  - mode (optional) - transit | walking | driving, defaults to driving
 
 API SETUP
 Needs google_maps_api_key in .env (same key as get_current_address's
@@ -82,7 +82,7 @@ class NavigationTool(BaseTool):
                     "mode": {
                         "type": "string",
                         "enum": ["transit", "walking", "driving"],
-                        "description": "Travel mode. Defaults to transit.",
+                        "description": "Travel mode. Defaults to driving.",
                     },
                 },
                 "required": ["destination"],
@@ -93,7 +93,7 @@ class NavigationTool(BaseTool):
         destination = tool_input.get("destination", "")
         arrival_time = tool_input.get("arrival_time")
         origin = tool_input.get("origin") or f"{DEFAULT_HOME['lat']},{DEFAULT_HOME['lng']}"
-        mode = tool_input.get("mode", "transit")
+        mode = tool_input.get("mode", "driving")
 
         if not destination:
             return {
@@ -132,7 +132,8 @@ def _query_google_maps(origin: str, destination: str,
             params=params, timeout=5,
         )
         data = r.json()
-        if data.get("status") == "OK":
+        status = data.get("status")
+        if status == "OK":
             leg = data["routes"][0]["legs"][0]
             duration = leg["duration"]["text"]
             depart = leg.get("departure_time", {}).get("text", "now")
@@ -156,6 +157,19 @@ def _query_google_maps(origin: str, destination: str,
                 "spoken": spoken,
                 "api_used": True,
             }
+
+        # Directions API resolved the request but couldn't find the address/
+        # route (e.g. ZERO_RESULTS, NOT_FOUND) - don't fall back to the generic
+        # Canberra estimate table here, since that would confidently state a
+        # made-up travel time for a destination Google itself couldn't locate.
+        print(f"[NavigationTool] Directions API status={status!r} "
+              f"error_message={data.get('error_message')!r} destination={destination!r}")
+        return {
+            "success": False,
+            "spoken": f"I couldn't find a route to '{destination}' — could you confirm the address?",
+            "needs_clarification": True,
+            "api_used": True,
+        }
     except Exception as e:
         print(f"[NavigationTool] Maps API failed: {e}")
 

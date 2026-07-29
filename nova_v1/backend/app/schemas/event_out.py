@@ -21,7 +21,7 @@ class EventOut(BaseModel):
     status: Literal["final"] = "final"
     event_id: UUID
     speech: str
-    actions: list[str] = []
+    actions: list[dict[str, Any]] = []
 
 
 class NeedMoreOut(BaseModel):

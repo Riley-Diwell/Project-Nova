@@ -40,7 +40,7 @@ object NovaApiClient {
      * with the on-device result, keyed by [NeedMore.sessionId].
      */
     sealed class EventResult {
-        data class Final(val speech: String, val actionCount: Int) : EventResult()
+        data class Final(val speech: String, val actions: List<CalendarAction>) : EventResult()
         data class NeedMore(
             val sessionId: String,
             val requestType: String,
@@ -48,6 +48,18 @@ object NovaApiClient {
             val toIso: String,
         ) : EventResult()
     }
+
+    /**
+     * Mirrors a "calendar.create_event" entry from the backend's actions[] (schemas/event_out.py) -
+     * the Intent Surface queues these when add_calendar_event is called; the caller is expected to
+     * execute them on-device via [com.example.nova.state.CalendarWriter].
+     */
+    data class CalendarAction(
+        val title: String,
+        val startIso: String,
+        val endIso: String,
+        val description: String?,
+    )
 
     /** Posts a voice transcript + [UserState] snapshot to /event and returns the spoken reply. */
     suspend fun postVoiceEvent(transcript: String, userState: UserState): EventResult =
@@ -110,10 +122,26 @@ object NovaApiClient {
             }
             else -> EventResult.Final(
                 speech = json.optString("speech", "..."),
-                actionCount = json.optJSONArray("actions")?.length() ?: 0
+                actions = json.optJSONArray("actions")?.toCalendarActions().orEmpty(),
             )
         }
     }
+
+    private fun JSONArray.toCalendarActions(): List<CalendarAction> =
+        (0 until length()).mapNotNull { i ->
+            val obj = optJSONObject(i) ?: return@mapNotNull null
+            if (obj.optString("type") != "calendar.create_event") return@mapNotNull null
+            val title = obj.optString("title")
+            val start = obj.optString("start_time")
+            val end = obj.optString("end_time")
+            if (title.isBlank() || start.isBlank() || end.isBlank()) return@mapNotNull null
+            CalendarAction(
+                title = title,
+                startIso = start,
+                endIso = end,
+                description = obj.optString("description").takeIf { obj.has("description") && !obj.isNull("description") },
+            )
+        }
 
     /** Wire shape per DESIGN.md Section 5.2 - snake_case keys to match the backend Pydantic schema. */
     private fun UserState.toJson(): JSONObject = JSONObject().apply {
@@ -124,6 +152,7 @@ object NovaApiClient {
         put("screen", screen)
         put("timestamp", timestamp)
         put("confidence", confidence)
+        put("utc_offset_minutes", utcOffsetMinutes)
         put("motion", motion)
         put("ambient_light_lux", ambientLightLux)
         put("proximity_near", proximityNear)

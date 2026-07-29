@@ -1,5 +1,7 @@
 package com.example.nova.model
 
+import java.util.TimeZone
+
 /**
  * Live, transient estimate of the user's current situation, attached to every event sent
  * to the backend. Frozen seam per DESIGN.md §5.2/§6 - wire shape is
@@ -19,6 +21,7 @@ data class UserState(
     val screen: Boolean = false,
     val timestamp: Long = System.currentTimeMillis(),
     val confidence: Float = 0f,
+    val utcOffsetMinutes: Int = TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60_000,
     // Phase 2 sensor-inference signals
     val motion: String? = null,
     val ambientLightLux: Float? = null,
