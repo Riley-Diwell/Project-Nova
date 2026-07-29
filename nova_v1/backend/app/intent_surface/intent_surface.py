@@ -1,17 +1,14 @@
 """
 intent_surface.py - Section 5.3: Intent surface (backend, Claude tool-calling loop) (Georgia)
 
-STATUS: wip
+STATUS: superseded
 
 WHAT THIS FILE IS
-brief description
-    1. 
-
-    2. 
+Uses AI to infer intent
 
 
 WHO USES THIS
-- 
+- N/A
 
 
 

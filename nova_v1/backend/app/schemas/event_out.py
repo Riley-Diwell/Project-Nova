@@ -1,15 +1,15 @@
 """
 schemas/event_out.py - Section 5.3: Intent Surface  (Georgia)
 
-STATUS: wip 
+STATUS: working draft
 
 WHAT THIS FILE IS
 Response schema for POST /event — what the backend hands back to Riley's
 Android client for every event it receives.
-    1. 
 
 WHO USES THIS
-- 
+- Georgia: main.py computes this using the intent surface loop
+- Riley: receives this and handles it via Android
 """
 
 from typing import Any, Literal, Union

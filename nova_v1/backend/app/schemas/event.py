@@ -1,7 +1,7 @@
 """
 schemas/event.py - Section 5.2: State Estimator  (Georgia)
 
-STATUS: wip
+STATUS: working draft
 
 WHAT THIS FILE IS
 Defines schemas for events. 

@@ -4,13 +4,8 @@ schemas/user_state.py - Section 5.2: State Estimator  (Georgia)
 STATUS: working draft
 
 WHAT THIS FILE IS
-Defines the UserState schema - the wire shape Android posts directly to
-POST /event alongside every Event (android/.../model/UserState.kt is the
-source of truth; this mirrors it field-for-field). Android computes UserState
-on-device from ~19 fused signals and posts the result, so the backend does
-not re-derive it from raw signals (see ADR: "adopt Android's on-device
-UserState" decision, 2026-07-28) - `state_estimator/state_estimator_v2.py`'s
-`state_mapping()` is retired from the live path.
+Defines the UserState schema - the wire shape Android computes on device 
+and posts directly to POST /event alongside every Event.
 
 Everything below `confidence` is optional because it's permission-gated or
 sensor-dependent on the Android side - older clients or the demo fallback
