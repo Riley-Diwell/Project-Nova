@@ -31,6 +31,7 @@ from pydantic import BaseModel
 # import nova libraries
 from schemas.event import Event
 from schemas.event_out import EventOut, EventResponse, NeedMoreOut
+from schemas.tool_gain import ToolGainOut, ToolGainUpdate
 from schemas.user_state import UserState
 from intent_surface import loop
 from intent_surface.loop import IntentResult, NeedMoreResult
@@ -113,6 +114,26 @@ async def receive_event(input_wrapper: InputWrapper) -> EventResponse:
     _log_episode(input_wrapper.event, us)
     intent = loop.run(input_wrapper.user_state, input_wrapper.event)
     return _to_response(intent)
+
+
+# --- per-tool gain (Section 5.7) ---------------------------------------------
+# The Android app's Gain tab (ui/screens/GainScreen.kt) reads these to draw one
+# dial per Function tool and writes back what the user dials in. V1 gain is
+# user-set (schema.sql), so this is the seam that sets it.
+
+@app.get("/tools/gain", response_model=list[ToolGainOut])
+async def get_tool_gains() -> list[dict[str, Any]]:
+    return loop.GAIN_OVERRIDES.view_all()
+
+
+# PUT, not POST: setting a tool's override to x is idempotent. A null override
+# clears it, reverting that tool to its learned value.
+@app.put("/tools/gain/{tool_name}", response_model=ToolGainOut)
+async def put_tool_gain(tool_name: str, update: ToolGainUpdate) -> dict[str, Any]:
+    try:
+        return loop.GAIN_OVERRIDES.set(tool_name, update.override)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown tool: {tool_name!r}")
 
 
 # Android posts here after resolving a need_more request from /event (see

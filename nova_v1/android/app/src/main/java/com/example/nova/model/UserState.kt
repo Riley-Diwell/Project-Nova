@@ -45,4 +45,11 @@ data class UserState(
     // Rich calendar detail (additive - calendarCtx frozen-seam string unchanged above)
     val currentEvents: List<CalendarEventInfo> = emptyList(),
     val upcomingEvents: List<CalendarEventInfo> = emptyList(),
-)
+) {
+    /**
+     * [timestamp] in this device's timezone, ISO 8601 with offset. This is "now" for anything
+     * the user phrases in their own terms - "tomorrow", "tonight", "this afternoon" - which
+     * UTC gets wrong by most of a day for a UTC+10 user near midnight.
+     */
+    val localTime: String get() = timestamp.toLocalIso()
+}

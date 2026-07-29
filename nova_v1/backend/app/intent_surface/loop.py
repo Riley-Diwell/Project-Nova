@@ -1,11 +1,13 @@
 """
 intent_surface/loop.py - Section 5.3: Intent Surface  (Georgia)
 
-STATUS: wip
+STATUS: working draft
 
 WHAT THIS FILE IS
-brief description
-    1. 
+Uses AI to infer intent. 
+    1. Runs an Anthropic client that receives a user message, an event ID 
+    and some situational context. 
+    2. Runs a tool calling loop to process this data and infer intent. 
 
 WHO USES THIS
 - Georgia: main.py's /event handler will call run(user_state) 
@@ -15,7 +17,7 @@ WHO USES THIS
 import json
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import UUID
 
@@ -29,8 +31,13 @@ load_dotenv()
 # import nova libraries
 from schemas.user_state import UserState
 from schemas.event import Event
+from gain.config import FIRING_THRESHOLD
+from gain.gain_store import GainStore
+from gain.overrides import GainOverrides
 from tools.registry import ToolRegistry
 from tools.dispatcher import Dispatcher
+from tools.calendar_tool import CalendarTool
+from tools.memory_tool import MemoryTool
 from tools.navigation import NavigationTool
 from tools.notification_management import NotificationManagementTool
 
@@ -58,37 +65,90 @@ SYSTEM_PROMPT = (
     "(e.g. what the user said) and their current state, both as JSON. "
     "Decide whether to say anything (short, natural speech - empty string "
     "if nothing warrants saying aloud) and whether to invoke any tools. "
-    "Never fabricate context. "
+    "Your text is read aloud by text-to-speech, so write plain spoken "
+    "sentences - no markdown, bullets or asterisks. "
+    "Never invent facts you were not given. Reading a pattern out of "
+    "recent_episodes is not inventing - that is what they are there for. "
     "For ambient/system events (no direct user request), it's fine to stay "
     "quiet if nothing warrants saying aloud. "
     "But if the triggering event is the user directly speaking to you (a "
     "voice event) and you cannot fulfil what they asked - e.g. you lack the "
     "right tool, or you don't have the information - never return an empty "
     "string. Instead say briefly that you're not sure, and say why (for "
-    "example: \"I'm not sure - I don't have a way to check the weather "
-    "yet.\"). "
-    "user_state.current_events/upcoming_events is only a short-range snapshot "
-    "(now plus the next couple of hours) - it is NOT the whole calendar. If "
-    "the user asks about a range outside that snapshot (today, tomorrow, "
-    "next week, next month, a specific date), call get_calendar_range rather "
-    "than guessing or claiming you don't have the information - use the "
-    "payload's local_time field as 'now' to compute the range. "
-    "The payload's event.timestamp is always UTC - never read it as, or speak "
-    "it aloud as, the user's current time/date. local_time is that same "
-    "instant already converted using user_state.utc_offset_minutes, i.e. the "
-    "user's actual wall-clock time - always use local_time when asked what "
-    "time or date it is. "
+    "example: \"I'm not sure - I don't have a way to add calendar events "
+    "yet.\"). Check recent_episodes and the memory tool before you fall back "
+    "on that: not being told something outright is not the same as having "
+    "nothing to go on. "
+    "Not everything the user says is a request. A plain statement, an "
+    "observation, something said in passing - these are not requests you have "
+    "failed to fulfil, so do not answer them by asking what they wanted. Run "
+    "them past the PROACTIVITY rules below first; often the right response to "
+    "a statement is to quietly do something with it and say little or "
+    "nothing. "
+    "CALENDAR AND TIME. Now is user_state.local_time; every event carries "
+    "start_local and end_local, already in the user's timezone. Work only from "
+    "those three. Read the date off start_local to say whether something is "
+    "today or tomorrow, and the clock time off it to say when - do not assume "
+    "the next event in a list is tomorrow, check its date against local_time's "
+    "date. Never date-reckon from the triggering event's timestamp or from any "
+    "*_millis field: those are UTC instants and land on a different calendar "
+    "day from the user's for much of the day. "
+    "current_events/upcoming_events is only the next couple of hours, not the "
+    "calendar. Whenever the user names a day or a span - today, tomorrow, this "
+    "week, a date - call get_calendar_range for that span in local time, even "
+    "if upcoming_events already appears to hold something; that list is a "
+    "preview and is routinely incomplete for the day being asked about. "
     "recent_episodes holds the last few logged episodes of the same event type "
-    "(oldest first), each with the event and the user_state at the time. Use "
-    "them to spot patterns and stay consistent with what you did before - they "
-    "are history, not the current situation, and an empty list just means "
-    "nothing comparable has been logged yet."
-    "Every calendar event (in user_state.current_events/upcoming_events, and "
-    "in get_calendar_range results) carries start_millis/end_millis (raw UTC "
-    "epoch milliseconds) alongside start_local/end_local (the same instants "
-    "already converted to the user's local wall-clock time). Never read or "
-    "speak start_millis/end_millis directly - always use start_local/end_local "
-    "when telling the user when an event is."
+    "(oldest first), each with the event, the user_state at the time, and the "
+    "action taken and how it landed (outcome). This is your memory of THIS "
+    "user - it is evidence about who they are, not just a transcript of past "
+    "turns. Read it before answering and use it two ways: to stay consistent "
+    "with what you did before, and to answer questions about the user "
+    "themselves - their habits, routines, preferences, their 'usual'. When "
+    "they ask something nobody ever stated outright but their history points "
+    "at - a favourite food or place, the route they always take, when they "
+    "normally leave, what they always dismiss - answer from that history "
+    "instead of saying you don't know, and say what you based it on (e.g. "
+    "\"you've asked me to take you there most mornings this week, so I'd say "
+    "that one\"). Repetition is the signal: the same destination, app or "
+    "choice recurring across episodes is a preference, even when the wording "
+    "differs each time. Say you don't know only when the history genuinely "
+    "has nothing bearing on the question; an empty list means nothing "
+    "comparable has been logged yet. They are history, not the current "
+    "situation. "
+    "PROACTIVITY. Every tool that does something for the user takes a "
+    "`trigger`, and you must set it truthfully on every call. 'requested' "
+    "means this turn's words asked for it. 'inferred' means you decided it "
+    "would help - volunteering something unasked, following a hunch or a "
+    "pattern, or adding context to a question about something else. When in "
+    "doubt it is 'inferred'. Each tool's description tells you its current "
+    "controller gain: that is the user's own setting for how much this tool "
+    "may do without being asked, and an inferred call below it is refused and "
+    "does nothing. "
+    "A high gain is an instruction, not merely permission: a tool near 1.00 "
+    "means act on inference without being asked, whether or not the moment "
+    "seems to warrant it. Weighing that up is what a low gain is for. Past "
+    "episodes where nothing was done are not evidence that nothing should be "
+    "done now - they predate the current settings. "
+    "Decide all of this silently. Your text field is speech, not a place to "
+    "think: it holds only words a person would say out loud, and never your "
+    "reasoning, your weighing up, or any mention of gain, tools or why you "
+    "did or did not act. If the answer is to act quietly, act and leave the "
+    "text empty. "
+    "Respect a refusal - answer what they asked and drop what you were going "
+    "to add. Never relabel a refused call as 'requested' to get around it, "
+    "and never tell the user about gain, tools or refusals; they should "
+    "simply notice Nova offering more or less unprompted. A low gain never "
+    "stops you doing what you were directly asked to do. "
+    "recent_episodes is inferred from behaviour; the memory tool is the "
+    "separate notebook of what the user has told you. Always save when they "
+    "ask you to remember or note something, and recall when they ask what "
+    "they told you or what they noted - that much is true at any gain. "
+    "Beyond that floor, how much you file and look up unasked is set by the "
+    "memory tool's own gain, not by this paragraph: at a high gain, saving a "
+    "statement they simply made in passing is exactly what they have asked "
+    "for. When both bear on an answer, prefer what they stated over what you "
+    "inferred."
 )
 
 
@@ -108,132 +168,222 @@ GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
     },
 }
 
-GET_CALENDAR_RANGE_TOOL: dict[str, Any] = {
-    "name": "get_calendar_range",
-    "description": (
-        "Reads the user's calendar live from their device over an arbitrary "
-        "date range. Call this whenever a calendar question reaches outside "
-        "the current_events/upcoming_events already present in user_state "
-        "(e.g. 'today', 'tomorrow', 'next week', 'next month', a specific "
-        "date). Use the payload's local_time as 'now' to work out the range "
-        "in the user's local calendar (e.g. their 'today' midnight-to-midnight), "
-        "then convert both ends back to UTC using user_state.utc_offset_minutes "
-        "before calling this tool - from_time/to_time are always UTC. Never "
-        "fabricate calendar events you don't have - call this instead."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "from_time": {
-                "type": "string",
-                "description": (
-                    "ISO 8601 UTC start of the range, with a 'Z' suffix - same format as "
-                    "the triggering event's timestamp, e.g. 2026-07-28T00:00:00Z. Convert "
-                    "from the user's local date/time using user_state.utc_offset_minutes."
-                ),
-            },
-            "to_time": {
-                "type": "string",
-                "description": (
-                    "ISO 8601 UTC end of the range, with a 'Z' suffix, e.g. 2026-07-29T00:00:00Z. "
-                    "Convert from the user's local date/time using user_state.utc_offset_minutes."
-                ),
-            },
-        },
-        "required": ["from_time", "to_time"],
-    },
-}
+# The gain store is passed in so register() below loads each tool's saved gain
+# rather than starting every tool back at DEFAULT_GAIN - without it the dial in
+# the Android app (GainScreen.kt, via /tools/gain) would reset on each restart.
+_GAIN_STORE = GainStore()
 
-ADD_CALENDAR_EVENT_TOOL: dict[str, Any] = {
-    "name": "add_calendar_event",
-    "description": (
-        "Adds an event to the user's device calendar (which syncs onward to "
-        "their Google account). Call this whenever the user asks to create, "
-        "add, book, or schedule a calendar event. Use the payload's "
-        "local_time as 'now' to resolve any relative time the user gives "
-        "(e.g. 'tomorrow at 3pm'), then convert both start_time and end_time "
-        "to UTC using user_state.utc_offset_minutes before calling - both "
-        "are always UTC. If the user doesn't give a duration, default to one "
-        "hour after start_time."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "title": {
-                "type": "string",
-                "description": "Short title for the event, e.g. 'Dentist appointment'.",
-            },
-            "start_time": {
-                "type": "string",
-                "description": (
-                    "ISO 8601 UTC start of the event, with a 'Z' suffix, e.g. "
-                    "2026-07-29T05:00:00Z. Convert from the user's local date/time "
-                    "using user_state.utc_offset_minutes."
-                ),
-            },
-            "end_time": {
-                "type": "string",
-                "description": (
-                    "ISO 8601 UTC end of the event, with a 'Z' suffix. Default to "
-                    "one hour after start_time if the user gave no duration."
-                ),
-            },
-            "description": {
-                "type": "string",
-                "description": "Optional extra detail about the event.",
-            },
-        },
-        "required": ["title", "start_time", "end_time"],
-    },
-}
-
-_REGISTRY = ToolRegistry()
+_REGISTRY = ToolRegistry(gain_store=_GAIN_STORE)
 _REGISTRY.register(NavigationTool())
 _REGISTRY.register(NotificationManagementTool())
+_REGISTRY.register(MemoryTool())
+# Runs on the phone, not here (CLIENT_TOOLS below) - registered so it carries a
+# gain, and so gets a dial in the app's Gain tab like the others.
+_REGISTRY.register(CalendarTool())
 _DISPATCHER = Dispatcher(_REGISTRY)
-
-REGISTRY_TOOLS: list[dict[str, Any]] = [
-    {"name": s.name, "description": s.description, "input_schema": s.input_schema}
-    for s in _REGISTRY.get_schemas()
-]
-
-TOOLS: list[dict[str, Any]] = [
-    GET_CURRENT_ADDRESS_TOOL, GET_CALENDAR_RANGE_TOOL, ADD_CALENDAR_EVENT_TOOL, *REGISTRY_TOOLS,
-]
 
 CLIENT_TOOLS: set[str] = {"get_calendar_range"}
 
+# Every Function tool carries this. It is what makes gain mean anything: the
+# model has to declare, per call, whether the user asked for this or whether it
+# is acting on its own reading of the situation. "requested" runs regardless of
+# gain (Section 5.7: gain governs inferred intent only); "inferred" has to clear
+# gain x state_confidence. Context tools (get_current_address) have no gain and
+# so no trigger.
+TRIGGER_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "enum": ["inferred", "requested"],
+    "description": (
+        "How this call was triggered. Apply this as a test of the user's "
+        "GRAMMAR, not of their intent or of how useful the call would be. "
+        "'requested' requires that their words this turn were an imperative "
+        "('remember this', 'tell me what's on') or a question ('where did I "
+        "park?', 'am I free then?') asking for this. "
+        "'inferred' is everything else, and in particular EVERY bare "
+        "declarative statement. 'I always park on level 4', 'trees blow in "
+        "the wind', 'the draft is due Friday' are statements, not requests - "
+        "saving them may well be the right thing to do, but it is your "
+        "decision to do it, so it is 'inferred'. A statement does not become "
+        "a request because it is useful to act on, because it is addressed to "
+        "you, or because a high gain means you are going to act on it anyway. "
+        "If there is no imperative and no question mark, it is 'inferred'. "
+        "This is the user's own control over how much Nova does unasked; "
+        "calling an inferred action 'requested' takes that control away from "
+        "them."
+    ),
+}
 
-def _add_calendar_event(tool_input: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Validates an add_calendar_event call and builds the action Android's
-    CalendarWriter will execute on-device. Returns (tool_result, action) -
-    action is None if validation failed, so nothing gets queued."""
-    title = tool_input.get("title")
-    start_time = tool_input.get("start_time")
-    end_time = tool_input.get("end_time")
-    if not title or not start_time or not end_time:
-        return {
-            "success": False,
-            "error": "title, start_time, and end_time are all required",
-        }, None
 
-    action = {
-        "type": "calendar.create_event",
-        "title": title,
-        "start_time": start_time,
-        "end_time": end_time,
-        "description": tool_input.get("description"),
+def _tool_definition(name: str, state_confidence: float) -> dict[str, Any]:
+    """
+    One registered Function tool as the Anthropic API wants it, with the trigger
+    field injected and the current gain spelled out in the description.
+
+    The gain is written into the description rather than passed as a field
+    because the API ignores unknown keys - the model only ever reads the prose.
+    Section 6.3's frozen schema still carries `gain`; this is that number
+    reaching the model in the one form it can actually act on.
+    """
+    schema = _REGISTRY.get_schema(name)
+    tool = _REGISTRY.get_tool(name)
+
+    gain = schema.gain
+    will_fire = state_confidence * gain >= FIRING_THRESHOLD
+
+    outcome = (
+        "will be allowed."
+        if will_fire
+        else (
+            "will be BLOCKED and will do nothing - at this gain the user only "
+            "wants this tool when they ask for it, so do not volunteer it "
+            "unprompted."
+        )
+    )
+    guidance = "\n\n" + " ".join(
+        part
+        for part in (
+            f"PROACTIVITY (controller gain = {gain:.2f} of 1.00).",
+            tool.gain_description,
+            f"Right now the user's state confidence is {state_confidence:.2f}, "
+            f"so an 'inferred' call to this tool {outcome}",
+        )
+        if part
+    )
+
+    input_schema = {
+        **schema.input_schema,
+        "properties": {**schema.input_schema.get("properties", {}), "trigger": TRIGGER_PROPERTY},
+        "required": [*schema.input_schema.get("required", []), "trigger"],
     }
-    return {"success": True, "queued_for_device": True}, action
+
+    return {
+        "name": schema.name,
+        "description": schema.description + guidance,
+        "input_schema": input_schema,
+    }
 
 
-def _run_local_tool(name: str, tool_input: dict[str, Any], location_ctx: str | None) -> Any:
+def _build_tools(state_confidence: float) -> list[dict[str, Any]]:
+    """
+    The tool list for one turn. Built per turn, not once at import, because the
+    user can move a dial mid-session (PUT /tools/gain) and because the gain
+    guidance above is relative to *this* turn's state confidence.
+
+    get_current_address is a context tool - a lookup with no gain, so it stays
+    out of the registry (see dispatcher.py) and is declared inline above.
+    Everything else Claude can call comes from the registry, so each one has a
+    dial and each one is gated.
+    """
+    return [
+        GET_CURRENT_ADDRESS_TOOL,
+        *(_tool_definition(name, state_confidence) for name in _REGISTRY.all_names()),
+    ]
+
+# The registry is built here, so this is where the gain package gets pointed at
+# it. main.py's GET/PUT /tools/gain go straight through this - the tuning logic
+# itself lives in gain/overrides.py, next to the reinforcement that moves the
+# same numbers from the other direction.
+GAIN_OVERRIDES = GainOverrides(_REGISTRY, _GAIN_STORE)
+
+
+@dataclass
+class TurnContext:
+    """
+    What the gate and the tools need to know about the turn in progress, kept
+    in one object so it can be threaded through the loop and parked in
+    _PENDING_SESSIONS across a client-tool hop without growing an argument list
+    every time something new is needed.
+    """
+
+    location_ctx: str | None
+    state_confidence: float
+
+    # Tools whose inferred call was blocked this turn. Re-checked before every
+    # dispatch so the model cannot get a second bite by relabelling the same
+    # call "requested" after being told the first one was suppressed.
+    suppressed: set[str] = field(default_factory=set)
+
+    # Tools that actually ran, in order - surfaced as EventOut.actions so the
+    # caller can see what gain let through (Section 6.2's {speech, actions[]}).
+    ran: list[str] = field(default_factory=list)
+
+
+def _gate(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> dict[str, Any] | None:
+    """
+    Decide whether this tool call is allowed to happen.
+
+    Returns None to allow it, or the tool_result content to hand back instead
+    of running it. Context tools (no gain) always pass.
+
+    This is the point the Gain tab's dial finally bites: everything upstream
+    only stored the number.
+    """
+    if not _REGISTRY.has(name):
+        return None  # context tool - no gain, nothing to gate
+
+    trigger = str(tool_input.get("trigger") or "requested")
+
+    if name in ctx.suppressed:
+        # Already refused once this turn; refuse consistently whatever it is
+        # labelled now.
+        decision_gain = _REGISTRY.get_gain(name).get_effective()
+        print(f"[gain] {name} blocked again (already suppressed this turn)")
+        return _suppressed_result(name, decision_gain, ctx.state_confidence)
+
+    decision = _DISPATCHER.should_run(name, trigger, ctx.state_confidence)
+    print(
+        f"[gain] {name} trigger={trigger!r} gain={decision.effective_gain:.2f} "
+        f"confidence={decision.state_confidence:.2f} "
+        f"product={decision.effective_gain * decision.state_confidence:.2f} "
+        f"threshold={FIRING_THRESHOLD:.2f} -> "
+        f"{'run' if decision.proposed else 'SUPPRESSED'}"
+    )
+
+    if decision.proposed:
+        return None
+
+    ctx.suppressed.add(name)
+    return _suppressed_result(name, decision.effective_gain, decision.state_confidence)
+
+
+def _suppressed_result(name: str, gain: float, confidence: float) -> dict[str, Any]:
+    """
+    What the model gets back when gain refuses an inferred call. Phrased as a
+    result rather than an error because nothing went wrong - the user has
+    simply set this tool to stay quiet unless asked.
+    """
+    return {
+        "success": False,
+        "suppressed_by_gain": True,
+        "effective_gain": round(gain, 2),
+        "state_confidence": round(confidence, 2),
+        "message": (
+            f"Not run. The user has {name} set to a controller gain of "
+            f"{gain:.2f}, which is too low to act on inferred intent at the "
+            f"current state confidence of {confidence:.2f}. This is the user's "
+            f"deliberate setting, not a failure. Do not run this tool again "
+            f"this turn, do not relabel the call as 'requested', and do not "
+            f"mention the tool, the gain or this refusal to the user - just "
+            f"answer what they actually asked, leaving out whatever you were "
+            f"going to volunteer."
+        ),
+    }
+
+
+def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> Any:
     if name == "get_current_address":
-        return _reverse_geocode(location_ctx)
+        return _reverse_geocode(ctx.location_ctx)
     if _REGISTRY.has(name):
-        if location_ctx and "origin" not in tool_input:
-            tool_input = {**tool_input, "origin": location_ctx}
-        return _DISPATCHER.dispatch_reactive(name, tool_input)
+        if ctx.location_ctx and "origin" not in tool_input:
+            tool_input = {**tool_input, "origin": ctx.location_ctx}
+        # The gain check already happened in _gate; both of these just run the
+        # tool, but which one is called records why it was allowed to.
+        if str(tool_input.get("trigger") or "requested") == "requested":
+            result = _DISPATCHER.dispatch_reactive(name, tool_input)
+        else:
+            result = _DISPATCHER.confirm_proactive(name, tool_input)
+        ctx.ran.append(name)  # after the call, so a raising tool isn't logged as run
+        return result
     return {"error": f"unknown tool: {name}"}
 
 
@@ -376,10 +526,11 @@ def run(user_state: UserState, event: Event) -> IntentResult | NeedMoreResult:
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": json.dumps(payload)},
     ]
-    return _run_loop(
-        messages, MAX_ITERATIONS, event.id, user_state.location_ctx, [],
-        user_state.utc_offset_minutes,
+    ctx = TurnContext(
+        location_ctx=user_state.location_ctx,
+        state_confidence=user_state.confidence,
     )
+    return _run_loop(messages, MAX_ITERATIONS, event.id, ctx)
 
 
 def resume(session_id: str, tool_result: Any) -> IntentResult | NeedMoreResult:
@@ -403,29 +554,28 @@ def resume(session_id: str, tool_result: Any) -> IntentResult | NeedMoreResult:
             "content": json.dumps(tool_result),
         }],
     })
-    return _run_loop(
-        messages, MAX_ITERATIONS, pending["event_id"], pending.get("location_ctx"),
-        pending.get("actions", []), utc_offset_minutes,
-    )
+    # The same TurnContext the turn started with, so gain decisions and the
+    # suppressed/ran lists carry across the hop to the device and back.
+    return _run_loop(messages, MAX_ITERATIONS, pending["event_id"], pending["ctx"])
 
 
 def _run_loop(
     messages: list[dict[str, Any]],
     iterations_left: int,
     event_id: UUID,
-    location_ctx: str | None,
-    actions: list[dict[str, Any]],
-    utc_offset_minutes: int,
+    ctx: TurnContext,
 ) -> IntentResult | NeedMoreResult:
+    tools = _build_tools(ctx.state_confidence)
+
     # iterate until an appropriate answer is reached
     for _ in range(iterations_left):
         # call model
-        print(f"[loop] tools={[t['name'] for t in TOOLS]!r}")
+        print(f"[loop] tools={[t['name'] for t in tools]!r}")
         response = client.messages.create(
             model=MODEL,
             max_tokens=1024,
             system=SYSTEM_PROMPT,
-            tools=TOOLS,
+            tools=tools,
             messages=messages,
         )
         print(f"[loop] stop_reason={response.stop_reason!r}")
@@ -437,26 +587,30 @@ def _run_loop(
             )
             if not speech:
                 print(f"[loop] empty speech - raw content: {response.content!r}")
-            print(f"[loop] final speech={speech!r}")
-            return IntentResult(event_id=event_id, speech=speech, actions=actions)
+            print(f"[loop] final speech={speech!r} actions={ctx.ran!r}")
+            return IntentResult(event_id=event_id, speech=speech, actions=ctx.ran)
 
         # if a tool is called
         if response.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": response.content})
 
+            # A client tool has to clear the same gate as everything else
+            # before the backend pauses and calls out to the phone - it is a
+            # registered Function tool with a dial like the others. If gain
+            # refuses it, fall through and let the block below hand back the
+            # suppressed result instead of hopping to the device.
             client_call = next(
                 (b for b in response.content if b.type == "tool_use" and b.name in CLIENT_TOOLS),
                 None,
             )
-            if client_call is not None:
+            if client_call is not None and _gate(client_call.name, client_call.input, ctx) is None:
+                ctx.ran.append(client_call.name)
                 session_id = str(uuid.uuid4())
                 _PENDING_SESSIONS[session_id] = {
                     "messages": messages,
                     "tool_use_id": client_call.id,
                     "event_id": event_id,
-                    "location_ctx": location_ctx,
-                    "actions": actions,
-                    "utc_offset_minutes": utc_offset_minutes,
+                    "ctx": ctx,
                 }
                 return NeedMoreResult(
                     event_id=event_id,
@@ -469,16 +623,14 @@ def _run_loop(
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
-                    if block.name == "add_calendar_event":
-                        result, action = _add_calendar_event(block.input)
-                        if action is not None:
-                            actions.append(action)
-                    else:
-                        result = _run_local_tool(block.name, block.input, location_ctx)
+                    blocked = _gate(block.name, block.input, ctx)
+                    result = blocked if blocked is not None else _run_local_tool(
+                        block.name, block.input, ctx
+                    )
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": str(result),
+                        "content": json.dumps(result, default=str),
                     })
             messages.append({"role": "user", "content": tool_results})
             continue
@@ -488,4 +640,4 @@ def _run_loop(
         break
 
     print("[loop] exited loop with no end_turn - returning empty speech")
-    return IntentResult(event_id=event_id, speech="", actions=actions)
+    return IntentResult(event_id=event_id, speech="", actions=ctx.ran)

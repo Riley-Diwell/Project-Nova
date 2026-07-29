@@ -1,14 +1,13 @@
 """
 schemas/signals.py - Section 5.2: State Estimator  (Georgia)
 
-STATUS: wip
+STATUS: superseded
 
 WHAT THIS FILE IS
-brief description
-1. 
+Defines the schema to receive signals alongside event
 
 WHO USES THIS
-- 
+- N/A
 
 """
 

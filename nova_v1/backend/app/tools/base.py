@@ -41,10 +41,12 @@ class BaseTool(ABC):
         name: str,
         description: str,
         input_schema: dict[str, Any],
+        gain_description: str = "",
     ) -> None:
         self.name = name
         self.description = description
         self.input_schema = input_schema
+        self.gain_description = gain_description
 
     def invoke(self, tool_input: dict[str, Any]) -> Any:
         """
