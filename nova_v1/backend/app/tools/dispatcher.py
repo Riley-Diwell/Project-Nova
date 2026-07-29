@@ -25,6 +25,12 @@ There are two ways a tool can be called:
    If the score is high enough, the tool runs.
    Otherwise, nothing happens.
 
+Which of the two a given call is, is decided by the caller and passed to
+should_run() as `trigger`. In V1 that comes from the Intent Surface: every
+Function tool's schema carries a required `trigger` field the model fills in
+("requested" when the user asked, "inferred" when the model is acting on its
+own reading of the situation). See intent_surface/loop.py.
+
 
    
 
@@ -41,23 +47,26 @@ There are two ways a tool can be called:
           +--------------+--------------+
           |                             |
      User asked                 NOVA suggested
-          |                             |
-          v                             v
-    run immediately          check gain + confidence
-                                        |
-                                  high enough?
+    (trigger=            (trigger="inferred")
+     "requested")                       |
+          |                             v
+          v                  check gain * confidence
+    run immediately                     |
+    (gain ignored)               high enough?
                                   /           \
                                 yes           no
                                 |              |
                                 v              v
-                            Seek user        Ignore
-                            accept/reject                            
-                           /           \
-                        accept       reject    
-                            |          |
-                            v          v
-                            run      ignore
-                            
+                               run          suppress
+
+V1 SIMPLIFICATION: the idealised design asks the user to accept/reject a
+proactive proposal before running it, because that accept/reject is the
+reinforcement signal that retunes the gain. V1 has no reinforcement - gain is
+purely user-set - so there is nothing to collect and the confirmation step is
+friction with no payoff. A proposal that clears the threshold therefore runs
+straight away. reinforcement.py stays in the tree for when that loop is built;
+should_run() is the seam it would hook back into.
+
 Only Function tools registered in ToolRegistry can be
 dispatched here:
 - Function 1
@@ -144,6 +153,42 @@ class Dispatcher:
             effective_gain=effective_gain,
             state_confidence=state_confidence,
         )
+
+    def should_run(
+        self,
+        name: str,
+        trigger: str,
+        state_confidence: float,
+    ) -> DispatchResult:
+        """
+        The single question a caller actually needs answered: given how this
+        call was triggered, is this tool allowed to run?
+
+        - trigger "requested" -> always yes. The user asked; Section 5.7 says
+          gain governs action on *inferred* intent only, so a reactive call
+          ignores it entirely. effective_gain is still reported for logging.
+        - trigger "inferred"  -> yes only if state_confidence * effective_gain
+          clears FIRING_THRESHOLD.
+
+        Deciding is separate from running because not every tool runs here:
+        get_calendar_range executes on the phone (loop.py's CLIENT_TOOLS), and
+        it still has to pass the same gate before the backend pauses the
+        conversation and calls out to the device.
+
+        Raises KeyError (via the registry) if 'name' isn't a registered
+        Function tool.
+        """
+        self._require_registered(name)
+
+        if trigger == "requested":
+            return DispatchResult(
+                proposed=True,
+                name=name,
+                effective_gain=self.registry.get_gain(name).get_effective(),
+                state_confidence=clamp(state_confidence),
+            )
+
+        return self.dispatch_proactive(name, {}, state_confidence)
 
     def confirm_proactive(self, name: str, tool_input: dict[str, Any]) -> Any:
         """

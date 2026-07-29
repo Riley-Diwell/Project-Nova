@@ -1,14 +1,14 @@
 """
 state_estimator/state_estimator_v2.py - Section 5.2: State Estimator  (Georgia)
 
-STATUS: wip
+STATUS: superseded
 
 WHAT THIS FILE IS
-Map event and signals into a user state schema. 
-1. 
+Map event and signals into a user state schema, calculates confidence score. 
+
 
 WHO USES THIS
-- 
+- N/A
 
 """
 

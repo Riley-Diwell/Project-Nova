@@ -4,13 +4,8 @@ schemas/user_state.py - Section 5.2: State Estimator  (Georgia)
 STATUS: working draft
 
 WHAT THIS FILE IS
-Defines the UserState schema - the wire shape Android posts directly to
-POST /event alongside every Event (android/.../model/UserState.kt is the
-source of truth; this mirrors it field-for-field). Android computes UserState
-on-device from ~19 fused signals and posts the result, so the backend does
-not re-derive it from raw signals (see ADR: "adopt Android's on-device
-UserState" decision, 2026-07-28) - `state_estimator/state_estimator_v2.py`'s
-`state_mapping()` is retired from the live path.
+Defines the UserState schema - the wire shape Android computes on device 
+and posts directly to POST /event alongside every Event.
 
 Everything below `confidence` is optional because it's permission-gated or
 sensor-dependent on the Android side - older clients or the demo fallback
@@ -30,6 +25,8 @@ class CalendarEventInfo(BaseModel):
     title: str
     start_millis: int
     end_millis: int
+    start_local: Optional[str] = None
+    end_local: Optional[str] = None
     location: Optional[str] = None
     availability: str          # "busy" / "free" / "tentative"
     is_all_day: bool
@@ -50,6 +47,7 @@ class UserState(BaseModel):
     screen: bool = False
     timestamp: int = 0                   # epoch millis
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    local_time: Optional[str] = None
 
     # Additive: minutes east of UTC (e.g. 600 for UTC+10) - lets the backend convert
     # the event's UTC timestamp into the user's actual local time.

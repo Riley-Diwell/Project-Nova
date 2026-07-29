@@ -1,0 +1,14 @@
+{
+  "memory": {
+    "value": 0.2,
+    "override": null
+  },
+  "navigation_departure_time": {
+    "value": 0.2,
+    "override": null
+  },
+  "notification_management": {
+    "value": 0.2,
+    "override": 0.6591221690177917
+  }
+}
