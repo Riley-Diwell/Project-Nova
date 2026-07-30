@@ -192,6 +192,119 @@ async def put_tool_gain(tool_name: str, update: ToolGainUpdate) -> dict[str, Any
         raise HTTPException(status_code=404, detail=f"unknown tool: {tool_name!r}")
 
 
+# --- Knowledge Map (Section 5.6) ---------------------------------------------
+# Persona's HTTP surface. This is the visible face of the Agency and Privacy
+# pillars: the user gets to see what NOVA believes about them, correct it, and
+# delete it. Read-only endpoints would miss the point - REQ1 is view/edit/
+# delete/export, and a store you can only look at is not user-controlled.
+
+class FactEdit(BaseModel):
+    """A Knowledge Map edit. Both fields optional: renaming a belief and
+    refiling it are separate gestures in the UI."""
+    text: str | None = None
+    category: list[str] | None = None
+
+
+@app.get("/persona/graph")
+async def get_persona_graph(
+    min_similarity: float = persona.DEFAULT_MIN_SIMILARITY,
+    max_links: int = persona.DEFAULT_MAX_LINKS,
+) -> dict[str, Any]:
+    """Persona as nodes and edges, for the Knowledge Map tab.
+
+    min_similarity is a query parameter because the right density is a taste
+    question and will drift as the store grows - see persona/graph.py for the
+    measurements behind the default.
+    """
+    graph = persona.knowledge_graph(min_similarity=min_similarity, max_links=max_links)
+    print(f"[persona] graph {graph.stats()}")
+    return {**graph.model_dump(mode="json"), "stats": graph.stats()}
+
+
+@app.get("/persona")
+async def list_persona() -> list[dict[str, Any]]:
+    """Every belief, newest first - the list view behind the map."""
+    return [f.model_dump(mode="json") for f in persona.all_facts()]
+
+
+@app.patch("/persona/{fact_id}")
+async def edit_persona_fact(fact_id: str, edit: FactEdit) -> dict[str, Any]:
+    """Correct a belief in place. Re-embeds, so an edited fact is findable by
+    what it now says rather than what it used to."""
+    try:
+        current = persona.get(fact_id)
+    except persona.FactNotFound:
+        raise HTTPException(status_code=404, detail=f"unknown fact: {fact_id!r}")
+
+    updated = current.model_copy(update={
+        "text": edit.text if edit.text is not None else current.text,
+        "category": edit.category if edit.category is not None else current.category,
+        # Correcting a belief makes it something the user stated, whatever it
+        # was before - they have overruled whatever NOVA inferred.
+        "metadata": {**(current.metadata or {}), "source": "stated", "edited": True},
+    })
+    persona.upsert(updated)
+    return persona.get(fact_id).model_dump(mode="json")
+
+
+@app.delete("/persona/{fact_id}", status_code=204)
+async def delete_persona_fact(fact_id: str) -> None:
+    """Forget a belief (Privacy pillar / REQ1). Deliberately unconditional - the
+    user does not have to justify it, and it is gone from the vector store as
+    well as the list. A tombstone keeps it gone: consolidation would otherwise
+    re-derive it on its next run (docs/adr/0003).
+
+    Only a Fact id is deletable. The Knowledge Map's graph also contains category
+    nodes, whose ids are ontology paths ("cat:routines/places") rather than
+    UUIDs - those reach Postgres as malformed input, and a 400 says so instead of
+    letting it surface as a 500.
+    """
+    if not _is_uuid(fact_id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"not a fact id: {fact_id!r}. Categories are not separately "
+                   f"deletable - they disappear with the last fact filed under them.",
+        )
+    persona.delete(fact_id)
+    print(f"[persona] deleted {fact_id}")
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+        return True
+    except ValueError:
+        return False
+
+
+@app.post("/persona/consolidate")
+async def run_consolidation(preview: bool = False) -> dict[str, Any]:
+    """Turn what has happened repeatedly into what is true about the user.
+
+    Driven from the Knowledge Map rather than a timer, because this is the one
+    moment the map exists to show: Episodes the user can scroll past becoming
+    beliefs NOVA will act on months later. A background job would do the same
+    work invisibly, and the visibility is the product.
+
+    `preview=true` returns exactly what a real run would write without writing
+    it - the same code path, so what is shown is what would land.
+    """
+    from consolidation import consolidate, preview_statements
+    from consolidation import preview as preview_trends
+
+    if preview:
+        derived = [f.model_dump(mode="json") for f in preview_trends()]
+        stated = [f.model_dump(mode="json") for f in preview_statements()]
+    else:
+        result = consolidate()
+        derived = [f.model_dump(mode="json") for f in result["derived"]]
+        stated = [f.model_dump(mode="json") for f in result["stated"]]
+
+    print(f"[consolidation] {'preview' if preview else 'run'}: "
+          f"{len(derived)} derived, {len(stated)} stated")
+    return {"preview": preview, "derived": derived, "stated": stated}
+
+
 # Android posts here after resolving a need_more request from /event (see
 # loop.py's CLIENT_TOOLS) - resumes the same paused Claude conversation.
 @app.post("/event/continue", response_model=EventResponse)
