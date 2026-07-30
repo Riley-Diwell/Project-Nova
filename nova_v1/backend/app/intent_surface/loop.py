@@ -16,6 +16,7 @@ WHO USES THIS
 # import necessary libraries
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -96,7 +97,11 @@ SYSTEM_PROMPT = (
     "person would say out loud: never your reasoning, and never any mention of "
     "tools, settings or why you did or did not do something. If the right "
     "response is to act quietly, act and leave the text empty. "
-    "Never invent facts you were not given. "
+    "Never invent facts you were not given. If a tool call you made comes back "
+    "unavailable, do not claim to the user that you did the thing anyway - "
+    "for example, never say \"I'll remember that\" unless the memory tool "
+    "actually ran. Acknowledge what they said without promising an action "
+    "that did not happen. "
     "For ambient events - a notification arriving, a calendar trigger - staying "
     "quiet is usually right. But if the user is speaking to you directly and "
     "you cannot do what they asked, never return an empty string: say briefly "
@@ -107,8 +112,18 @@ SYSTEM_PROMPT = (
     "Not everything the user says is a request. A plain statement, an "
     "observation, something said in passing - these are not requests you have "
     "failed to fulfil, so do not answer them by asking what they wanted. "
-    "Often the right response to a statement is to do something quietly with "
-    "it and say little or nothing. "
+    "WEB SEARCH. You have a web_search tool - use it instead of saying you "
+    "can't look something up. Call it for anything you don't know from "
+    "recent_episodes or user_state and that isn't a settled fact you'd "
+    "already know: current events, prices, hours, or finding a place - "
+    "restaurants, shops, businesses near the user all count. web_search only "
+    "sees the words in your query, not the user's coordinates, so for a "
+    "'nearest'/'near me' style question call get_current_address first (if "
+    "you don't already have an address for this turn) and put that address "
+    "or the city/area it names into the query yourself, e.g. \"kebab "
+    "restaurants near 44 Example St, Springfield\". Only fall back to saying "
+    "you're not sure after a search comes back with nothing useful - not "
+    "before you've tried it. "
     "TIME AND THE CALENDAR. Now is the top-level local_time. Every calendar "
     "entry carries start_local and end_local. All of these are already the "
     "user's own wall clock, so quote them as they are and never convert "
@@ -123,7 +138,11 @@ SYSTEM_PROMPT = (
     "THREE SOURCES, DIFFERENT LIFETIMES. recent_episodes is the last few logged "
     "episodes of this event type, oldest first - what happened recently, "
     "including the situational detail that stops mattering on its own ('parked "
-    "on level 3'). Use it to stay consistent with what you just did. "
+    "on level 3'). Use it to stay consistent with what you just did. When the "
+    "user says 'that', 'it' or otherwise refers to something without naming "
+    "it again, check the most recent entry in recent_episodes for what they "
+    "said before claiming you have no context - the words are there even on "
+    "turns where nothing was saved to memory or persona for them. "
     "The memory tool is the notebook of what the user has told you: save when "
     "they ask you to remember or note something, and recall when they ask what "
     "they told you. "
@@ -138,6 +157,17 @@ SYSTEM_PROMPT = (
 
 
 # --- local tools -------------------------------------------------------------
+
+# Server-side tool - Anthropic runs the search and hands back results in the
+# same response, so there is no local dispatch and no tool_result to send
+# back for it (see the tool_use loop below, which only handles CLIENT_TOOLS
+# and registry Function tools). claude-haiku-4-5 predates the dynamic-
+# filtering tool generation, so this is the basic variant, not _20260209.
+WEB_SEARCH_TOOL: dict[str, Any] = {
+    "type": "web_search_20250305",
+    "name": "web_search",
+    "max_uses": 3,
+}
 
 GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
     "name": "get_current_address",
@@ -194,6 +224,7 @@ def _build_tools(authorised: list[str]) -> list[dict[str, Any]]:
     ability to answer "where am I?" (see dispatcher.py).
     """
     return [
+        WEB_SEARCH_TOOL,
         GET_CURRENT_ADDRESS_TOOL,
         *(_tool_definition(name) for name in authorised),
     ]
@@ -462,6 +493,10 @@ class IntentResult(BaseModel):
     # Every Action this turn took, in order (CONTEXT.md "Action"). The phone
     # executes the ones it recognises; the same list is written to the episode.
     actions: list[dict[str, Any]] = []
+    # Set only for a voice turn that left a question dangling (see
+    # _classify_confirmation) - tells Android whether to offer Yes/No
+    # buttons alongside the usual text/voice input. None otherwise.
+    confirmation: Literal["yes_no", "open"] | None = None
 
     # The Episode main.py opened for this turn. It closes that row with the
     # Actions above, and passes the id on to the phone so it can name the same
@@ -486,6 +521,92 @@ class NeedMoreResult(BaseModel):
 
 
 _PENDING_SESSIONS: dict[str, dict[str, Any]] = {}
+
+# Carries the *actual* message thread (not a recap of it) across one voice
+# turn when the previous turn ended by asking the user a question. Without
+# this, the only trace of "what did I ask" a later turn gets is its own
+# spoken outcome text sitting in recent_episodes - which is why a bare "yes"
+# could take two tries to land: the model had to reparse its own prior
+# sentence instead of just seeing the question as a live turn in context.
+# Single global slot because this is a single-user ambient device with one
+# voice conversation in flight at a time - same assumption _PENDING_SESSIONS
+# already makes.
+_PENDING_CONFIRMATION: dict[str, Any] | None = None
+
+# How long a dangling question stays answerable. Long enough for a real
+# "yes" a few seconds later, short enough that a stale question from minutes
+# ago doesn't hijack an unrelated new one.
+_PENDING_CONFIRMATION_TTL = timedelta(minutes=3)
+
+# Defensive cap on how many turns a confirmation thread may chain before it's
+# abandoned and started fresh - guards against an unbroken run of clarifying
+# questions growing the prompt without bound.
+_PENDING_CONFIRMATION_MAX_MESSAGES = 12
+
+
+def _stash_pending_confirmation(messages: list[dict[str, Any]]) -> None:
+    """Called when a voice turn ends on a question - keeps the live thread
+    so the next voice turn can continue it instead of starting over."""
+    global _PENDING_CONFIRMATION
+    if len(messages) > _PENDING_CONFIRMATION_MAX_MESSAGES:
+        _PENDING_CONFIRMATION = None
+        return
+    _PENDING_CONFIRMATION = {
+        "messages": messages,
+        "expires_at": datetime.now(timezone.utc) + _PENDING_CONFIRMATION_TTL,
+    }
+
+
+def _pop_pending_confirmation() -> list[dict[str, Any]] | None:
+    """Consumes the pending thread, if any and still fresh. Popped rather
+    than peeked so a resolved or abandoned turn can't be answered twice."""
+    global _PENDING_CONFIRMATION
+    pending, _PENDING_CONFIRMATION = _PENDING_CONFIRMATION, None
+    if pending is None:
+        return None
+    if datetime.now(timezone.utc) > pending["expires_at"]:
+        return None
+    return pending["messages"]
+
+
+def _clear_pending_confirmation() -> None:
+    """Called when a voice turn resolves without leaving a question open -
+    any earlier dangling question is now moot."""
+    global _PENDING_CONFIRMATION
+    _PENDING_CONFIRMATION = None
+
+
+_YES_NO_LEAD_IN = re.compile(
+    r"^(are|is|am|was|were|do|does|did|can|could|will|would|shall|should|"
+    r"have|has|had|may|might|must)\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_confirmation(speech: str) -> Literal["yes_no", "open"] | None:
+    """
+    Best-effort read on the question a voice turn just left dangling, so
+    Android can offer Yes/No buttons instead of only a bare text box.
+    Heuristic, not a model decision: the model's final turn is plain speech
+    (Section 5.3's text field), nothing structured to read here.
+
+    Isolates the sentence ending in the *last* '?' (a trailing non-question
+    clause, e.g. "...or check travel time to it? If you'd like me to add it,
+    I'll need a time.", is common and not itself the live question) and
+    checks whether it opens with a yes/no auxiliary. A sentence offering an
+    alternative ("...to your calendar, or check travel time to it?") is a
+    choice, not a yes/no question, even when it opens with "are you" - the
+    ' or ' check is what tells those two apart. None if the turn didn't end
+    on a question at all.
+    """
+    last_q = speech.rfind("?")
+    if last_q == -1:
+        return None
+    boundary = max(speech.rfind(".", 0, last_q), speech.rfind("!", 0, last_q))
+    question = speech[boundary + 1 : last_q].strip()
+    if " or " in question.lower():
+        return "open"
+    return "yes_no" if _YES_NO_LEAD_IN.match(question) else "open"
 
 
 # --- the loop ---------------------------------------------------------------
@@ -665,17 +786,24 @@ def run(
         "persona": _for_model(facts),
     }
 
-    messages: list[dict[str, Any]] = [
-        {"role": "user", "content": json.dumps(payload)},
-    ]
+    is_voice = event.type == "voice"
+    # Only voice turns can be "yes"/"no" answers to a prior spoken question,
+    # so only voice turns consume the pending thread - an ambient event
+    # arriving in between (location update, notification, ...) must not
+    # steal or clear it.
+    carried = _pop_pending_confirmation() if is_voice else None
+    new_turn: dict[str, Any] = {"role": "user", "content": json.dumps(payload)}
+    messages: list[dict[str, Any]] = [*carried, new_turn] if carried else [new_turn]
+    if carried:
+        print("[loop] continuing pending confirmation thread")
+
     ctx = TurnContext(
         turn=turn,
         location_ctx=user_state.location_ctx,
-
         utc_offset_minutes=user_state.utc_offset_minutes,
         episode_id=episode_id,
     )
-    return _run_loop(messages, MAX_ITERATIONS, event.id, ctx)
+    return _run_loop(messages, MAX_ITERATIONS, event.id, ctx, is_voice=is_voice)
 
 
 def resume(session_id: str, tool_result: Any) -> IntentResult | NeedMoreResult:
@@ -705,7 +833,10 @@ def resume(session_id: str, tool_result: Any) -> IntentResult | NeedMoreResult:
     # middle of one turn, and one turn is one situation, so re-deciding here would
     # let a dial moved while the phone was answering change what NOVA is allowed to
     # finish saying.
-    return _run_loop(messages, MAX_ITERATIONS, pending["event_id"], pending["ctx"])
+    return _run_loop(
+        messages, MAX_ITERATIONS, pending["event_id"], pending["ctx"],
+        is_voice=pending.get("is_voice", True),
+    )
 
 
 def _run_loop(
@@ -713,6 +844,7 @@ def _run_loop(
     iterations_left: int,
     event_id: UUID,
     ctx: TurnContext,
+    is_voice: bool = False,
 ) -> IntentResult | NeedMoreResult:
     # Read off the Turn rather than passed in. 
     tools = _build_tools(ctx.turn.authorised())
@@ -738,9 +870,23 @@ def _run_loop(
             if not speech:
                 print(f"[loop] empty speech - raw content: {response.content!r}")
             print(f"[loop] final speech={speech!r} actions={ctx.ran!r}")
+            # A voice turn that ends by asking a question is left dangling on
+            # purpose: stash the real thread (assistant question included) so
+            # a same-topic "yes" a moment later continues it verbatim instead
+            # of being reconstructed from this episode's logged outcome text.
+            # Anything else (a statement, an ambient event) clears/skips it -
+            # see _stash_pending_confirmation / _pop_pending_confirmation.
+            confirmation = _classify_confirmation(speech) if is_voice else None
+            if is_voice:
+                if confirmation is not None:
+                    _stash_pending_confirmation(
+                        [*messages, {"role": "assistant", "content": response.content}]
+                    )
+                else:
+                    _clear_pending_confirmation()
             return IntentResult(
                 event_id=event_id, speech=speech, actions=ctx.for_wire(),
-                episode_id=ctx.episode_id,
+                episode_id=ctx.episode_id, confirmation=confirmation,
             )
 
         # if a tool is called
@@ -768,6 +914,7 @@ def _run_loop(
                     # back. Without it the far side of the hop defaults to UTC,
                     # and the calendar comes back a timezone out.
                     "utc_offset_minutes": ctx.utc_offset_minutes,
+                    "is_voice": is_voice,
                 }
                 return NeedMoreResult(
                     event_id=event_id,
@@ -796,7 +943,15 @@ def _run_loop(
             messages.append({"role": "user", "content": tool_results})
             continue
 
-        # unexpected stop_reason (max_tokens, refusal, pause_turn, ...)
+        # Server-side tool loop (web_search) hit its internal iteration cap.
+        # Resend as-is - the trailing server_tool_use block tells the API to
+        # pick up where it left off. No synthetic "continue" message; adding
+        # one would just be extra text the model has to read past.
+        if response.stop_reason == "pause_turn":
+            messages.append({"role": "assistant", "content": response.content})
+            continue
+
+        # unexpected stop_reason (max_tokens, refusal, ...)
         print(f"[loop] breaking on unexpected stop_reason={response.stop_reason!r}")
         break
 

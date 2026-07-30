@@ -211,36 +211,34 @@ def _query_google_maps(origin: str, destination: str,
         data = r.json()
         status = data.get("status")
         if status == "OK":
-            leg = data["routes"][0]["legs"][0]
-            duration = leg["duration"]["text"]
-            depart = leg.get("departure_time", {}).get("text", "now")
-            arrive = leg.get("arrival_time", {}).get("text", "unknown")
-            steps = leg.get("steps", [])
-            first_step = steps[0].get("html_instructions", "").replace("<b>", "").replace("</b>", "") if steps else ""
+            return _directions_result(data, destination, mode, arrival_time)
 
-            spoken = f"Leave {depart} — takes {duration} to {destination}"
-            if arrival_time:
-                spoken += f", arriving at {arrive}"
-            if first_step:
-                spoken += f". First: {first_step[:60]}"
-
-            return {
-                "success": True,
-                "duration": duration,
-                "depart_at": depart,
-                "arrive_at": arrive,
-                "destination": destination,
-                "mode": mode,
-                "spoken": spoken,
-                "api_used": True,
-            }
-
-        # Directions API resolved the request but couldn't find the address/
-        # route (e.g. ZERO_RESULTS, NOT_FOUND) - don't fall back to the generic
-        # Canberra estimate table here, since that would confidently state a
-        # made-up travel time for a destination Google itself couldn't locate.
+        # Directions couldn't resolve the destination as given (e.g. ZERO_RESULTS,
+        # NOT_FOUND) - this is exactly the shape a misheard voice transcript takes
+        # ("77 Scandalbrooke Crescent" for "77 Scantlebury Crescent"), so before
+        # giving up, ask Places' Find Place From Text for its best fuzzy match on
+        # the same text and retry Directions against that resolved place instead.
         print(f"[NavigationTool] Directions API status={status!r} "
               f"error_message={data.get('error_message')!r} destination={destination!r}")
+
+        match = _find_place_from_text(destination)
+        if match is not None:
+            place_id, matched_address = match
+            params["destination"] = f"place_id:{place_id}"
+            r2 = requests.get(
+                "https://maps.googleapis.com/maps/api/directions/json",
+                params=params, timeout=5,
+            )
+            data2 = r2.json()
+            if data2.get("status") == "OK":
+                print(f"[NavigationTool] resolved {destination!r} -> {matched_address!r} via Places")
+                result = _directions_result(data2, matched_address, mode, arrival_time)
+                result["resolved_from"] = destination
+                result["spoken"] = f"(Assuming you meant {matched_address}) " + result["spoken"]
+                return result
+            print(f"[NavigationTool] Directions retry against Places match "
+                  f"{matched_address!r} status={data2.get('status')!r}")
+
         return {
             "success": False,
             "spoken": f"I couldn't find a route to '{destination}' — could you confirm the address?",
@@ -269,6 +267,68 @@ def _estimated_travel_minutes(destination: str) -> int | None:
     for key in sorted(_FALLBACK_ESTIMATES, key=len, reverse=True):
         if key in where:
             return _FALLBACK_ESTIMATES[key]
+    return None
+
+
+def _directions_result(data: dict, destination: str, mode: str,
+                        arrival_time: str | None) -> dict:
+    """Builds the success dict from a Directions API OK response."""
+    leg = data["routes"][0]["legs"][0]
+    duration = leg["duration"]["text"]
+    depart = leg.get("departure_time", {}).get("text")
+    arrive = leg.get("arrival_time", {}).get("text")
+    steps = leg.get("steps", [])
+    first_step = steps[0].get("html_instructions", "").replace("<b>", "").replace("</b>", "") if steps else ""
+
+    if depart:
+        spoken = f"Leave {depart} — takes {duration} to {destination}"
+        if arrival_time and arrive:
+            spoken += f", arriving at {arrive}"
+    else:
+        spoken = f"Takes {duration} to {destination}"
+
+    if first_step:
+        spoken += f". First: {first_step[:60]}"
+
+    return {
+        "success": True,
+        "duration": duration,
+        "depart_at": depart,
+        "arrive_at": arrive,
+        "destination": destination,
+        "mode": mode,
+        "spoken": spoken,
+        "api_used": True,
+    }
+
+
+def _find_place_from_text(text: str) -> tuple[str, str] | None:
+    """
+    Best-effort fuzzy resolve of a raw (possibly misheard) destination string via
+    Places' Find Place From Text, which tolerates typos/mishearings that the
+    Directions API's stricter geocoding rejects outright. Returns
+    (place_id, formatted_address) or None if Places couldn't find a candidate
+    either, or the request itself failed.
+    """
+    try:
+        r = requests.get(
+            "https://maps.googleapis.com/maps/api/place/findplacefromtext/json",
+            params={
+                "input": text,
+                "inputtype": "textquery",
+                "fields": "place_id,formatted_address",
+                "key": MAPS_API_KEY,
+            },
+            timeout=5,
+        )
+        data = r.json()
+        if data.get("status") == "OK" and data.get("candidates"):
+            candidate = data["candidates"][0]
+            return candidate["place_id"], candidate["formatted_address"]
+        print(f"[NavigationTool] Find Place From Text status={data.get('status')!r} "
+              f"for {text!r}")
+    except Exception as e:
+        print(f"[NavigationTool] Find Place From Text failed: {e}")
     return None
 
 

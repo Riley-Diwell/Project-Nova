@@ -23,6 +23,11 @@ class EventOut(BaseModel):
     speech: str
     actions: list[dict[str, Any]] = []
     episode_id: str | None = None
+    # Set only when speech leaves a question dangling (intent_surface/loop.py's
+    # _classify_confirmation): "yes_no" if Android should offer Yes/No quick
+    # replies alongside its usual text/voice input, "open" if it's a question
+    # but not one a Yes/No answer fits, None otherwise.
+    confirmation: Literal["yes_no", "open"] | None = None
 
 
 class NeedMoreOut(BaseModel):

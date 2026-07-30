@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit
  * "http://10.0.2.2:8000" instead if running against the Android emulator.
  */
 object NovaApiClient {
-    private const val BASE_URL = "http://10.0.2.2:8000"
+    private const val BASE_URL = "http://192.168.99.158:8000"
     private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 
     private val client = OkHttpClient.Builder()
@@ -40,11 +40,18 @@ object NovaApiClient {
      * with the on-device result, keyed by [NeedMore.sessionId].
      */
     sealed class EventResult {
+        /**
+         * [confirmation] mirrors EventOut.confirmation (schemas/event_out.py):
+         * "yes_no" when this turn left a yes/no question dangling (so the UI
+         * can offer quick-reply buttons), "open" for a dangling question that
+         * isn't yes/no-shaped, null otherwise.
+         */
         data class Final(
             val speech: String,
             val actions: List<CalendarAction>,
             /** Names the Episode this turn wrote, for [postOutcome]. Absent if Memory was unreachable. */
             val episodeId: String?,
+            val confirmation: String?,
         ) : EventResult()
         data class NeedMore(
             val sessionId: String,
@@ -356,6 +363,9 @@ object NovaApiClient {
                 speech = json.optString("speech", "..."),
                 actions = json.optJSONArray("actions")?.toCalendarActions().orEmpty(),
                 episodeId = json.optString("episode_id").takeIf { it.isNotBlank() },
+                confirmation = json.optString("confirmation").takeIf {
+                    json.has("confirmation") && !json.isNull("confirmation")
+                },
             )
         }
     }

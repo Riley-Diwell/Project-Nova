@@ -1,6 +1,10 @@
 package com.example.nova.ui
 
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -55,6 +59,7 @@ fun NovaApp() {
     val currentRoute = backStackEntry?.destination?.route
 
     Scaffold(
+        contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
         bottomBar = {
             NavigationBar {
                 bottomNavDestinations.forEach { destination ->
@@ -85,7 +90,7 @@ fun NovaApp() {
                 DashboardScreen(profile = profile)
             }
             composable(NovaDestination.Voice.route) {
-                VoiceScreen()
+                VoiceScreen(bottomBarHeight = innerPadding.calculateBottomPadding())
             }
             composable(NovaDestination.State.route) {
                 StateScreen()

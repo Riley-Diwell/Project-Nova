@@ -48,8 +48,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,14 +68,12 @@ import com.example.nova.state.CalendarWriter
 import com.example.nova.state.CallStateSignal
 import com.example.nova.state.ForegroundAppSignal
 import com.example.nova.state.LocationSignal
-import com.example.nova.state.SensorSignal
+import com.example.nova.state.SignalRepository
 import com.example.nova.state.UserStateCollector
-import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val REFRESH_INTERVAL_MILLIS = 5_000L
 private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
 private fun formatTime(millis: Long): String = timeFormat.format(Date(millis))
@@ -122,22 +120,19 @@ fun StateScreen() {
         testEventStatus = if (granted) createTestEvent(context) else "Calendar write permission denied."
     }
 
-    DisposableEffect(Unit) {
-        if (ActivitySignal.hasPermission(context)) ActivitySignal.startUpdates(context)
-        SensorSignal.startUpdates(context)
+    // Continuous collection (ActivitySignal/SensorSignal updates, and re-snapshotting every 10s)
+    // is owned by SignalMonitorService so it keeps running even when this screen isn't open.
+    // On entry we just force one immediate refresh so the screen doesn't wait for the next tick.
+    LaunchedEffect(Unit) {
         if (LocationSignal.hasPermission(context)) LocationSignal.refresh(context)
-        onDispose {
-            ActivitySignal.stopUpdates(context)
-            SensorSignal.stopUpdates(context)
-        }
+        SignalRepository.update(context)
     }
 
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(REFRESH_INTERVAL_MILLIS)
-            if (LocationSignal.hasPermission(context)) LocationSignal.refresh(context)
+    val liveUserState by SignalRepository.userState.collectAsState()
+    LaunchedEffect(liveUserState) {
+        liveUserState?.let {
+            userState = it
             foregroundAppPermission = ForegroundAppSignal.hasPermission(context)
-            userState = UserStateCollector.snapshot(context)
         }
     }
 
