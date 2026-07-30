@@ -23,10 +23,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -131,17 +133,57 @@ fun VoiceScreen() {
         pendingCalendarActions = emptyList()
     }
 
+    // The Episode of the reply currently being spoken, held until its Outcome is
+    // reported. Atomic and single-shot (getAndSet(null)): onDone and the stop
+    // button race whenever the user cuts NOVA off near the end of an utterance,
+    // and the turn must be scored once, as whichever got there first.
+    val speakingEpisode = remember { java.util.concurrent.atomic.AtomicReference<String?>(null) }
+    val outcomeScope = rememberCoroutineScope()
+    fun reportOutcome(accepted: Boolean) {
+        val episodeId = speakingEpisode.getAndSet(null) ?: return
+        outcomeScope.launch { NovaApiClient.postOutcome(episodeId, accepted) }
+    }
+
     val textToSpeech = remember { arrayOfNulls<TextToSpeech>(1) }
+    // TextToSpeech initialises asynchronously, and speak() before that finishes
+    // is dropped silently - it returns ERROR and says nothing. Track readiness,
+    // and hold the one utterance that arrived too early so it can be spoken on
+    // init instead of lost.
+    val ttsReady = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val pendingUtterance = remember { arrayOfNulls<String>(1) }
     DisposableEffect(Unit) {
-        val tts = TextToSpeech(context) { }
+        val tts = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                ttsReady.set(true)
+                pendingUtterance[0]?.let { queued ->
+                    pendingUtterance[0] = null
+                    mainHandler.post {
+                        textToSpeech[0]?.speak(
+                            queued, TextToSpeech.QUEUE_FLUSH, null, "nova-response",
+                        )
+                    }
+                }
+            } else {
+                mainHandler.post {
+                    statusText = "Text-to-speech didn't start on this device."
+                    voiceState = VoiceState.IDLE
+                }
+            }
+        }
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
             override fun onDone(utteranceId: String?) {
+                // Heard out to the end. Silence is the accept signal - the user
+                // had a stop button and did not reach for it.
+                reportOutcome(accepted = true)
                 mainHandler.post { voiceState = VoiceState.IDLE }
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
+                // The engine failed, which says nothing about whether the user
+                // wanted this. Drop the turn rather than scoring it either way.
+                speakingEpisode.set(null)
                 mainHandler.post { voiceState = VoiceState.IDLE }
             }
         })
@@ -163,9 +205,51 @@ fun VoiceScreen() {
         onDispose { speechRecognizer?.destroy() }
     }
 
-    fun speak(text: String) {
+    /**
+     * Cuts NOVA off mid-sentence. The barge-in that DESIGN.md §5.7 reads as the user's
+     * rejection of the turn - and, first and foremost, the control any talking assistant owes
+     * its user. It is feedback precisely because it is not a feedback button.
+     */
+    fun stopSpeaking() {
+        textToSpeech[0]?.stop()
+        reportOutcome(accepted = false)
+        voiceState = VoiceState.IDLE
+        statusText = "Stopped."
+    }
+
+    fun speak(text: String, episodeId: String?) {
+        speakingEpisode.set(episodeId)
+        if (text.isBlank()) {
+            // The backend returns an empty string when the Intent Surface ends
+            // without a final answer. Saying nothing looks identical to a crash
+            // from the user's side, so say so instead.
+            statusText = "Nova didn't have an answer for that - tap to try again."
+            voiceState = VoiceState.IDLE
+            // Nothing was said, so there is nothing for the user to accept or
+            // reject. Scoring this would blame the tools for an empty reply.
+            speakingEpisode.set(null)
+            return
+        }
+
+        // Anything past the engine's limit is rejected outright, not truncated -
+        // and a long recall ("what have I asked you to remember?") is exactly
+        // the kind of answer that gets near it.
+        val limit = TextToSpeech.getMaxSpeechInputLength()
+        val utterance = if (text.length > limit) text.take(limit) else text
+
         voiceState = VoiceState.SPEAKING
-        textToSpeech[0]?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "nova-response")
+        if (!ttsReady.get()) {
+            pendingUtterance[0] = utterance
+            return
+        }
+
+        val result = textToSpeech[0]
+            ?.speak(utterance, TextToSpeech.QUEUE_FLUSH, null, "nova-response")
+        if (result != TextToSpeech.SUCCESS) {
+            statusText = "Couldn't speak that - tap to try again."
+            voiceState = VoiceState.IDLE
+            speakingEpisode.set(null)
+        }
     }
 
     fun startListening() {
@@ -237,7 +321,17 @@ fun VoiceScreen() {
                                 }
                             }
                             statusText = "Heard you."
-                            speak(finalResult?.speech ?: "Sorry, I couldn't finish that.")
+                            speak(
+                                finalResult?.speech ?: "Sorry, I couldn't finish that.",
+                                finalResult?.episodeId,
+                            )
+                        } catch (e: java.net.SocketTimeoutException) {
+                            // Distinct from "couldn't reach": the backend IS
+                            // answering, it just took longer than readTimeout.
+                            // Worth its own message, because the fix is a
+                            // slower client rather than a broken server.
+                            voiceState = VoiceState.IDLE
+                            statusText = "Nova took too long to answer - tap to try again."
                         } catch (e: IOException) {
                             voiceState = VoiceState.IDLE
                             statusText = "Couldn't reach the Nova backend - tap to try again."
@@ -323,6 +417,18 @@ fun VoiceScreen() {
                             VoiceState.IDLE -> "Tap to speak"
                         }
                     )
+                }
+                // Only while NOVA is talking, because that is the only moment it
+                // means anything. Cutting it off is the user's stop control and,
+                // per DESIGN.md §5.7, the turn's rejection - the one negative
+                // signal V1 collects, and one that costs no extra interaction.
+                if (voiceState == VoiceState.SPEAKING) {
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(onClick = { stopSpeaking() }) {
+                        Icon(Icons.Default.Stop, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Stop")
+                    }
                 }
             }
         }
