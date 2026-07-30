@@ -25,9 +25,15 @@ Being registered also means loop.py builds their Claude-facing definitions from
 here rather than keeping a second copy inline.
 """
 
-from typing import Any
+from typing import Any, Optional
 
 from .base import BaseTool
+
+# How much commitment in the horizon counts as maximal divergence. Two imminent
+# things is the case most worth volunteering: it is where the user is most likely
+# to have lost track of one of them. Beyond that the answer is already "your next
+# hour is full", and a larger number would only distort the gain.
+CALENDAR_SATURATION = 2.0
 
 
 class CalendarTool(BaseTool):
@@ -82,6 +88,47 @@ class CalendarTool(BaseTool):
                 "required": ["from_time", "to_time"],
             },
         )
+
+    def error(self, observation: Any) -> Optional[float]:
+        """How much the next hour commits the user to, in [0, 1].
+
+        The measurement: each commitment inside the horizon contributes its own
+        imminence - something starting now weighs a full point, something at the
+        far edge of the horizon weighs almost nothing - and the total saturates at
+        CALENDAR_SATURATION.
+
+            imminence(c) = (horizon - minutes_until_start) / horizon
+            error        = clamp(sum(imminence) / CALENDAR_SATURATION)
+
+        So an empty hour is zero, one distant entry is close to zero, and a
+        crowded imminent hour saturates. Nothing about *which* entries: what the
+        user is committed to is the model's to phrase, and this only measures how
+        much of it there is.
+
+        WHAT THIS TERM DOES NOT MEASURE, AND WHY
+        Spec 0001 defines this as divergence between what the next hour commits
+        the user to and *what they have been told about it this session*. The
+        second half is not implemented, and cannot be as things stand: it is
+        session state, and the Observer reads only the Event, the User State and
+        Persona - deliberately not Memory, which is a network call in the request
+        path. So this term measures commitment alone.
+
+        The consequence is honest and worth knowing: at a high gain, this tool can
+        volunteer the same look-ahead twice in a session, because nothing here
+        remembers having done it. Adding a told-this-session signal to the
+        Observation is the fix; it needs a durable turn-scoped store that V1 does
+        not have.
+        """
+        commitments = getattr(observation, "commitments", None) or []
+        if not commitments:
+            return 0.0
+
+        horizon = getattr(observation, "horizon_minutes", 60) or 60
+        weight = sum(
+            max(0.0, (horizon - c.minutes_until_start) / horizon)
+            for c in commitments
+        )
+        return round(min(1.0, weight / CALENDAR_SATURATION), 4)
 
     def _execute(self, tool_input: dict[str, Any]) -> Any:
         # loop.py intercepts this tool by name before dispatch (CLIENT_TOOLS) and

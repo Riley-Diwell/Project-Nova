@@ -1,69 +1,117 @@
-"""
-Save and load Function tools' gain values. 
+"""Save and load Function tools' gain values.
 
-Each tool's gain is stored in a JSON file so it is kept
-when the backend is restarted. Will eventually be migrated to supabase?
+WHERE THE FILE LIVES, AND WHY IT MATTERS
+Two files, with different jobs:
+
+  the seed   `data/gain_store.seed.json`, committed, read-only. Where each dial
+             starts on a fresh checkout - the team's decision about how proactive
+             each Function should be before anyone has used it.
+  the live   wherever NOVA_GAIN_STORE points, `data/gain_store.json` by default,
+             gitignored. What reinforcement and the user's overrides have made of
+             those dials since.
+
+Splitting them fixes a real nuisance: the live file used to be tracked, so every
+turn that moved a gain dirtied the working tree, `git status` was never clean
+after a demo, and two people demoing produced a merge conflict in a file neither
+had edited. It also makes the Controller testable - a test points the path at a
+tmpdir and tunes gains without touching anyone's own.
+
+Reads merge the two, live over seed. Writes only ever touch the live file.
+
+Eventually this moves to Supabase alongside everything else; the seam is
+GainStore, so that is a change here and nowhere else.
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
 from .controller_gain import ControllerGain
 
-DEFAULT_PATH = Path(__file__).parent / "data" / "gain_store.json"
+# Committed. Every tool in tools/catalogue.py must appear here - there is a test
+# for that, because a missing entry silently comes up at DEFAULT_GAIN instead.
+DEFAULT_SEED_PATH = Path(__file__).parent / "data" / "gain_store.seed.json"
+
+# Where the live file goes when NOVA_GAIN_STORE says nothing. Gitignored.
+FALLBACK_LIVE_PATH = Path(__file__).parent / "data" / "gain_store.json"
+
+# The environment variable that makes the path configuration rather than a
+# constant - one deployment per user state, and one per test.
+PATH_ENV_VAR = "NOVA_GAIN_STORE"
+
+
+def resolve_path() -> Path:
+    """Where learned gain is being kept for this process."""
+    configured = os.environ.get(PATH_ENV_VAR, "").strip()
+    return Path(configured) if configured else FALLBACK_LIVE_PATH
 
 
 class GainStore:
-    def __init__(self, path: Path = DEFAULT_PATH) -> None:
-        # path to JSON file
-        self.path = Path(path)
+    def __init__(
+        self,
+        path: Optional[Path] = None,
+        seed_path: Path = DEFAULT_SEED_PATH,
+    ) -> None:
+        # Resolved at construction, not at import, so a test that sets the
+        # environment variable before building a store is honoured.
+        self.path = Path(path) if path is not None else resolve_path()
+        self.seed_path = Path(seed_path)
 
     def load(self, name: str) -> Optional[ControllerGain]:
+        """The saved gain for a tool, or None if neither file mentions it.
+
+        None is meaningful: it is how ToolRegistry.register knows to fall back to
+        a fresh DEFAULT_GAIN rather than a stale zero.
         """
-        Load the saved gain for a tool. Returns None if the tool has not been
-        saved before.
-        """
-        entry = self._read_all().get(name)
+        entry = self._merged().get(name)
         if entry is None:
             return None
         return ControllerGain(
             name=name,
-            value=entry["value"],
+            value=entry.get("value", 0.0),
             override=entry.get("override"),
         )
 
     def save(self, gain: ControllerGain) -> None:
-        """
-        Save a tool's current gain.
-        """
-        data = self._read_all()
+        """Persist a tool's current gain to the live file."""
+        data = self._read(self.path)
         data[gain.name] = {"value": gain.value, "override": gain.override}
-        self._write_all(data)
+        self._write(data)
 
     def load_all(self) -> dict[str, ControllerGain]:
-        """
-        Load every saved gain.
-        """
-        return {name: self.load(name) for name in self._read_all()}
+        """Every gain either file knows about - one dial each for the Gain tab."""
+        return {name: self.load(name) for name in self._merged()}
 
-    def _read_all(self) -> dict[str, dict]:
+    # --- files ---------------------------------------------------------------
+
+    def _merged(self) -> dict[str, dict]:
+        """The seed with the live file laid over it.
+
+        A tool nobody has tuned reads from the seed; once reinforcement or an
+        override has moved it, the live value is the gain.
         """
-        Read all saved gain data from the JSON file.
+        return {**self._read(self.seed_path), **self._read(self.path)}
+
+    def _read(self, path: Path) -> dict[str, dict]:
+        """One file's contents, or nothing.
+
+        A half-written or hand-edited file reads as empty rather than raising:
+        the dials are a preference and losing them costs a demo's tuning, while
+        failing here would stop the backend starting at all.
         """
-        # if the file doesnt exist return an empty dictionary
-        if not self.path.exists():
+        if not path.exists():
             return {}
-        
-        with self.path.open("r") as f:
-            return json.load(f)
+        try:
+            with path.open("r") as f:
+                loaded = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[gain] ignoring unreadable gain store {path}: {e}")
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
 
-    def _write_all(self, data: dict[str, dict]) -> None:
-        """
-        Write all gain data to the JSON file.
-        """
-        # create the folder if it doesnt exist yet
+    def _write(self, data: dict[str, dict]) -> None:
+        """Write the live file, creating its directory if this is the first save."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-
         with self.path.open("w") as f:
             json.dump(data, f, indent=2)
