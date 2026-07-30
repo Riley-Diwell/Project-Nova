@@ -4,11 +4,19 @@
     "override": null
   },
   "navigation_departure_time": {
-    "value": 0.2,
+    "value": 0.3,
     "override": null
   },
   "notification_management": {
     "value": 0.2,
-    "override": 0.6591221690177917
+    "override": null
+  },
+  "add_calendar_event": {
+    "value": 0.3,
+    "override": null
+  },
+  "get_calendar_range": {
+    "value": 0.3,
+    "override": null
   }
 }

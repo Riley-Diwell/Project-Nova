@@ -23,7 +23,8 @@ WHO USES THIS
 
 # import necessary libraries
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
+from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -39,6 +40,7 @@ from tools.notification_batcher import NotificationBatcher
 from tools.notification_management import register_batcher
 
 import memory
+import persona
 
 
 @asynccontextmanager
@@ -75,18 +77,32 @@ class ContinueWrapper(BaseModel):
 # Logged before the loop runs so an episode survives a failing Claude call, and
 # so loop.run() can read prior episodes back as context.
 # Non-fatal: an unconfigured or unreachable Supabase must not fail /event.
-def _log_episode(event: Event, user_state: UserState) -> str | None:
+def _open_episode(event: Event, user_state: UserState) -> str | None:
     try:
-        row_id = memory.write({
+        episode_id = memory.append({
             "event_type": event.type,
             "event": event.model_dump(mode="json"),
             "user_state": user_state.model_dump(mode="json"),
         })
-        print(f"[memory] wrote episode {row_id} (event_type={event.type!r})")
-        return row_id
+        print(f"[memory] opened episode {episode_id} (event_type={event.type!r})")
+        return episode_id
     except Exception as e:
-        print(f"[memory] write skipped: {e}")
+        print(f"[memory] append skipped: {e}")
         return None
+
+# log that looked like feedback and was not.
+def _close_episode(intent: IntentResult) -> None:
+    if not intent.episode_id:
+        return
+    try:
+        memory.close(intent.episode_id, action={
+            "actions": intent.actions,
+            "speech": intent.speech,
+        })
+        print(f"[memory] closed episode {intent.episode_id} "
+              f"({len(intent.actions)} action(s))")
+    except Exception as e:
+        print(f"[memory] episode close skipped: {e}")
 
 
 def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
@@ -100,7 +116,12 @@ def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
                 "to": intent.to_time,
             },
         )
-    return EventOut(event_id=intent.event_id, speech=intent.speech, actions=intent.actions)
+    return EventOut(
+        event_id=intent.event_id,
+        speech=intent.speech,
+        actions=intent.actions,
+        episode_id=intent.episode_id,
+    )
 
 
 # this is how I receive events from Riley
@@ -111,15 +132,50 @@ async def receive_event(input_wrapper: InputWrapper) -> EventResponse:
     us = input_wrapper.user_state
     print(f"[/event] calendar_ctx={us.calendar_ctx!r} "
           f"current_events={len(us.current_events)} upcoming_events={len(us.upcoming_events)}")
-    _log_episode(input_wrapper.event, us)
-    intent = loop.run(input_wrapper.user_state, input_wrapper.event)
+    episode_id = _open_episode(input_wrapper.event, us)
+    intent = loop.run(input_wrapper.user_state, input_wrapper.event, episode_id)
+    if isinstance(intent, IntentResult):
+        _close_episode(intent)
     return _to_response(intent)
+
+
+# --- the turn's Outcome (Sections 5.5, 5.7) ----------------------------------
+# The reinforcement signal, and the reason episodic_memory.outcome exists.
+#
+# The phone reports how the turn ended: `accepted` when TTS ran to completion,
+# `rejected` when the user pressed stop and talked over it. Nothing else is a
+# verdict - in particular the gate's own decision is not, which is what an
+# earlier draft wrongly wrote into this column.
+#
+# Barge-in is the only negative signal V1 collects, deliberately: a thumbs-down
+# button would be a phone interaction, and removing phone interactions is the
+# entire product. Stop is a control the user wants for its own sake, so reading
+# it as feedback costs them nothing. See docs/adr/0002.
+
+class OutcomeIn(BaseModel):
+    episode_id: str
+    outcome: Literal["accepted", "rejected"]
+
+
+@app.post("/event/outcome", status_code=204)
+async def report_outcome(report: OutcomeIn) -> None:
+    """Record the user's verdict on a turn and move the gain of what it did."""
+    try:
+        memory.close(report.episode_id, outcome=report.outcome)
+    except Exception as e:
+        # Non-fatal like every other Memory touch, but the reinforcement below
+        # still runs: the gain move is the part the user will actually notice.
+        print(f"[memory] outcome write skipped: {e}")
+
+    moved = loop.reinforce_episode(report.episode_id, report.outcome)
+    print(f"[gain] episode {report.episode_id} {report.outcome}: moved {moved}")
 
 
 # --- per-tool gain (Section 5.7) ---------------------------------------------
 # The Android app's Gain tab (ui/screens/GainScreen.kt) reads these to draw one
-# dial per Function tool and writes back what the user dials in. V1 gain is
-# user-set (schema.sql), so this is the seam that sets it.
+# dial per Function tool and writes back what the user dials in. Gain is both
+# user-set here and moved by reinforcement above; an override, while present,
+# wins over whatever reinforcement has learned.
 
 @app.get("/tools/gain", response_model=list[ToolGainOut])
 async def get_tool_gains() -> list[dict[str, Any]]:
@@ -145,4 +201,8 @@ async def continue_event(input_wrapper: ContinueWrapper) -> EventResponse:
         intent = loop.resume(input_wrapper.session_id, input_wrapper.result)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    # The turn that started at /event may only finish here, so this is the
+    # other place an episode can close.
+    if isinstance(intent, IntentResult):
+        _close_episode(intent)
     return _to_response(intent)

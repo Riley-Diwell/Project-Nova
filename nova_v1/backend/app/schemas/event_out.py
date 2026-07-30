@@ -22,6 +22,7 @@ class EventOut(BaseModel):
     event_id: UUID
     speech: str
     actions: list[dict[str, Any]] = []
+    episode_id: str | None = None
 
 
 class NeedMoreOut(BaseModel):

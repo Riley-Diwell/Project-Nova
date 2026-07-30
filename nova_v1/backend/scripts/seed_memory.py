@@ -143,8 +143,15 @@ def _episode(
     outcome: str | None = None,
 ) -> dict[str, Any]:
     """One episodic_memory row. created_at is set explicitly so the seeded
-    history spreads across the week instead of collapsing onto now() - read()
-    orders by it, so it decides what "the last few episodes" means."""
+    history spreads across the week instead of collapsing onto now() -
+    memory.recent() orders by it, so it decides what "the last few episodes"
+    means.
+
+    The seeded clock is UTC and the seeded UserState leaves utc_offset_minutes
+    at 0, so a "morning" here is a morning to consolidation as well. Real
+    episodes carry the phone's own offset and are converted per row; these are
+    self-consistent rather than realistic on that point.
+    """
     return {
         "created_at": when.isoformat(),
         "event_type": event.type,
