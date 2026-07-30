@@ -33,6 +33,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -258,6 +259,10 @@ private fun GraphCanvas(
     Canvas(
         Modifier
             .fillMaxSize()
+            // Panning/zooming (and a spread-out layout) can otherwise push nodes
+            // past the box's edge, where they'd draw over whatever sits next to
+            // it in the Column instead of staying inside the defined map area.
+            .clipToBounds()
             .pointerInput(layout) {
                 detectTransformGestures { _, panChange, zoomChange, _ ->
                     onTransform(zoomChange, panChange)

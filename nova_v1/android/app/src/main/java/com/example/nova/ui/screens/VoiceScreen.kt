@@ -13,34 +13,68 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.nova.network.NovaApiClient
@@ -54,8 +88,17 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeParseException
 import java.util.Locale
+import java.util.UUID
 
 private enum class VoiceState { IDLE, LISTENING, THINKING, SPEAKING }
+
+private val NovaMicPurple = Color(0xFF7C4DFF)
+
+private data class ChatMessage(
+    val id: String = UUID.randomUUID().toString(),
+    val text: String,
+    val fromUser: Boolean,
+)
 
 /**
  * The backend's get_calendar_range tool is asked to return UTC ISO 8601 (with a 'Z'), but
@@ -100,16 +143,54 @@ private fun writeCalendarActions(
     return created
 }
 
+@Composable
+private fun MessageBubble(message: ChatMessage) {
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = if (message.fromUser) Alignment.CenterEnd else Alignment.CenterStart,
+    ) {
+        Surface(
+            color = if (message.fromUser) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            shape = RoundedCornerShape(
+                topStart = 16.dp,
+                topEnd = 16.dp,
+                bottomStart = if (message.fromUser) 16.dp else 4.dp,
+                bottomEnd = if (message.fromUser) 4.dp else 16.dp,
+            ),
+            modifier = Modifier.widthIn(max = 280.dp),
+        ) {
+            Text(
+                text = message.text,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (message.fromUser) {
+                    MaterialTheme.colorScheme.onPrimary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            )
+        }
+    }
+}
+
 /**
- * DESIGN.md §5.1/§5.3: button -> SpeechRecognizer -> POST /event -> TextToSpeech round trip.
- * The transcript + a UserState snapshot go to the backend; the spoken reply is whatever
- * comes back (echo-stub today, Intent Surface once it exists - see backend/app/main.py).
+ * DESIGN.md §5.1/§5.3: text or SpeechRecognizer input -> POST /event -> TextToSpeech, rendered
+ * as a message thread (user bubbles on the right, Nova's replies on the left) rather than a
+ * single last-turn readout, so the reply is always visible even before/without TTS finishing.
  */
 @Composable
-fun VoiceScreen() {
+fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
     val context = LocalContext.current
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val coroutineScope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val density = LocalDensity.current
 
     var hasPermission by remember {
         mutableStateOf(
@@ -118,11 +199,22 @@ fun VoiceScreen() {
         )
     }
     var voiceState by remember { mutableStateOf(VoiceState.IDLE) }
-    var transcript by remember { mutableStateOf("") }
-    var statusText by remember { mutableStateOf("Tap the mic and say something.") }
+    var inputText by remember { mutableStateOf("") }
+    var statusText by remember { mutableStateOf("") }
+    val messages = remember { mutableStateListOf<ChatMessage>() }
     // Holds a finished turn's calendar.create_event actions while we wait on the
     // WRITE_CALENDAR permission prompt, so they can still be applied once granted.
     var pendingCalendarActions by remember { mutableStateOf<List<NovaApiClient.CalendarAction>>(emptyList()) }
+    // Mirrors the last reply's EventResult.Final.confirmation - "yes_no" shows the quick-reply
+    // buttons below; cleared as soon as any new turn is sent (button tap, typed, or spoken),
+    // same as the backend's own _PENDING_CONFIRMATION is popped on the next voice turn.
+    var pendingConfirmation by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(messages.size, voiceState) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
 
     val calendarPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -252,12 +344,81 @@ fun VoiceScreen() {
         }
     }
 
+    /** Sends one turn to the backend, whether it came from typing or from a voice transcript. */
+    fun sendMessage(text: String) {
+        if (text.isBlank()) return
+        messages.add(ChatMessage(text = text, fromUser = true))
+        pendingConfirmation = null
+        voiceState = VoiceState.THINKING
+        statusText = "Sending to Nova…"
+        coroutineScope.launch {
+            val userState = UserStateCollector.snapshot(context)
+            try {
+                var result: NovaApiClient.EventResult = NovaApiClient.postVoiceEvent(text, userState)
+                // The Intent Surface can pause on a client-executed tool (e.g.
+                // get_calendar_range) it needs on-device data for; resolve it
+                // locally and hand the result back until we get a final answer.
+                // Capped so a misbehaving backend can't loop forever.
+                var hops = 0
+                while (result is NovaApiClient.EventResult.NeedMore && hops < 3) {
+                    val need = result as NovaApiClient.EventResult.NeedMore
+                    statusText = "Checking your calendar…"
+                    val events = when (need.requestType) {
+                        "get_calendar_range" -> {
+                            val from = parseIsoToEpochMillis(need.fromIso)
+                            val to = parseIsoToEpochMillis(need.toIso)
+                            CalendarSignal.rangeSnapshot(context, from, to).orEmpty()
+                        }
+                        else -> emptyList()
+                    }
+                    result = NovaApiClient.postContinueEvent(need.sessionId, events)
+                    hops++
+                }
+                val finalResult = result as? NovaApiClient.EventResult.Final
+                val calendarActions = finalResult?.actions.orEmpty()
+                if (calendarActions.isNotEmpty()) {
+                    if (CalendarWriter.hasPermission(context)) {
+                        writeCalendarActions(context, calendarActions)
+                    } else {
+                        pendingCalendarActions = calendarActions
+                        calendarPermissionLauncher.launch(Manifest.permission.WRITE_CALENDAR)
+                    }
+                }
+                val reply = finalResult?.speech ?: "Sorry, I couldn't finish that."
+                statusText = ""
+                messages.add(ChatMessage(text = reply, fromUser = false))
+                pendingConfirmation = finalResult?.confirmation
+                speak(reply, finalResult?.episodeId)
+            } catch (e: java.net.SocketTimeoutException) {
+                // Distinct from "couldn't reach": the backend IS answering, it
+                // just took longer than readTimeout. Worth its own message,
+                // because the fix is a slower client rather than a broken server.
+                voiceState = VoiceState.IDLE
+                statusText = "Nova took too long to answer - tap to try again."
+            } catch (e: IOException) {
+                voiceState = VoiceState.IDLE
+                statusText = "Couldn't reach the Nova backend - tap to try again."
+            } catch (e: DateTimeParseException) {
+                voiceState = VoiceState.IDLE
+                statusText = "Nova sent a date it couldn't understand - tap to try again."
+            }
+        }
+    }
+
+    /** Shared by the send button, the IME "send" action, and a physical Enter key press. */
+    fun handleSend() {
+        val text = inputText
+        if (text.isNotBlank()) {
+            inputText = ""
+            sendMessage(text)
+        }
+    }
+
     fun startListening() {
         if (speechRecognizer == null) {
             statusText = "Speech recognition isn't available on this device."
             return
         }
-        transcript = ""
         statusText = "Listening…"
         voiceState = VoiceState.LISTENING
 
@@ -283,63 +444,8 @@ fun VoiceScreen() {
                     ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()
                     .orEmpty()
-                transcript = text
                 if (text.isNotBlank()) {
-                    voiceState = VoiceState.THINKING
-                    statusText = "Sending to Nova…"
-                    coroutineScope.launch {
-                        val userState = UserStateCollector.snapshot(context)
-                        try {
-                            var result: NovaApiClient.EventResult = NovaApiClient.postVoiceEvent(text, userState)
-                            // The Intent Surface can pause on a client-executed tool (e.g.
-                            // get_calendar_range) it needs on-device data for; resolve it
-                            // locally and hand the result back until we get a final answer.
-                            // Capped so a misbehaving backend can't loop forever.
-                            var hops = 0
-                            while (result is NovaApiClient.EventResult.NeedMore && hops < 3) {
-                                val need = result as NovaApiClient.EventResult.NeedMore
-                                statusText = "Checking your calendar…"
-                                val events = when (need.requestType) {
-                                    "get_calendar_range" -> {
-                                        val from = parseIsoToEpochMillis(need.fromIso)
-                                        val to = parseIsoToEpochMillis(need.toIso)
-                                        CalendarSignal.rangeSnapshot(context, from, to).orEmpty()
-                                    }
-                                    else -> emptyList()
-                                }
-                                result = NovaApiClient.postContinueEvent(need.sessionId, events)
-                                hops++
-                            }
-                            val finalResult = result as? NovaApiClient.EventResult.Final
-                            val calendarActions = finalResult?.actions.orEmpty()
-                            if (calendarActions.isNotEmpty()) {
-                                if (CalendarWriter.hasPermission(context)) {
-                                    writeCalendarActions(context, calendarActions)
-                                } else {
-                                    pendingCalendarActions = calendarActions
-                                    calendarPermissionLauncher.launch(Manifest.permission.WRITE_CALENDAR)
-                                }
-                            }
-                            statusText = "Heard you."
-                            speak(
-                                finalResult?.speech ?: "Sorry, I couldn't finish that.",
-                                finalResult?.episodeId,
-                            )
-                        } catch (e: java.net.SocketTimeoutException) {
-                            // Distinct from "couldn't reach": the backend IS
-                            // answering, it just took longer than readTimeout.
-                            // Worth its own message, because the fix is a
-                            // slower client rather than a broken server.
-                            voiceState = VoiceState.IDLE
-                            statusText = "Nova took too long to answer - tap to try again."
-                        } catch (e: IOException) {
-                            voiceState = VoiceState.IDLE
-                            statusText = "Couldn't reach the Nova backend - tap to try again."
-                        } catch (e: DateTimeParseException) {
-                            voiceState = VoiceState.IDLE
-                            statusText = "Nova sent a date it couldn't understand - tap to try again."
-                        }
-                    }
+                    sendMessage(text)
                 } else {
                     voiceState = VoiceState.IDLE
                     statusText = "Didn't catch that - tap to try again."
@@ -364,71 +470,178 @@ fun VoiceScreen() {
         }
     }
 
+    fun onMicClick() {
+        if (!hasPermission) {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else if (voiceState == VoiceState.LISTENING) {
+            // Force-finish the utterance now instead of waiting for the
+            // recognizer's own silence timeout.
+            statusText = "Sending to Nova…"
+            speechRecognizer?.stopListening()
+        } else if (voiceState == VoiceState.IDLE) {
+            startListening()
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = {
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
+                })
+            },
     ) {
-        Card(modifier = Modifier.fillMaxWidth()) {
+        if (messages.isEmpty()) {
+            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text(
+                    text = "Say something or type a message to get started.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(vertical = 16.dp),
+            ) {
+                items(messages, key = { it.id }) { message ->
+                    MessageBubble(message)
+                }
+                if (voiceState == VoiceState.THINKING) {
+                    item(key = "thinking-indicator") {
+                        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomEnd = 16.dp, bottomStart = 4.dp),
+                            ) {
+                                Text(
+                                    text = "Nova is thinking…",
+                                    style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (statusText.isNotBlank()) {
+            Text(
+                text = statusText,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+        }
+
+        // Only while NOVA is talking, because that is the only moment it means
+        // anything. Cutting it off is the user's stop control and, per
+        // DESIGN.md §5.7, the turn's rejection - the one negative signal V1
+        // collects, and one that costs no extra interaction.
+        if (voiceState == VoiceState.SPEAKING) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.Start,
+            ) {
+                OutlinedButton(onClick = { stopSpeaking() }) {
+                    Icon(Icons.Default.Stop, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Stop")
+                }
+            }
+        }
+
+        // Quick replies for a dangling yes/no question (EventOut.confirmation) - voice and
+        // typed "Other" answers still go through sendMessage/onMicClick exactly as before,
+        // these buttons are just a shortcut into the same path.
+        if (pendingConfirmation == "yes_no" && voiceState == VoiceState.IDLE) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(onClick = { sendMessage("Yes") }) { Text("Yes") }
+                OutlinedButton(onClick = { sendMessage("No") }) { Text("No") }
+            }
+        }
+
+        // ime's bottom inset is measured from the true screen edge, which is below the app's
+        // own bottom NavigationBar - but that bar doesn't move or shrink when the keyboard
+        // opens (NavHost is already offset above it via Scaffold's innerPadding), it just gets
+        // covered by the keyboard overlay. So the raw ime value bakes in that bar's height on
+        // top of the keyboard's own height; only the portion of ime beyond bottomBarHeight is
+        // actually eating into this content's own area and needs to be padded for here.
+        val imeBottomPx = WindowInsets.ime.getBottom(density)
+        val reservedBottomPx = with(density) { bottomBarHeight.roundToPx() }
+        val extraKeyboardPadding = with(density) { (imeBottomPx - reservedBottomPx).coerceAtLeast(0).toDp() }
+
+        HorizontalDivider()
+        Surface(tonalElevation = 3.dp) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .padding(bottom = extraKeyboardPadding)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(
-                    text = "Voice round-trip",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = statusText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (transcript.isNotBlank()) {
-                    Spacer(Modifier.height(12.dp))
-                    Text(
-                        text = "\"$transcript\"",
-                        style = MaterialTheme.typography.bodyLarge
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = inputText,
+                        onValueChange = { inputText = it },
+                        modifier = Modifier
+                            .weight(1f)
+                            .onPreviewKeyEvent { event ->
+                                val isEnter = event.key == Key.Enter || event.key == Key.NumPadEnter
+                                if (event.type == KeyEventType.KeyDown && isEnter && !event.isShiftPressed) {
+                                    handleSend()
+                                    true
+                                } else {
+                                    false
+                                }
+                            },
+                        placeholder = {
+                            Text(if (pendingConfirmation == "yes_no") "Yes, no, or something else…" else "Message Nova…")
+                        },
+                        maxLines = 4,
+                        shape = RoundedCornerShape(24.dp),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { handleSend() }),
                     )
-                }
-                Spacer(Modifier.height(20.dp))
-                Button(
-                    onClick = {
-                        if (!hasPermission) {
-                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        } else {
-                            startListening()
-                        }
-                    },
-                    enabled = voiceState == VoiceState.IDLE
-                ) {
-                    Icon(Icons.Default.Mic, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text(
-                        when (voiceState) {
-                            VoiceState.LISTENING -> "Listening…"
-                            VoiceState.THINKING -> "Thinking…"
-                            VoiceState.SPEAKING -> "Speaking…"
-                            VoiceState.IDLE -> "Tap to speak"
-                        }
-                    )
-                }
-                // Only while NOVA is talking, because that is the only moment it
-                // means anything. Cutting it off is the user's stop control and,
-                // per DESIGN.md §5.7, the turn's rejection - the one negative
-                // signal V1 collects, and one that costs no extra interaction.
-                if (voiceState == VoiceState.SPEAKING) {
-                    Spacer(Modifier.height(12.dp))
-                    OutlinedButton(onClick = { stopSpeaking() }) {
-                        Icon(Icons.Default.Stop, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Stop")
+                    IconButton(
+                        onClick = { handleSend() },
+                        enabled = inputText.isNotBlank(),
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                     }
+                }
+                Spacer(Modifier.height(8.dp))
+                FilledIconButton(
+                    onClick = { onMicClick() },
+                    enabled = voiceState == VoiceState.IDLE || voiceState == VoiceState.LISTENING,
+                    shape = RoundedCornerShape(24.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = NovaMicPurple,
+                        contentColor = Color.White,
+                        disabledContainerColor = NovaMicPurple.copy(alpha = 0.4f),
+                        disabledContentColor = Color.White,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp),
+                ) {
+                    Icon(
+                        if (voiceState == VoiceState.LISTENING) Icons.Default.Stop else Icons.Default.Mic,
+                        contentDescription = if (voiceState == VoiceState.LISTENING) "Stop" else "Speak",
+                    )
                 }
             }
         }

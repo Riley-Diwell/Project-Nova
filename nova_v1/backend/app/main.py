@@ -121,6 +121,7 @@ def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
         speech=intent.speech,
         actions=intent.actions,
         episode_id=intent.episode_id,
+        confirmation=intent.confirmation,
     )
 
 
