@@ -12,18 +12,47 @@ deliberately and asks for it back later:
     "where did I park?"                   -> action="recall"
     "what have I asked you to remember?"  -> action="recall"
 
-Both halves are the generic helpers in app/memory/__init__.py: a save is
-memory.write(), a recall is memory.read(). Notes live in the same
-episodic_memory table as events, under event_type "note", so they need no
-schema of their own (backend/db/schema.sql is unchanged) and the whole log
-stays readable through one pair of functions.
+TWO STORES, TWO LIFETIMES
+A save always lands in episodic_memory; it lands in Persona as well only if it
+is durable. That split is the whole design:
+
+  - memory.append() logs every note as an Episode (Section 5.5) - the
+    append-only, chronological record that the user said this, when. Short-term
+    detail lives here and only here: "parked on level 3" is true for an hour
+    and meaningless the moment they drive away.
+  - persona.upsert() additionally mirrors durable notes into the Persona vector
+    store (Section 5.4), where they sit alongside the facts NOVA has worked out
+    about the user and are searchable by meaning, indefinitely.
+
+`category` is what decides, and the model supplies it: a note filed into the
+ontology ("likes bagels" -> ["opinions","likes","food"]) is durable and gets
+promoted; a note with no category is situational and stays episodic. Putting
+"parked on level 3" in a store searched by meaning would be worse than not
+storing it - it would surface forever, competing with what actually matters.
+
+A recall reads BOTH tiers and returns them together - durable facts ranked by
+meaning, then recent notes. Not either/or, because similarity cannot tell a
+relevant fact from an irrelevant one: measured against the real store the two
+bands overlap, so a persona hit is never evidence that the log holds nothing
+better. "Where did I park?" scores some weak durable fact just as highly as
+the parking note, and only the model can say which answers the question.
+
+The semantic half is what bridges a synonym - "what do I like to eat" reaches
+"likes bagels" through the embedding, which substring matching never could.
+The log half covers what Persona structurally cannot: situational notes, which
+are never promoted, and anything saved before Persona existed.
 
 WHY RECALL RETURNS MORE THAN IT WAS ASKED FOR
-`query` narrows by substring, but when it matches nothing this returns the
-recent notes anyway rather than an empty list. Substring matching cannot bridge
-a synonym - "what do I like to eat" never matches a note saying "bagels" - so
-the model, which can bridge it, is handed the notes and does the matching
-itself. Filtering is an optimisation here, not a gate.
+Both halves hand back more than the closest hit. Every match above a low floor
+is kept, and the substring narrowing returns recent notes anyway when nothing
+matches. Filtering is an optimisation here, not a gate - the model picks.
+
+DEGRADING WITHOUT PERSONA
+Persona needs Supabase *and* a local embedding model (fastembed, ~1.2 GB on
+first use). Neither is required for the tool to work: a save that cannot reach
+Persona still lands in episodic_memory, and a recall that cannot reach Persona
+falls back to the substring scan over that same log. Notes saved before
+Persona existed are only in the log, and the fallback is what finds them.
 """
 
 from typing import Any
@@ -34,18 +63,35 @@ from .base import BaseTool
 # server, launched as uvicorn main:app from backend/app/). See registry.py.
 try:
     from .. import memory                   # app.tools.memory_tool
+    from .. import persona
 except ImportError:                         # pragma: no cover
     import memory                           # tools.memory_tool (cwd = backend/app)
+    import persona
 
 # Notes share episodic_memory with events; this is their event_type discriminator.
 NOTE_EVENT_TYPE = "note"
 
-# How many notes a recall hands back, newest first. A prompt-size cap - read()
-# returns the whole log, and every note goes to the model as text.
+# How many notes a recall hands back, newest first. A prompt-size cap: every
+# note handed back goes to the model as text.
 RECALL_LIMIT = 20
+
+# How far back the log fallback scans for a substring match. Wider than
+# RECALL_LIMIT because it filters before it truncates - a query matching one
+# note in the last two hundred should still find it - but bounded, because the
+# durable half of recall is Persona's job and this tier is only for notes too
+# recent or too situational to have been promoted there.
+NOTE_SCAN = 200
 
 # Shortest query word worth matching on - see _matches().
 MIN_QUERY_WORD = 3
+
+# Floor for semantic hits - a noise-drop, not a relevance test. Measured
+# against the real store, relevant and irrelevant queries overlap (a genuine
+# hit at 0.442, an unrelated one at 0.492), so no threshold separates them and
+# anything above ~0.45 starts silently returning nothing. Keep it low, return
+# both tiers, and let the model choose. See loop.py's PERSONA_MIN_SIMILARITY
+# for the numbers.
+RECALL_MIN_SIMILARITY = 0.35
 
 
 class MemoryTool(BaseTool):
@@ -108,11 +154,31 @@ class MemoryTool(BaseTool):
                             "the note easier to find later, e.g. ['parking', 'car']."
                         ),
                     },
+                    "category": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional for 'save'. Where this belongs in what Nova "
+                            "knows about the user, general to specific. Use it "
+                            "when the note says something durable about who they "
+                            "are - a preference, an opinion, a routine, a course "
+                            "they take - e.g. ['opinions', 'likes', 'food'] for "
+                            "'likes bagels', or ['facts', 'courses'] for 'studies "
+                            "mechanical engineering'. Omit it for anything "
+                            "situational or one-off ('parked on level 3', "
+                            "'meeting moved to 3pm') - those are kept as "
+                            "short-term notes and are not remembered as part "
+                            "of who the user is."
+                        ),
+                    },
                     "query": {
                         "type": "string",
                         "description": (
-                            "Optional for 'recall'. Words to narrow the notes by. "
-                            "Omit it to get the most recent notes."
+                            "Optional for 'recall'. What to look for, in the "
+                            "user's own words - it is matched by meaning, not by "
+                            "keyword, so a plain question works better than a "
+                            "guess at the wording of the note. Omit it to get the "
+                            "most recent notes."
                         ),
                     },
                 },
@@ -126,7 +192,8 @@ class MemoryTool(BaseTool):
         if action == "save":
             return _save(
                 text=str(tool_input.get("text") or "").strip(),
-                tags=tool_input.get("tags") or [],
+                tags=[str(t) for t in (tool_input.get("tags") or [])],
+                category=[str(c) for c in (tool_input.get("category") or [])],
             )
 
         if action == "recall":
@@ -140,8 +207,9 @@ class MemoryTool(BaseTool):
 
 # --- actions -----------------------------------------------------------------
 
-def _save(text: str, tags: list[str]) -> dict[str, Any]:
-    """Append one note to the Memory log (memory.write)."""
+def _save(text: str, tags: list[str], category: list[str]) -> dict[str, Any]:
+    """Append one note to the Memory log (memory.append), then mirror it into
+    the Persona vector store so it can be recalled by meaning."""
     if not text:
         return {
             "success": False,
@@ -150,14 +218,14 @@ def _save(text: str, tags: list[str]) -> dict[str, Any]:
 
     record = {
         "event_type": NOTE_EVENT_TYPE,
-        "event": {"kind": "note", "text": text, "tags": [str(t) for t in tags]},
+        "event": {"kind": "note", "text": text, "tags": tags, "category": category},
     }
 
     # Non-fatal, as everywhere else Memory is touched: an unconfigured or
     # unreachable Supabase must not take the whole turn down - but unlike a
     # background write, the user asked for this, so say it didn't land.
     try:
-        note_id = memory.write(record)
+        note_id = memory.append(record)
     except Exception as e:
         print(f"[memory tool] save failed: {e}")
         return {
@@ -166,43 +234,168 @@ def _save(text: str, tags: list[str]) -> dict[str, Any]:
         }
 
     print(f"[memory tool] saved note {note_id}: {text!r}")
-    return {"success": True, "note_id": note_id, "note": text, "spoken": "Noted."}
+    return {
+        "success": True,
+        "note_id": note_id,
+        "note": text,
+        "indexed": _promote_to_persona(text, tags, category, note_id),
+        "spoken": "Noted.",
+    }
+
+
+def _promote_to_persona(
+    text: str, tags: list[str], category: list[str], note_id: str
+) -> bool:
+    """Mirror a durable note into Persona (Section 5.4) as a searchable belief.
+
+    NOT every note. Persona is the long-term store - who the user is - and
+    "parked on level 3" is not who anyone is. It is true for an hour and
+    meaningless the moment they drive away, and a fact like that in a store
+    searched by meaning is worse than absent: it surfaces forever, competing
+    with the things that do matter. Situational notes stay in episodic memory,
+    which is where recall's fallback still finds them while they are current.
+
+    `category` is the test, and the model supplies it: it files a note into the
+    ontology only when the note says something durable about the user (the tool
+    schema spells out the distinction). No category means situational.
+
+    Returns whether it landed. Best-effort by design: Persona needs Supabase
+    *and* the embedding model, and the note is already safely in the log by the
+    time we get here, so a failure downgrades recall from semantic to substring
+    rather than losing anything. The user is not told - from their side the
+    note was saved, which it was.
+    """
+    if not category:
+        print(f"[memory tool] note {note_id} kept episodic (no category - situational)")
+        return False
+
+    try:
+        fact_id = persona.upsert(persona.Fact(
+            text=text,
+            category=category,
+            # source "stated" is the default the Intent Surface assumes, and it
+            # is what makes this outrank a fact consolidation merely inferred.
+            metadata={"source": "stated", "note_id": note_id, "tags": tags},
+        ))
+    except Exception as e:
+        print(f"[memory tool] persona upsert skipped: {e}")
+        return False
+
+    print(f"[memory tool] indexed note {note_id} as persona fact {fact_id}")
+    return True
 
 
 def _recall(query: str) -> dict[str, Any]:
-    """Read notes back (memory.read), newest first, narrowed by `query` when
-    that leaves anything - see the module docstring on why it isn't a gate."""
+    """Both tiers at once: durable facts by meaning, plus recent notes.
+
+    NOT either/or. Similarity cannot tell a relevant fact from an irrelevant
+    one here - measured, the bands overlap (see loop.py's
+    PERSONA_MIN_SIMILARITY) - so a persona hit is never good enough evidence to
+    conclude the log has nothing better. "Where did I park?" returns some weak
+    durable fact and the parking note; only the model can say which answers the
+    question, so it gets both, each labelled with where it came from.
+
+    The log half also covers what Persona structurally cannot: situational
+    notes, which are never promoted, and anything saved before Persona existed.
+    """
+    facts = _search_persona(query) if query else []
+    notes = _notes_from_log(query)
+    if notes is None:                      # the log itself is unreachable
+        return _recalled(facts, source="persona") if facts else _unreachable()
+
+    seen = {f["text"] for f in facts}
+    merged = facts + [n for n in notes if n["text"] not in seen]
+    return _recalled(merged[:RECALL_LIMIT], source=_source_of(facts, notes))
+
+
+def _source_of(facts: list[dict[str, Any]], notes: list[dict[str, Any]]) -> str:
+    if facts and notes:
+        return "persona+log"
+    return "persona" if facts else "log"
+
+
+def _unreachable() -> dict[str, Any]:
+    return {"success": False, "spoken": "I couldn't check my notes just now."}
+
+
+def _search_persona(query: str) -> list[dict[str, Any]]:
+    """Semantic hits for `query`, best first. [] if Persona is unreachable -
+    the caller falls back to the log rather than reporting a failure."""
     try:
-        rows = memory.read("event_type", NOTE_EVENT_TYPE)   # oldest first
+        matches = persona.search(persona.PersonaQuery(
+            text=query,
+            limit=RECALL_LIMIT,
+            min_similarity=RECALL_MIN_SIMILARITY,
+        ))
     except Exception as e:
-        print(f"[memory tool] recall failed: {e}")
-        return {
-            "success": False,
-            "spoken": "I couldn't check my notes just now.",
+        print(f"[memory tool] persona search skipped: {e}")
+        return []
+
+    print(f"[memory tool] recall query={query!r}: {len(matches)} semantic matches")
+    return [
+        {
+            # isoformat, not the datetime the store hands back: the log path
+            # returns strings and both shapes end up in the same prompt.
+            "created_at": m.fact.created_at.isoformat() if m.fact.created_at else None,
+            "text": m.fact.text,
+            "tags": (m.fact.metadata or {}).get("tags") or [],
+            "category": m.fact.category,
+            "similarity": round(m.similarity, 3),
         }
+        for m in matches
+    ]
+
+
+def _notes_from_log(query: str) -> list[dict[str, Any]] | None:
+    """Notes from the Memory log, newest first, narrowed by substring when that
+    leaves anything. None means the log itself could not be read - which is
+    different from it being empty, and the caller treats it differently.
+
+    Scans a window rather than the whole log. This is the fallback tier: the
+    substring match only ever finds a note the user phrases the same way twice,
+    and anything older than the window that is genuinely about them should have
+    been promoted to Persona, where the search above finds it by meaning.
+    """
+    try:
+        rows = memory.recent(NOTE_EVENT_TYPE, NOTE_SCAN)    # oldest first
+    except Exception as e:
+        print(f"[memory tool] log read failed: {e}")
+        return None
 
     notes = [_as_note(r) for r in reversed(rows)]           # newest first
 
     if query:
         matched = [n for n in notes if _matches(n, query)]
-        print(f"[memory tool] recall query={query!r}: {len(matched)}/{len(notes)} matched")
+        print(f"[memory tool] recall query={query!r}: {len(matched)}/{len(notes)} matched in log")
         if matched:
             notes = matched
 
-    notes = notes[:RECALL_LIMIT]
+    return notes[:RECALL_LIMIT]
 
+
+def _recalled(notes: list[dict[str, Any]], source: str) -> dict[str, Any]:
+    """One result shape however the hits were found. Durable facts come first
+    (ranked by meaning), then recent notes - each carries `similarity` or not,
+    so the model can tell which tier it is reading."""
     if not notes:
         spoken = "I haven't got any notes saved yet."
     elif len(notes) == 1:
         spoken = f"One note: {notes[0]['text']}"
     else:
-        spoken = f"{len(notes)} notes, most recent first: " + "; ".join(
+        ordering = "most relevant first" if source.startswith("persona") else "most recent first"
+        spoken = f"{len(notes)} notes, {ordering}: " + "; ".join(
             n["text"] for n in notes[:3]
         )
         if len(notes) > 3:
             spoken += f" and {len(notes) - 3} more"
 
-    return {"success": True, "count": len(notes), "notes": notes, "spoken": spoken}
+    return {
+        "success": True,
+        "count": len(notes),
+        "notes": notes,
+        "matched_by": source,
+        "spoken": spoken,
+    }
 
 
 # --- row <-> note ------------------------------------------------------------
@@ -214,6 +407,7 @@ def _as_note(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": row.get("created_at"),
         "text": event.get("text", ""),
         "tags": event.get("tags") or [],
+        "category": event.get("category") or [],
     }
 
 

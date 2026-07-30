@@ -15,3 +15,6 @@ requests>=2.32
 
 # Memory / Persona store
 supabase>=2.9
+# Persona embeddings, run locally (ONNX, no PyTorch). Downloads
+# BAAI/bge-large-en-v1.5 (~1.2 GB) on first use, then caches it.
+fastembed>=0.4

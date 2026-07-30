@@ -1,20 +1,27 @@
 """
-tools/calendar_tool.py - reading the user's calendar over an arbitrary range.
+tools/calendar_tool.py - the user's calendar, read and written.
 
 WHAT THIS FILE IS
-The registry entry for get_calendar_range. Unusual among the Function tools in
-that it does not run here: the calendar lives on the phone, so the Intent
-Surface pauses the conversation (loop.py's CLIENT_TOOLS), hands the range to
-Android, and resumes with whatever the device sends back. _execute() is
-therefore unreachable in normal operation, and says so if it is ever reached.
+The registry entries for get_calendar_range and add_calendar_event. Neither
+runs here: the calendar lives on the phone, in Android's Calendar Provider.
+They differ in whether anything has to come back.
 
-WHY IT IS REGISTERED AT ALL
+  get_calendar_range  the model needs the answer before it can speak, so the
+                      Intent Surface pauses the conversation (loop.py's
+                      CLIENT_TOOLS), hands the range to Android, and resumes
+                      with whatever the device sends back. _execute() is
+                      unreachable in normal operation and says so if reached.
+  add_calendar_event  nothing has to come back, so there is no reason to pause.
+                      The Action recorded when it runs IS the instruction - it
+                      goes out in EventOut.actions and the phone writes it.
+
+WHY THEY ARE REGISTERED AT ALL
 Registration is what gives a tool a controller gain, and therefore a dial in
-the Android app's Gain tab. Calendar reads are worth tuning for the same reason
-the others are - high gain means Nova volunteers what is coming up, zero means
-it only looks when asked - even though the execution happens off-box.
+the Android app's Gain tab. Both are worth tuning - high gain means Nova
+volunteers what is coming up, or schedules a plan you merely mentioned; zero
+means it only acts when asked - even though execution happens off-box.
 
-Being registered also means loop.py builds its Claude-facing definition from
+Being registered also means loop.py builds their Claude-facing definitions from
 here rather than keeping a second copy inline.
 """
 
@@ -35,10 +42,10 @@ class CalendarTool(BaseTool):
                 "'next month', a specific date). Never fabricate calendar "
                 "events you don't have - call this instead. "
                 "Work entirely in the user's LOCAL time, not UTC. Take 'now' "
-                "from user_state.local_time and from nothing else - in "
+                "from the top-level local_time and from nothing else - in "
                 "particular not from the triggering event's timestamp, which "
                 "is UTC and is frequently a different calendar day from the "
-                "user's. So if local_time is 2026-07-29T02:04+10:00, 'today' "
+                "user's. So if local_time is 2026-07-29T02:04, 'today' "
                 "is the 29th and 'tomorrow' runs 2026-07-30T00:00:00 to "
                 "2026-07-31T00:00:00. Events come back with start_local and "
                 "end_local already in their timezone - quote those, and never "
@@ -85,4 +92,84 @@ class CalendarTool(BaseTool):
                 "get_calendar_range is resolved on the device, not in the backend - "
                 "it should have been intercepted as a client tool."
             ),
+        }
+
+
+class AddCalendarEventTool(BaseTool):
+    """
+    Writing an event into the user's calendar.
+
+    The work happens on the phone, but unlike get_calendar_range nothing has to
+    come back: the model does not need a result to finish speaking, so there is
+    no reason to pause the conversation for a device round-trip.
+
+    So this tool's whole job is to succeed. The Action recorded when it runs -
+    {tool, input, trigger, ran} - IS the instruction: it travels out in
+    EventOut.actions, the phone executes it via CalendarWriter, and the same
+    record lands in the Episode as evidence of what NOVA did. There is no second
+    structure and no queue; the log of what happened and the instruction to make
+    it happen are the same object (CONTEXT.md "Action").
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="add_calendar_event",
+            description=(
+                "Adds an event to the user's calendar. Use this when they ask "
+                "you to schedule, book or put something in their calendar, and "
+                "when a plan they state has a definite time. The event is "
+                "written on the device, so confirm it in speech as done rather "
+                "than as pending. Times are the user's LOCAL time, ISO 8601 "
+                "with no timezone suffix, exactly as get_calendar_range takes "
+                "them - work from the top-level local_time, never from the "
+                "triggering event's UTC timestamp. If they name a start but no "
+                "end, give it a sensible duration rather than asking."
+            ),
+            gain_description=(
+                "How readily Nova puts things in your calendar without being "
+                "asked outright. At 1.0 a plan you simply mention out loud - "
+                "'coffee with Sam on Thursday at ten' - gets scheduled. At 0.0 "
+                "it only adds events you explicitly ask it to add."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "What the event is called, in the user's own words.",
+                    },
+                    "start_time": {
+                        "type": "string",
+                        "description": (
+                            "Start in the user's LOCAL time, ISO 8601 with no "
+                            "timezone suffix - e.g. 2026-07-29T10:00:00."
+                        ),
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "description": (
+                            "End in the user's LOCAL time, same format. Required: "
+                            "pick a sensible duration if the user did not say one."
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional detail - where, with whom, anything they added.",
+                    },
+                },
+                "required": ["title", "start_time", "end_time"],
+            },
+        )
+
+    def _execute(self, tool_input: dict[str, Any]) -> Any:
+        # Nothing to do here on purpose - see the class docstring. Returned
+        # rather than raising so the model can speak a confident confirmation,
+        # and echoing the details back so it confirms what was actually booked
+        # rather than what it meant to book.
+        return {
+            "success": True,
+            "queued_for_device": True,
+            "title": tool_input.get("title"),
+            "start_time": tool_input.get("start_time"),
+            "end_time": tool_input.get("end_time"),
         }

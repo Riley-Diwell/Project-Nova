@@ -18,6 +18,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from uuid import UUID
 
@@ -34,24 +35,45 @@ from schemas.event import Event
 from gain.config import FIRING_THRESHOLD
 from gain.gain_store import GainStore
 from gain.overrides import GainOverrides
+from gain.reinforcement import Outcome, Reinforcer
 from tools.registry import ToolRegistry
 from tools.dispatcher import Dispatcher
-from tools.calendar_tool import CalendarTool
+from tools.calendar_tool import AddCalendarEventTool, CalendarTool
 from tools.memory_tool import MemoryTool
 from tools.navigation import NavigationTool
 from tools.notification_management import NotificationManagementTool
 
 import memory
+import persona
 
 client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 MODEL = "claude-haiku-4-5"
 MAX_ITERATIONS = 5
 
-# How many past episodes of the same event_type to hand Claude as context.
-# memory.read() returns the whole log, so this is a prompt-size cap, not a query
-# limit - keep it small.
+# How many past Episodes of the same type to hand Claude as short-term context.
+# A prompt-size cap as much as a query limit - keep it small.
 RECENT_EPISODES = 5
+
+# How many long-term Persona facts to retrieve per event, and how close they
+# have to be. Kept small: this is background about the user, competing with
+# recent_episodes for the model's attention.
+#
+# The floor is a noise-drop, NOT a relevance test, and it is deliberately low.
+# Measured against the real store (bge-large, question vs third-person
+# statement), the two bands overlap and cannot be separated by a threshold:
+#
+#   relevant   "where do I always go in the mornings" -> 0.499
+#              "what is my usual"                     -> 0.442
+#   unrelated  "remind me to call mum"                -> 0.492
+#              "what is the capital of France"        -> 0.308
+#
+# So anything high enough to exclude "call mum" also excludes real hits. Top-k
+# ranking plus the model's own judgement does the filtering; each fact is
+# handed over with its similarity so weak ones can be discounted. Raising this
+# past ~0.45 silently empties the persona payload - that is what it did at 0.5.
+PERSONA_HITS = 3
+PERSONA_MIN_SIMILARITY = 0.35
 
 MAPS_API_KEY = os.environ.get("google_maps_api_key")
 
@@ -85,7 +107,7 @@ SYSTEM_PROMPT = (
     "them past the PROACTIVITY rules below first; often the right response to "
     "a statement is to quietly do something with it and say little or "
     "nothing. "
-    "CALENDAR AND TIME. Now is user_state.local_time; every event carries "
+    "CALENDAR AND TIME. Now is the top-level local_time; every event carries "
     "start_local and end_local, already in the user's timezone. Work only from "
     "those three. Read the date off start_local to say whether something is "
     "today or tomorrow, and the clock time off it to say when - do not assume "
@@ -148,7 +170,17 @@ SYSTEM_PROMPT = (
     "memory tool's own gain, not by this paragraph: at a high gain, saving a "
     "statement they simply made in passing is exactly what they have asked "
     "for. When both bear on an answer, prefer what they stated over what you "
-    "inferred."
+    "inferred. "
+    "persona is the third source and the long-term one: durable facts about "
+    "who this user is, retrieved by meaning for this particular event. Some "
+    "were stated outright; the ones marked source 'derived' NOVA worked out "
+    "from repeated behaviour, and those carry a confidence and the number of "
+    "times it was seen. Treat them as established background about the user "
+    "rather than as anything they just said - they are true in general, not "
+    "necessarily true right now. Use them to answer about habits, usuals and "
+    "preferences without needing recent_episodes to still contain the "
+    "evidence. Where a derived fact and something the user actually stated "
+    "disagree, the stated one wins."
 )
 
 
@@ -180,6 +212,9 @@ _REGISTRY.register(MemoryTool())
 # Runs on the phone, not here (CLIENT_TOOLS below) - registered so it carries a
 # gain, and so gets a dial in the app's Gain tab like the others.
 _REGISTRY.register(CalendarTool())
+# Also runs on the phone, but nothing comes back, so it needs no pause - the
+# Action it records is itself the instruction the device executes.
+_REGISTRY.register(AddCalendarEventTool())
 _DISPATCHER = Dispatcher(_REGISTRY)
 
 CLIENT_TOOLS: set[str] = {"get_calendar_range"}
@@ -284,6 +319,53 @@ def _build_tools(state_confidence: float) -> list[dict[str, Any]]:
 # itself lives in gain/overrides.py, next to the reinforcement that moves the
 # same numbers from the other direction.
 GAIN_OVERRIDES = GainOverrides(_REGISTRY, _GAIN_STORE)
+_REINFORCER = Reinforcer(_REGISTRY, _GAIN_STORE)
+
+
+def reinforce_episode(episode_id: str, outcome: str) -> dict[str, float]:
+    """
+    Move the gain of everything an Episode actually did, given the user's
+    verdict on it. Returns {tool: new learned value} for what moved.
+
+    Reads the Episode back rather than taking a list of tools, because the
+    verdict arrives on a later request than the turn it judges - by the time the
+    user has heard NOVA out, the TurnContext is long gone. The Episode is the
+    only durable record of what was done, which is a large part of why Actions
+    are written to it.
+
+    Every Action with ran=true is scored, reactive ones included. That is a
+    deliberate departure from reinforcement.py's "only proactive actions should
+    be reinforced": at DEFAULT_GAIN no tool can clear the firing threshold, so
+    if only proactive calls counted, nothing would ever be scored and no gain
+    would ever move. A tool earns the right to act unasked by being useful when
+    asked. See docs/adr/0002.
+    """
+    try:
+        verdict = Outcome(outcome)
+    except ValueError:
+        print(f"[gain] ignoring unknown outcome {outcome!r}")
+        return {}
+
+    try:
+        episode = memory.get(episode_id)
+    except Exception as e:
+        print(f"[gain] reinforcement skipped, episode unreadable: {e}")
+        return {}
+    if episode is None:
+        print(f"[gain] reinforcement skipped, no such episode {episode_id!r}")
+        return {}
+
+    moved: dict[str, float] = {}
+    for action in (episode.get("action") or {}).get("actions") or []:
+        name = action.get("tool")
+        if not action.get("ran") or not name or name in moved:
+            continue
+        try:
+            moved[name] = _REINFORCER.reinforce(name, verdict)
+        except KeyError:
+            # Not a registered Function tool - nothing to tune.
+            continue
+    return moved
 
 
 @dataclass
@@ -298,14 +380,38 @@ class TurnContext:
     location_ctx: str | None
     state_confidence: float
 
+    # Minutes east of UTC for this turn's user_state, kept so a client-tool hop
+    # can localise what the phone sends back on the far side of the pause.
+    utc_offset_minutes: int = 0
+
     # Tools whose inferred call was blocked this turn. Re-checked before every
     # dispatch so the model cannot get a second bite by relabelling the same
     # call "requested" after being told the first one was suppressed.
     suppressed: set[str] = field(default_factory=set)
 
-    # Tools that actually ran, in order - surfaced as EventOut.actions so the
-    # caller can see what gain let through (Section 6.2's {speech, actions[]}).
-    ran: list[str] = field(default_factory=list)
+    # Every Function-tool call this turn, in order, with the parameters the
+    # model resolved - {tool, input, trigger, ran}. ONE structure serves three
+    # readers (CONTEXT.md "Action"): it goes out as EventOut.actions for the
+    # phone to execute and display, and it is written to the episode's `action`
+    # column for consolidation to count. It used to be two things - a list of
+    # names for the wire and a parallel list of dicts for Memory - which is how
+    # the wire ended up carrying names the client could not parse.
+    #
+    # The resolved parameters are the point. The destination "Brooklyn Boy
+    # Bagels" exists nowhere else: the user's speech says "the bagel place", and
+    # five different phrasings of the same ask converge on one entity only at
+    # the moment the tool is called.
+    actions: list[dict[str, Any]] = field(default_factory=list)
+
+    # The episodic_memory row main.py opened for this turn, carried so the row
+    # can be closed once the turn resolves - which may be on the far side of a
+    # client-tool hop, in /event/continue rather than /event.
+    episode_id: str | None = None
+
+    @property
+    def ran(self) -> list[str]:
+        """Names of the tools that actually ran - logging only."""
+        return [a["tool"] for a in self.actions if a["ran"]]
 
 
 def _gate(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> dict[str, Any] | None:
@@ -346,6 +452,29 @@ def _gate(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> dict[str, 
     return _suppressed_result(name, decision.effective_gain, decision.state_confidence)
 
 
+def _record_action(
+    name: str, tool_input: dict[str, Any], ctx: TurnContext, ran: bool
+) -> None:
+    """
+    Record one Action. Context tools are skipped: a reverse-geocode lookup says
+    nothing about what the user habitually does, and counting it as behaviour
+    would put noise into the trends consolidation derives.
+
+    Suppressed calls are recorded too (ran=False), and they go over the wire as
+    well. What NOVA wanted to do and was refused is evidence about the user's
+    settings rather than about the user - and the phone needs to be able to tell
+    "nothing happened" from "nothing was attempted".
+    """
+    if not _REGISTRY.has(name):
+        return
+    ctx.actions.append({
+        "tool": name,
+        "input": dict(tool_input),
+        "trigger": str(tool_input.get("trigger") or "requested"),
+        "ran": ran,
+    })
+
+
 def _suppressed_result(name: str, gain: float, confidence: float) -> dict[str, Any]:
     """
     What the model gets back when gain refuses an inferred call. Phrased as a
@@ -382,7 +511,10 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
             result = _DISPATCHER.dispatch_reactive(name, tool_input)
         else:
             result = _DISPATCHER.confirm_proactive(name, tool_input)
-        ctx.ran.append(name)  # after the call, so a raising tool isn't logged as run
+        # Recorded after the call, so a tool that raises is not reported as run -
+        # and with the augmented tool_input, so the Action carries the origin the
+        # tool actually used rather than the one the model supplied.
+        _record_action(name, tool_input, ctx, ran=True)
         return result
     return {"error": f"unknown tool: {name}"}
 
@@ -449,7 +581,15 @@ class IntentResult(BaseModel):
     status: Literal["final"] = "final"
     event_id: UUID
     speech: str
+
+    # Every Action this turn took, in order (CONTEXT.md "Action"). The phone
+    # executes the ones it recognises; the same list is written to the episode.
     actions: list[dict[str, Any]] = []
+
+    # The Episode main.py opened for this turn. It closes that row with the
+    # Actions above, and passes the id on to the phone so it can name the same
+    # Episode when it reports the Outcome.
+    episode_id: str | None = None
 
 
 class NeedMoreResult(BaseModel):
@@ -475,11 +615,16 @@ _PENDING_SESSIONS: dict[str, dict[str, Any]] = {}
 
 def _recent_episodes(event: Event) -> list[dict[str, Any]]:
     """
-    The last RECENT_EPISODES logged episodes of this event's type, oldest first,
-    for pattern analysis (schema.sql: "the Intent Surface reads rows back").
+    The last RECENT_EPISODES Episodes of this event's type, oldest first, as
+    short-term context for the model.
+
+    Asks for one more than it needs: main.py opens this turn's Episode before
+    calling run(), so the newest row back is almost always the current event -
+    already in the payload as `event`, and not history. Dropping it here costs a
+    row rather than a second query.
     """
     try:
-        rows = memory.read("event_type", event.type)
+        rows = memory.recent(event.type, RECENT_EPISODES + 1)
     except Exception as e:
         print(f"[memory] read skipped: {e}")
         return []
@@ -499,7 +644,66 @@ def _recent_episodes(event: Event) -> list[dict[str, Any]]:
     ]
 
 
-def run(user_state: UserState, event: Event) -> IntentResult | NeedMoreResult:
+def _relevant_persona(event: Event) -> list[dict[str, Any]]:
+    """
+    Long-term facts about the user, retrieved by meaning for this event.
+
+    The other half of what recent_episodes does. recent_episodes is the last
+    few raw episodes OF THIS EVENT TYPE - short-term, narrow, and it scrolls:
+    the five bagel-shop trips fall out of it after five more navigations, and
+    with them any way to answer "what's my usual?". Persona is where that habit
+    lives once app/consolidation has counted it, and a vector search finds it
+    however the user phrases the question.
+
+    Non-fatal, like every other store read here: no Supabase, no embedding
+    model, or simply nothing stored yet all mean the turn runs without it.
+    """
+    query = _persona_query(event)
+    if not query:
+        return []
+
+    try:
+        matches = persona.search(persona.PersonaQuery(
+            text=query,
+            limit=PERSONA_HITS,
+            min_similarity=PERSONA_MIN_SIMILARITY,
+        ))
+    except Exception as e:
+        print(f"[persona] search skipped: {e}")
+        return []
+
+    print(f"[persona] {len(matches)} fact(s) for {query[:40]!r}")
+    return [
+        {
+            "text": m.fact.text,
+            "category": m.fact.category,
+            "confidence": m.fact.confidence,
+            # Stated vs worked-out. The prompt leans on this to decide which
+            # wins when a derived habit and something the user said disagree.
+            "source": (m.fact.metadata or {}).get("source", "stated"),
+            "support": (m.fact.metadata or {}).get("support"),
+            "similarity": round(m.similarity, 3),
+        }
+        for m in matches
+    ]
+
+
+def _persona_query(event: Event) -> str:
+    """What to embed for this event. Voice events carry the user's own words;
+    the ambient ones are described by whatever names their subject."""
+    parts = [
+        getattr(event, "text", None),                       # voice
+        getattr(event, "app", None),                        # notification
+        getattr(event, "title", None),
+        getattr(event, "calendar_event_name", None),        # calendar_trigger
+        getattr(event, "calendar_event_location", None),
+    ]
+    return " ".join(str(p) for p in parts if p).strip()
+
+
+def run(
+    user_state: UserState, event: Event, episode_id: str | None = None
+) -> IntentResult | NeedMoreResult:
     if MOCK_LLM:
         text = getattr(event, "text", None)
         return IntentResult(
@@ -507,6 +711,7 @@ def run(user_state: UserState, event: Event) -> IntentResult | NeedMoreResult:
             speech=f"[mock] received event type={event.type!r}"
                    + (f" text={text!r}" if text else ""),
             actions=[],
+            episode_id=episode_id,
         )
 
     # event.timestamp is always UTC; local_time is that same instant converted
@@ -521,6 +726,10 @@ def run(user_state: UserState, event: Event) -> IntentResult | NeedMoreResult:
         "user_state": user_state_dump,
         "local_time": local_time.strftime("%Y-%m-%dT%H:%M:%S"),
         "recent_episodes": _recent_episodes(event),
+        # Short-term above, long-term here: the detail of the last few similar
+        # events, plus the durable facts consolidation has distilled out of all
+        # of them. "Parked on level 3" only ever appears in the first.
+        "persona": _relevant_persona(event),
     }
 
     messages: list[dict[str, Any]] = [
@@ -529,6 +738,8 @@ def run(user_state: UserState, event: Event) -> IntentResult | NeedMoreResult:
     ctx = TurnContext(
         location_ctx=user_state.location_ctx,
         state_confidence=user_state.confidence,
+        utc_offset_minutes=user_state.utc_offset_minutes,
+        episode_id=episode_id,
     )
     return _run_loop(messages, MAX_ITERATIONS, event.id, ctx)
 
@@ -588,7 +799,10 @@ def _run_loop(
             if not speech:
                 print(f"[loop] empty speech - raw content: {response.content!r}")
             print(f"[loop] final speech={speech!r} actions={ctx.ran!r}")
-            return IntentResult(event_id=event_id, speech=speech, actions=ctx.ran)
+            return IntentResult(
+                event_id=event_id, speech=speech, actions=ctx.actions,
+                episode_id=ctx.episode_id,
+            )
 
         # if a tool is called
         if response.stop_reason == "tool_use":
@@ -604,13 +818,17 @@ def _run_loop(
                 None,
             )
             if client_call is not None and _gate(client_call.name, client_call.input, ctx) is None:
-                ctx.ran.append(client_call.name)
+                _record_action(client_call.name, client_call.input, ctx, ran=True)
                 session_id = str(uuid.uuid4())
                 _PENDING_SESSIONS[session_id] = {
                     "messages": messages,
                     "tool_use_id": client_call.id,
                     "event_id": event_id,
                     "ctx": ctx,
+                    # Carried so resume() can localise whatever the phone sends
+                    # back. Without it the far side of the hop defaults to UTC,
+                    # and the calendar comes back a timezone out.
+                    "utc_offset_minutes": ctx.utc_offset_minutes,
                 }
                 return NeedMoreResult(
                     event_id=event_id,
@@ -624,6 +842,10 @@ def _run_loop(
             for block in response.content:
                 if block.type == "tool_use":
                     blocked = _gate(block.name, block.input, ctx)
+                    if blocked is not None:
+                        # Refused calls are recorded here; allowed ones are
+                        # recorded by _run_local_tool once they return.
+                        _record_action(block.name, block.input, ctx, ran=False)
                     result = blocked if blocked is not None else _run_local_tool(
                         block.name, block.input, ctx
                     )
@@ -640,4 +862,7 @@ def _run_loop(
         break
 
     print("[loop] exited loop with no end_turn - returning empty speech")
-    return IntentResult(event_id=event_id, speech="", actions=ctx.ran)
+    return IntentResult(
+        event_id=event_id, speech="", actions=ctx.actions,
+        episode_id=ctx.episode_id,
+    )
