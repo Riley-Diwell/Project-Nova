@@ -15,12 +15,22 @@ INPUT
 
 API SETUP
 Needs google_maps_api_key in .env (same key as get_current_address's
-reverse-geocode call). If it isn't set, falls back to hardcoded
-Canberra travel time estimates so this is still demo-able without a key.
+reverse-geocode call). Without it, the tool answers from a small table of
+hardcoded Canberra estimates so the demo still works - and for anywhere not in
+that table it says it does not know, rather than inventing a duration. There is no
+default travel time anywhere in this file, on purpose: see _FALLBACK_ESTIMATES.
+
+THE ERROR TERM
+This is the tool the closed loop was designed around, because it is the one with
+a real deadline: a lecture at ten and a twenty-minute drive means there is a last
+moment to leave, and how close the user is to that moment is a number. See
+error() - it deliberately uses the offline estimate table rather than the
+Directions API, because deciding whether to speak must not cost a network round
+trip on every event.
 """
 
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 import os
 import re
 
@@ -41,6 +51,11 @@ _FALLBACK_ESTIMATES = {
     "city": 15, "civic": 15, "canberra centre": 15,
     "airport": 30, "queanbeyan": 25,
 }
+
+# How much slack has to be left before leaving stops being a live concern. Above
+# this the error term is zero: half an hour of spare time is not a problem NOVA
+# should be volunteering an opinion about, however proactive its dial is.
+SLACK_HORIZON_MINUTES = 30
 
 
 class NavigationTool(BaseTool):
@@ -88,6 +103,68 @@ class NavigationTool(BaseTool):
                 "required": ["destination"],
             },
         )
+
+    def error(self, observation: Any) -> Optional[float]:
+        """How little slack is left before the user has to leave, in [0, 1].
+
+        The measurement: the next thing the user is committed to has a place and
+        a start time, getting there takes a while, so there is a latest departure
+        that still meets it. Slack is the gap between now and that departure.
+
+            slack = minutes_until_start - travel_minutes
+            error = 0                       when slack >= SLACK_HORIZON_MINUTES
+                    1 - slack / horizon     as slack closes
+                    1                       when slack <= 0 (already too late)
+
+        Which gives the property the whole overhaul is for: the term is zero when
+        nothing is diverging, rises in proportion as the deadline approaches, and
+        saturates once the user is already late - past that point there is no
+        worse news to deliver, so a larger number would only distort the gain.
+
+        Zero when there is nowhere to be. A commitment without a location is a
+        commitment with no journey to be late for, and an empty horizon is the
+        case NOVA should be silent in.
+
+        Travel time comes from this module's offline estimate table, never from
+        the Directions API. The error term runs on every event, including ambient
+        ones, so a network call here would put a Maps round trip in front of every
+        notification. The estimate is coarse; it only has to be good enough to
+        rank "comfortable" against "leave now", and the Action the model resolves
+        afterwards is what gets the real routing.
+
+        **None when the destination has no estimate**, which declares navigation
+        open-loop for this turn. There is no default travel time, so slack is not
+        computable, so there is no error - and the two ways of covering that up are
+        both worse:
+
+          returning 0.0    claims the journey was measured and found comfortable.
+                           It would read in the log as "nothing was diverging" when
+                           the truth is "nobody knows", and those need different
+                           fixes.
+          assuming 25 min  invents the divergence. A place two hours away would
+                           look fine until twenty-five minutes before, and NOVA
+                           would then act with total confidence on a number with
+                           nothing behind it.
+
+        Saying nothing is the honest option, and its cost is visible: NOVA will not
+        volunteer a departure time for a destination it has never measured. The fix
+        is a real travel estimate available off the request path, not a constant.
+        """
+        commitment = getattr(observation, "next_commitment", None)
+        if commitment is None or not getattr(commitment, "location", None):
+            return 0.0
+
+        travel = _estimated_travel_minutes(commitment.location)
+        if travel is None:
+            return None
+
+        slack = commitment.minutes_until_start - travel
+
+        if slack <= 0:
+            return 1.0
+        if slack >= SLACK_HORIZON_MINUTES:
+            return 0.0
+        return round(1.0 - slack / SLACK_HORIZON_MINUTES, 4)
 
     def _execute(self, tool_input: dict[str, Any]) -> Any:
         destination = tool_input.get("destination", "")
@@ -176,12 +253,46 @@ def _query_google_maps(origin: str, destination: str,
     return _estimate_without_api(destination, arrival_time)
 
 
+def _estimated_travel_minutes(destination: str) -> int | None:
+    """How long getting to `destination` probably takes, without asking anyone.
+
+    Substring match against the estimate table, longest key first so "canberra
+    centre" is not beaten to it by "city". Coarse by construction: this is the
+    number error() ranks urgency with, and the real routing happens later in the
+    Action the model resolves.
+
+    **None when the destination matches nothing.** There is deliberately no
+    default - see the comment on _FALLBACK_ESTIMATES. Callers have to decide what
+    to do with not knowing, and both of them say so rather than covering it up.
+    """
+    where = destination.lower()
+    for key in sorted(_FALLBACK_ESTIMATES, key=len, reverse=True):
+        if key in where:
+            return _FALLBACK_ESTIMATES[key]
+    return None
+
+
 def _estimate_without_api(destination: str, arrival_time: str | None) -> dict:
-    """Rough fallback when the Maps API isn't available or the call failed."""
-    dest_lower = destination.lower()
-    travel_mins = next(
-        (v for k, v in _FALLBACK_ESTIMATES.items() if k in dest_lower), 25
-    )
+    """Rough fallback when the Maps API isn't available or the call failed.
+
+    Only answers for destinations there is actually an estimate for. For anything
+    else it says it does not know, because the alternative is a spoken sentence
+    that sounds exactly as confident as a real answer and is not one.
+    """
+    travel_mins = _estimated_travel_minutes(destination)
+
+    if travel_mins is None:
+        return {
+            "success": False,
+            "destination": destination,
+            "spoken": (
+                f"I don't know how long it takes to get to {destination} - I can't "
+                f"reach maps at the moment."
+            ),
+            "needs_clarification": True,
+            "reason": "no travel estimate available offline",
+            "api_used": False,
+        }
 
     spoken = f"It usually takes about {travel_mins} minutes to get to {destination}"
     if arrival_time:

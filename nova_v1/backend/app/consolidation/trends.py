@@ -18,12 +18,11 @@ that carry behaviour are named:
   - event signals - a field of the triggering event itself, e.g. which app a
     notification came from. Available without any tool having fired.
 
-TWO ACTION SHAPES
-`action` is written in two different shapes and both are read here:
-  - {"tool": ..., "params": {...}}            - one call (scripts/seed_memory.py)
-  - {"actions": [{"tool":..., "input":...}]}  - many (main.py's _close_episode)
-The seeded fixture predates the live writer, and databases seeded with it are
-still the demo data, so normalising is cheaper than a migration.
+THE ACTION SHAPES
+`action` has been written in several shapes over the project's life and rows
+from all of them are still in the log. None of that lives here: Action.from_episode
+is the one place that knows about it (tools/action.py), and this module asks it
+for Actions.
 """
 from __future__ import annotations
 
@@ -32,6 +31,11 @@ from datetime import datetime, timedelta
 from typing import Any, Iterator
 
 from .models import MIN_SUPPORT, Candidate
+
+try:
+    from ..tools.action import Action        # app.consolidation.trends
+except ImportError:  # pragma: no cover
+    from tools.action import Action          # consolidation.trends (cwd = backend/app)
 
 # Tool parameters worth counting, as {tool_name: [field, ...]}. A field named
 # here becomes the signal "<tool>:<field>".
@@ -94,32 +98,19 @@ def _signals_of(row: dict[str, Any]) -> Iterator[tuple[str, str]]:
 
 
 def _calls_of(row: dict[str, Any]) -> list[dict[str, Any]]:
-    """Normalise both `action` shapes into [{tool, params}, ...].
+    """This row's Actions as [{tool, params}, ...], for counting.
 
-    Suppressed Actions are dropped: the model wanting to do something that gain
-    refused is not the user doing it, and counting it would let a tool talk
-    itself into a habit the user never had.
+    Every shape the `action` column has ever been written in is handled by
+    Action.from_episode, not here. What is decided here is which of them count:
+    Actions the Controller refused are dropped, because NOVA wanting to do
+    something it was not authorised to do is not the user doing it, and counting
+    it would let a Tool talk itself into a habit its owner never had.
     """
-    action = row.get("action")
-    if not isinstance(action, dict):
-        return []
-
-    # "calls" was this list's name before Actions became one concept; episodes
-    # written under it are still in the log, so both keys are read.
-    entries = action.get("actions")
-    if not isinstance(entries, list):
-        entries = action.get("calls")
-    if isinstance(entries, list):                      # main.py
-        return [
-            {"tool": c.get("tool"), "params": c.get("input") or {}}
-            for c in entries
-            if isinstance(c, dict) and c.get("ran", True)
-        ]
-
-    if action.get("tool"):                             # seed_memory.py
-        return [{"tool": action["tool"], "params": action.get("params") or {}}]
-
-    return []
+    return [
+        {"tool": a.tool, "params": a.input}
+        for a in Action.from_episode(row.get("action"))
+        if a.ran
+    ]
 
 
 def _norm(value: str) -> str:
