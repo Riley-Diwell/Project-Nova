@@ -13,7 +13,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .calendar_tool import AddCalendarEventTool, CalendarTool
+from .calendar_tool import (
+    AddCalendarEventTool,
+    CalendarTool,
+    DeleteCalendarEventTool,
+    EditCalendarEventTool,
+)
 from .memory_tool import MemoryTool
 from .navigation import NavigationTool
 from .notification_management import NotificationManagementTool
@@ -28,8 +33,11 @@ except ImportError:  # pragma: no cover
 # before it can speak - so the Intent Surface pauses the conversation, hands the
 # call to the device, and resumes with what comes back (loop.py's NeedMoreResult).
 #
-# add_calendar_event also runs on the phone but is NOT here: nothing has to come
-# back, so there is nothing to wait for. Its Action is the instruction.
+# add_calendar_event, edit_calendar_event and delete_calendar_event also run on
+# the phone but are NOT here: nothing has to come back, so there is nothing to
+# wait for. Their Action is the instruction (delete's is gated behind an
+# on-device confirm dialog before it takes effect, but that gate is Android's,
+# not a hop back to here).
 CLIENT_TOOLS: frozenset[str] = frozenset({"get_calendar_range"})
 
 
@@ -48,10 +56,13 @@ def build_registry(gain_store: Optional[GainStore] = None) -> ToolRegistry:
     registry.register(NavigationTool())
     registry.register(NotificationManagementTool())
     registry.register(MemoryTool())
-    # Both of these execute on the phone. They are registered anyway, because
+    # All four execute on the phone. They are registered anyway, because
     # registration is what gives a tool a controller gain and therefore a dial:
-    # how readily NOVA looks ahead in your calendar, or schedules a plan you
-    # merely mentioned, is worth tuning even though the write happens off-box.
+    # how readily NOVA looks ahead in your calendar, schedules a plan you
+    # merely mentioned, applies a restated change, or offers to remove
+    # something, is worth tuning even though the write happens off-box.
     registry.register(CalendarTool())
     registry.register(AddCalendarEventTool())
+    registry.register(EditCalendarEventTool())
+    registry.register(DeleteCalendarEventTool())
     return registry

@@ -55,7 +55,7 @@ falls back to the substring scan over that same log. Notes saved before
 Persona existed are only in the log, and the fallback is what finds them.
 """
 
-from typing import Any
+from typing import Any, Optional
 
 from .base import BaseTool
 
@@ -92,6 +92,21 @@ MIN_QUERY_WORD = 3
 # both tiers, and let the model choose. See loop.py's PERSONA_MIN_SIMILARITY
 # for the numbers.
 RECALL_MIN_SIMILARITY = 0.35
+
+# How close a new note's embedding has to be to an existing belief in the SAME
+# category before it is treated as an update to that belief rather than a new
+# one - the fix for "likes bagels" and "dislikes bagels" otherwise landing as
+# two facts that both surface on every recall forever (see persona/__init__.py
+# module docstring's "correction loop" example). This is a different regime
+# from RECALL_MIN_SIMILARITY above: that floor separates a relevant *question*
+# from an irrelevant one, where the two bands measurably overlap (see
+# loop.py's PERSONA_MIN_SIMILARITY). Here both sides are short third-person
+# statements about the same narrow topic - "likes bagels" vs "dislikes
+# bagels" - which share nearly all their wording regardless of polarity, so
+# the same-subject case should score well above that noise floor. Unmeasured
+# against the real embedder; tune once real saves give a distribution, the
+# same way PERSONA_MIN_SIMILARITY's was.
+CONTRADICTION_MIN_SIMILARITY = 0.8
 
 
 class MemoryTool(BaseTool):
@@ -259,6 +274,12 @@ def _promote_to_persona(
     ontology only when the note says something durable about the user (the tool
     schema spells out the distinction). No category means situational.
 
+    Before writing, checks whether this note updates a belief already sitting
+    in the same category (e.g. "likes bagels" -> "dislikes bagels") and, if so,
+    re-upserts with that fact's id rather than inserting a new one - otherwise
+    both wind up in Persona permanently, competing on every future recall. See
+    _find_contradicted().
+
     Returns whether it landed. Best-effort by design: Persona needs Supabase
     *and* the embedding model, and the note is already safely in the log by the
     time we get here, so a failure downgrades recall from semantic to substring
@@ -269,8 +290,11 @@ def _promote_to_persona(
         print(f"[memory tool] note {note_id} kept episodic (no category - situational)")
         return False
 
+    existing_id = _find_contradicted(text, category)
+
     try:
         fact_id = persona.upsert(persona.Fact(
+            id=existing_id,
             text=text,
             category=category,
             # source "stated" is the default the Intent Surface assumes, and it
@@ -281,8 +305,40 @@ def _promote_to_persona(
         print(f"[memory tool] persona upsert skipped: {e}")
         return False
 
-    print(f"[memory tool] indexed note {note_id} as persona fact {fact_id}")
+    if existing_id:
+        print(f"[memory tool] note {note_id} updated persona fact {fact_id} (was {existing_id!r})")
+    else:
+        print(f"[memory tool] indexed note {note_id} as persona fact {fact_id}")
     return True
+
+
+def _find_contradicted(text: str, category: list[str]) -> Optional[str]:
+    """The id of an existing belief this note supersedes, or None if this is a
+    new one.
+
+    Scoped to the same category path (a prefix match - see
+    db/schema.sql's match_persona) so "likes bagels" is only ever compared
+    against other food opinions, never against an unrelated belief that
+    happens to embed similarly. Above CONTRADICTION_MIN_SIMILARITY within that
+    scope is treated as the same belief restated, whether or not the polarity
+    changed - upsert() overwrites its text either way.
+
+    Best-effort like everything else in this file: a search failure here must
+    not block the save, so it is treated the same as no match and the note
+    lands as a new fact rather than being lost.
+    """
+    try:
+        matches = persona.search(persona.PersonaQuery(
+            text=text,
+            category=category,
+            limit=1,
+            min_similarity=CONTRADICTION_MIN_SIMILARITY,
+        ))
+    except Exception as e:
+        print(f"[memory tool] contradiction search skipped: {e}")
+        return None
+
+    return matches[0].fact.id if matches else None
 
 
 def _recall(query: str) -> dict[str, Any]:

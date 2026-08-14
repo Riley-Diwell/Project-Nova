@@ -13,6 +13,10 @@ import okhttp3.Response
 import org.json.JSONObject
 import java.io.IOException
 import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeParseException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -25,7 +29,7 @@ import java.util.concurrent.TimeUnit
  * "http://10.0.2.2:8000" instead if running against the Android emulator.
  */
 object NovaApiClient {
-    private const val BASE_URL = "http://192.168.99.158:8000"
+    private const val BASE_URL = "http://127.0.0.1:8000"
     private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 
     private val client = OkHttpClient.Builder()
@@ -49,6 +53,12 @@ object NovaApiClient {
         data class Final(
             val speech: String,
             val actions: List<CalendarAction>,
+            /** edit_calendar_event Actions this turn - applied immediately via
+             * [com.example.nova.state.CalendarWriter.updateEvent], no confirmation needed. */
+            val editActions: List<EditCalendarAction>,
+            /** delete_calendar_event Actions this turn - always confirm with the user before
+             * calling [com.example.nova.state.CalendarWriter.deleteEvent] with these. */
+            val deleteActions: List<DeleteCalendarAction>,
             /** Names the Episode this turn wrote, for [postOutcome]. Absent if Memory was unreachable. */
             val episodeId: String?,
             val confirmation: String?,
@@ -72,6 +82,32 @@ object NovaApiClient {
         val startIso: String,
         val endIso: String,
         val description: String?,
+        /** RFC 5545 RRULE built from the backend's structured recurrence input, e.g.
+         * "FREQ=WEEKLY;INTERVAL=2;COUNT=5" - null for a one-off event. */
+        val rrule: String?,
+    )
+
+    /**
+     * A delete_calendar_event Action. [title] is only for showing the user what they're being
+     * asked to confirm - the actual delete keys off [eventId] alone.
+     */
+    data class DeleteCalendarAction(
+        val eventId: Long,
+        val title: String,
+    )
+
+    /**
+     * An edit_calendar_event Action. Every field but [eventId] is null unless the model actually
+     * changed it - [com.example.nova.state.CalendarWriter.updateEvent] reads the event's current
+     * values for anything left null rather than this client guessing at "unchanged".
+     */
+    data class EditCalendarAction(
+        val eventId: Long,
+        val title: String?,
+        val startIso: String?,
+        val endIso: String?,
+        val description: String?,
+        val rrule: String?,
     )
 
     /** Posts a voice transcript + [UserState] snapshot to /event and returns the spoken reply. */
@@ -362,6 +398,8 @@ object NovaApiClient {
             else -> EventResult.Final(
                 speech = json.optString("speech", "..."),
                 actions = json.optJSONArray("actions")?.toCalendarActions().orEmpty(),
+                editActions = json.optJSONArray("actions")?.toEditCalendarActions().orEmpty(),
+                deleteActions = json.optJSONArray("actions")?.toDeleteCalendarActions().orEmpty(),
                 episodeId = json.optString("episode_id").takeIf { it.isNotBlank() },
                 confirmation = json.optString("confirmation").takeIf {
                     json.has("confirmation") && !json.isNull("confirmation")
@@ -386,14 +424,94 @@ object NovaApiClient {
             val start = input.optString("start_time")
             val end = input.optString("end_time")
             if (title.isBlank() || start.isBlank() || end.isBlank()) return@mapNotNull null
+            val recurrence = input.optJSONObject("recurrence")
+                .takeIf { input.has("recurrence") && !input.isNull("recurrence") }
             CalendarAction(
                 title = title,
                 startIso = start,
                 endIso = end,
                 description = input.optString("description")
                     .takeIf { input.has("description") && !input.isNull("description") },
+                rrule = recurrence?.let { buildRrule(it) },
             )
         }
+
+    /**
+     * edit_calendar_event Actions, picked out the same way as add's - only ran=true ones, since
+     * ran=false was refused by that tool's gain and must not be carried out. Every field but
+     * event_id is optional on the wire (only changed fields are present), so each one is only
+     * populated when the backend actually sent it.
+     */
+    private fun JSONArray.toEditCalendarActions(): List<EditCalendarAction> =
+        (0 until length()).mapNotNull { i ->
+            val obj = optJSONObject(i) ?: return@mapNotNull null
+            if (obj.optString("tool") != "edit_calendar_event") return@mapNotNull null
+            if (!obj.optBoolean("ran", false)) return@mapNotNull null
+            val input = obj.optJSONObject("input") ?: return@mapNotNull null
+            if (!input.has("event_id") || input.isNull("event_id")) return@mapNotNull null
+            val recurrence = input.optJSONObject("recurrence")
+                .takeIf { input.has("recurrence") && !input.isNull("recurrence") }
+            EditCalendarAction(
+                eventId = input.optLong("event_id"),
+                title = input.optString("title")
+                    .takeIf { input.has("title") && !input.isNull("title") },
+                startIso = input.optString("start_time")
+                    .takeIf { input.has("start_time") && !input.isNull("start_time") },
+                endIso = input.optString("end_time")
+                    .takeIf { input.has("end_time") && !input.isNull("end_time") },
+                description = input.optString("description")
+                    .takeIf { input.has("description") && !input.isNull("description") },
+                rrule = recurrence?.let { buildRrule(it) },
+            )
+        }
+
+    /**
+     * delete_calendar_event Actions, picked out the same way as add's - only ran=true ones, since
+     * ran=false was refused by that tool's gain and must not be carried out.
+     */
+    private fun JSONArray.toDeleteCalendarActions(): List<DeleteCalendarAction> =
+        (0 until length()).mapNotNull { i ->
+            val obj = optJSONObject(i) ?: return@mapNotNull null
+            if (obj.optString("tool") != "delete_calendar_event") return@mapNotNull null
+            if (!obj.optBoolean("ran", false)) return@mapNotNull null
+            val input = obj.optJSONObject("input") ?: return@mapNotNull null
+            if (!input.has("event_id") || input.isNull("event_id")) return@mapNotNull null
+            val title = input.optString("title")
+            if (title.isBlank()) return@mapNotNull null
+            DeleteCalendarAction(eventId = input.optLong("event_id"), title = title)
+        }
+
+    /**
+     * Builds an RFC 5545 RRULE from add_calendar_event's structured recurrence input
+     * (frequency/interval/count/until - see calendar_tool.py). [until] is the user's local wall
+     * clock like every other calendar time on this wire, so it's converted to the UTC form RRULE
+     * requires when DTSTART carries a time zone (which CalendarWriter always sets).
+     */
+    private fun buildRrule(recurrence: JSONObject): String? {
+        val frequency = recurrence.optString("frequency").uppercase().takeIf { it.isNotBlank() }
+            ?: return null
+        val parts = mutableListOf("FREQ=$frequency")
+
+        val interval = recurrence.optInt("interval", 1)
+        if (interval > 1) parts += "INTERVAL=$interval"
+
+        if (recurrence.has("count") && !recurrence.isNull("count")) {
+            parts += "COUNT=${recurrence.optInt("count")}"
+        } else if (recurrence.has("until") && !recurrence.isNull("until")) {
+            val until = recurrence.optString("until")
+            try {
+                val utc = LocalDateTime.parse(until)
+                    .atZone(ZoneId.systemDefault())
+                    .withZoneSameInstant(ZoneId.of("UTC"))
+                parts += "UNTIL=${utc.format(DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'"))}"
+            } catch (e: DateTimeParseException) {
+                // Skip the bound rather than the whole recurrence - LLM-produced input, not a
+                // validated wire contract (same stance as writeCalendarActions in VoiceScreen.kt).
+            }
+        }
+
+        return parts.joinToString(";")
+    }
 
     /** Wire shape per DESIGN.md Section 5.2 - snake_case keys to match the backend Pydantic schema. */
     private fun UserState.toJson(): JSONObject = JSONObject().apply {
@@ -440,5 +558,6 @@ object NovaApiClient {
         put("is_all_day", isAllDay)
         put("self_status", selfStatus)
         put("minutes_until_start", minutesUntilStart)
+        put("event_id", eventId)
     }
 }

@@ -39,6 +39,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -49,11 +50,11 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -77,10 +78,13 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.nova.model.ChatMessage
 import com.example.nova.network.NovaApiClient
 import com.example.nova.state.CalendarSignal
 import com.example.nova.state.CalendarWriter
 import com.example.nova.state.UserStateCollector
+import com.example.nova.viewmodel.ChatViewModel
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.time.Instant
@@ -88,17 +92,10 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeParseException
 import java.util.Locale
-import java.util.UUID
 
 private enum class VoiceState { IDLE, LISTENING, THINKING, SPEAKING }
 
 private val NovaMicPurple = Color(0xFF7C4DFF)
-
-private data class ChatMessage(
-    val id: String = UUID.randomUUID().toString(),
-    val text: String,
-    val fromUser: Boolean,
-)
 
 /**
  * The backend's get_calendar_range tool is asked to return UTC ISO 8601 (with a 'Z'), but
@@ -133,6 +130,7 @@ private fun writeCalendarActions(
                 startMillis = start,
                 endMillis = end,
                 description = action.description,
+                rrule = action.rrule,
             )
             if (uri != null) created++
         } catch (e: DateTimeParseException) {
@@ -141,6 +139,36 @@ private fun writeCalendarActions(
         }
     }
     return created
+}
+
+/**
+ * Executes the backend's queued edit_calendar_event actions via CalendarWriter.updateEvent, the
+ * same fire-and-forget way writeCalendarActions applies an add - no confirmation, since an edit
+ * is easily undone. startIso/endIso are only present when the model actually changed them, so a
+ * parse failure there is treated the same as "not provided" rather than dropping the whole edit -
+ * unlike a bad add, a partially-applied edit (e.g. new title, unchanged time) is still useful.
+ */
+private fun writeEditActions(
+    context: android.content.Context,
+    actions: List<NovaApiClient.EditCalendarAction>,
+) {
+    for (action in actions) {
+        val start = action.startIso?.let {
+            try { parseIsoToEpochMillis(it) } catch (e: DateTimeParseException) { null }
+        }
+        val end = action.endIso?.let {
+            try { parseIsoToEpochMillis(it) } catch (e: DateTimeParseException) { null }
+        }
+        CalendarWriter.updateEvent(
+            context = context,
+            eventId = action.eventId,
+            title = action.title,
+            startMillis = start,
+            endMillis = end,
+            description = action.description,
+            rrule = action.rrule,
+        )
+    }
 }
 
 @Composable
@@ -201,14 +229,26 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
     var voiceState by remember { mutableStateOf(VoiceState.IDLE) }
     var inputText by remember { mutableStateOf("") }
     var statusText by remember { mutableStateOf("") }
-    val messages = remember { mutableStateListOf<ChatMessage>() }
+    val chatViewModel: ChatViewModel = viewModel()
+    val messages = chatViewModel.messages
     // Holds a finished turn's calendar.create_event actions while we wait on the
     // WRITE_CALENDAR permission prompt, so they can still be applied once granted.
     var pendingCalendarActions by remember { mutableStateOf<List<NovaApiClient.CalendarAction>>(emptyList()) }
+    // Same, for edit_calendar_event actions - kept as a separate list from the adds above so
+    // each can be routed to the right CalendarWriter call once permission is granted.
+    var pendingEditActions by remember { mutableStateOf<List<NovaApiClient.EditCalendarAction>>(emptyList()) }
     // Mirrors the last reply's EventResult.Final.confirmation - "yes_no" shows the quick-reply
     // buttons below; cleared as soon as any new turn is sent (button tap, typed, or spoken),
     // same as the backend's own _PENDING_CONFIRMATION is popped on the next voice turn.
     var pendingConfirmation by remember { mutableStateOf<String?>(null) }
+    // delete_calendar_event Actions waiting on the user's explicit Yes/No - see the AlertDialog
+    // below. This is the hard gate: unlike pendingCalendarActions (which only waits on a
+    // permission prompt and then writes unconditionally), nothing here is ever deleted without
+    // this confirmation, regardless of gain or what the model said in speech.
+    var pendingDeleteConfirmations by remember { mutableStateOf<List<NovaApiClient.DeleteCalendarAction>>(emptyList()) }
+    // Set only while waiting on WRITE_CALENDAR after the user has ALREADY said yes to a specific
+    // deletion - holds just that one id so the launcher's callback has something to act on.
+    var deleteAwaitingPermission by remember { mutableStateOf<Long?>(null) }
 
     LaunchedEffect(messages.size, voiceState) {
         if (messages.isNotEmpty()) {
@@ -219,10 +259,22 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
     val calendarPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted && pendingCalendarActions.isNotEmpty()) {
-            writeCalendarActions(context, pendingCalendarActions)
+        if (granted) {
+            if (pendingCalendarActions.isNotEmpty()) writeCalendarActions(context, pendingCalendarActions)
+            if (pendingEditActions.isNotEmpty()) writeEditActions(context, pendingEditActions)
         }
         pendingCalendarActions = emptyList()
+        pendingEditActions = emptyList()
+    }
+
+    val deletePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val eventId = deleteAwaitingPermission
+        deleteAwaitingPermission = null
+        if (granted && eventId != null) {
+            coroutineScope.launch { CalendarWriter.deleteEvent(context, eventId) }
+        }
     }
 
     // The Episode of the reply currently being spoken, held until its Outcome is
@@ -347,7 +399,7 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
     /** Sends one turn to the backend, whether it came from typing or from a voice transcript. */
     fun sendMessage(text: String) {
         if (text.isBlank()) return
-        messages.add(ChatMessage(text = text, fromUser = true))
+        chatViewModel.addMessage(text, fromUser = true)
         pendingConfirmation = null
         voiceState = VoiceState.THINKING
         statusText = "Sending to Nova…"
@@ -376,17 +428,28 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
                 }
                 val finalResult = result as? NovaApiClient.EventResult.Final
                 val calendarActions = finalResult?.actions.orEmpty()
-                if (calendarActions.isNotEmpty()) {
+                val editActions = finalResult?.editActions.orEmpty()
+                if (calendarActions.isNotEmpty() || editActions.isNotEmpty()) {
                     if (CalendarWriter.hasPermission(context)) {
-                        writeCalendarActions(context, calendarActions)
+                        if (calendarActions.isNotEmpty()) writeCalendarActions(context, calendarActions)
+                        if (editActions.isNotEmpty()) writeEditActions(context, editActions)
                     } else {
+                        // One permission request covers both - the launcher's callback flushes
+                        // whichever of these two lists actually has something queued.
                         pendingCalendarActions = calendarActions
+                        pendingEditActions = editActions
                         calendarPermissionLauncher.launch(Manifest.permission.WRITE_CALENDAR)
                     }
                 }
+                val deleteActions = finalResult?.deleteActions.orEmpty()
+                if (deleteActions.isNotEmpty()) {
+                    // Appended, not replaced - a dialog already awaiting an earlier turn's answer
+                    // must not be dropped by a new one arriving.
+                    pendingDeleteConfirmations = pendingDeleteConfirmations + deleteActions
+                }
                 val reply = finalResult?.speech ?: "Sorry, I couldn't finish that."
                 statusText = ""
-                messages.add(ChatMessage(text = reply, fromUser = false))
+                chatViewModel.addMessage(reply, fromUser = false)
                 pendingConfirmation = finalResult?.confirmation
                 speak(reply, finalResult?.episodeId)
             } catch (e: java.net.SocketTimeoutException) {
@@ -483,6 +546,33 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
         }
     }
 
+    // The hard gate for delete_calendar_event: shown for every queued deletion, one at a time,
+    // regardless of gain or how the model phrased its speech. Nothing in CalendarWriter runs
+    // until the user taps Delete here.
+    pendingDeleteConfirmations.firstOrNull()?.let { action ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteConfirmations = pendingDeleteConfirmations.drop(1) },
+            title = { Text("Delete this event?") },
+            text = { Text("\"${action.title}\" will be removed from your calendar.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDeleteConfirmations = pendingDeleteConfirmations.drop(1)
+                    if (CalendarWriter.hasPermission(context)) {
+                        coroutineScope.launch { CalendarWriter.deleteEvent(context, action.eventId) }
+                    } else {
+                        deleteAwaitingPermission = action.eventId
+                        deletePermissionLauncher.launch(Manifest.permission.WRITE_CALENDAR)
+                    }
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteConfirmations = pendingDeleteConfirmations.drop(1) }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -502,6 +592,14 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
                 )
             }
         } else {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = { chatViewModel.clearMessages() }) {
+                    Text("Clear chat")
+                }
+            }
             LazyColumn(
                 state = listState,
                 modifier = Modifier
