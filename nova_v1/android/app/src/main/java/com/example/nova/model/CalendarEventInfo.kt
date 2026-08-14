@@ -8,7 +8,10 @@ import java.time.format.DateTimeFormatter
  * A single calendar event instance with enough detail for the Intent Surface to reason about
  * priority and context. [availability] mirrors CalendarContract values: "busy" / "free" /
  * "tentative". [selfStatus] is the user's own RSVP: "accepted" / "declined" / "tentative" / "none".
- * [minutesUntilStart] is negative while the event is in progress.
+ * [minutesUntilStart] is negative while the event is in progress. [eventId] is the underlying
+ * CalendarContract.Events._ID (queried via Instances.EVENT_ID, since instances of a recurring
+ * event share one event row) - it's what delete_calendar_event targets, so the backend can hand
+ * it back verbatim without this client having to re-resolve "that meeting" to a row itself.
  */
 data class CalendarEventInfo(
     val title: String,
@@ -19,6 +22,7 @@ data class CalendarEventInfo(
     val isAllDay: Boolean,
     val selfStatus: String,
     val minutesUntilStart: Int,
+    val eventId: Long,
 ) {
     /**
      * [startMillis]/[endMillis] rendered in this device's timezone, ISO 8601 with offset

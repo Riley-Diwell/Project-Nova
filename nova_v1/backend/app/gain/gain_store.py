@@ -1,117 +1,123 @@
 """Save and load Function tools' gain values.
 
-WHERE THE FILE LIVES, AND WHY IT MATTERS
-Two files, with different jobs:
+WHERE GAIN LIVES, AND WHY IT MATTERS
+Two sources, with different jobs:
 
   the seed   `data/gain_store.seed.json`, committed, read-only. Where each dial
              starts on a fresh checkout - the team's decision about how proactive
              each Function should be before anyone has used it.
-  the live   wherever NOVA_GAIN_STORE points, `data/gain_store.json` by default,
-             gitignored. What reinforcement and the user's overrides have made of
-             those dials since.
+  the live   the `public.tool_gain` Supabase table (db/schema.sql). What
+             reinforcement and the user's overrides have made of those dials
+             since.
 
-Splitting them fixes a real nuisance: the live file used to be tracked, so every
-turn that moved a gain dirtied the working tree, `git status` was never clean
-after a demo, and two people demoing produced a merge conflict in a file neither
-had edited. It also makes the Controller testable - a test points the path at a
-tmpdir and tunes gains without touching anyone's own.
+Reads merge the two, live over seed. Writes only ever touch the live table.
 
-Reads merge the two, live over seed. Writes only ever touch the live file.
-
-Eventually this moves to Supabase alongside everything else; the seam is
-GainStore, so that is a change here and nowhere else.
+This used to be a gitignored local JSON file, which worked for one dev
+machine but not a deployed backend: Cloud Run containers are ephemeral and
+can run more than one instance, so a local file silently reset on every
+redeploy and could fork between instances. The seam was always meant to
+move here - see db/schema.sql's tool_gain table, added ahead of this change -
+so this is a change to this file and nowhere else.
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Optional
 
 from .controller_gain import ControllerGain
 
+try:
+    from ..db import get_client            # app.gain.gain_store
+except ImportError:                         # pragma: no cover
+    from db import get_client               # gain.gain_store (cwd = backend/app)
+
 # Committed. Every tool in tools/catalogue.py must appear here - there is a test
 # for that, because a missing entry silently comes up at DEFAULT_GAIN instead.
 DEFAULT_SEED_PATH = Path(__file__).parent / "data" / "gain_store.seed.json"
 
-# Where the live file goes when NOVA_GAIN_STORE says nothing. Gitignored.
-FALLBACK_LIVE_PATH = Path(__file__).parent / "data" / "gain_store.json"
-
-# The environment variable that makes the path configuration rather than a
-# constant - one deployment per user state, and one per test.
-PATH_ENV_VAR = "NOVA_GAIN_STORE"
-
-
-def resolve_path() -> Path:
-    """Where learned gain is being kept for this process."""
-    configured = os.environ.get(PATH_ENV_VAR, "").strip()
-    return Path(configured) if configured else FALLBACK_LIVE_PATH
+TABLE_NAME = "tool_gain"
 
 
 class GainStore:
-    def __init__(
-        self,
-        path: Optional[Path] = None,
-        seed_path: Path = DEFAULT_SEED_PATH,
-    ) -> None:
-        # Resolved at construction, not at import, so a test that sets the
-        # environment variable before building a store is honoured.
-        self.path = Path(path) if path is not None else resolve_path()
+    def __init__(self, seed_path: Path = DEFAULT_SEED_PATH) -> None:
         self.seed_path = Path(seed_path)
 
     def load(self, name: str) -> Optional[ControllerGain]:
-        """The saved gain for a tool, or None if neither file mentions it.
+        """The saved gain for a tool, or None if neither source mentions it.
 
         None is meaningful: it is how ToolRegistry.register knows to fall back to
         a fresh DEFAULT_GAIN rather than a stale zero.
         """
         entry = self._merged().get(name)
-        if entry is None:
-            return None
+        return self._to_gain(name, entry) if entry is not None else None
+
+    def save(self, gain: ControllerGain) -> None:
+        """Persist a tool's current gain to the live table."""
+        get_client().table(TABLE_NAME).upsert({
+            "tool_name": gain.name,
+            "value": gain.value,
+            "override": gain.override,
+        }).execute()
+
+    def load_all(self) -> dict[str, ControllerGain]:
+        """Every gain either source knows about - one dial each for the Gain tab.
+
+        Fetches the live table once rather than once per tool - this backs
+        GET /tools/gain, called every time the Gain tab opens.
+        """
+        merged = self._merged()
+        return {name: self._to_gain(name, entry) for name, entry in merged.items()}
+
+    # --- sources ---------------------------------------------------------------
+
+    def _to_gain(self, name: str, entry: dict) -> ControllerGain:
         return ControllerGain(
             name=name,
             value=entry.get("value", 0.0),
             override=entry.get("override"),
         )
 
-    def save(self, gain: ControllerGain) -> None:
-        """Persist a tool's current gain to the live file."""
-        data = self._read(self.path)
-        data[gain.name] = {"value": gain.value, "override": gain.override}
-        self._write(data)
-
-    def load_all(self) -> dict[str, ControllerGain]:
-        """Every gain either file knows about - one dial each for the Gain tab."""
-        return {name: self.load(name) for name in self._merged()}
-
-    # --- files ---------------------------------------------------------------
-
     def _merged(self) -> dict[str, dict]:
-        """The seed with the live file laid over it.
+        """The seed with the live table laid over it.
 
         A tool nobody has tuned reads from the seed; once reinforcement or an
         override has moved it, the live value is the gain.
         """
-        return {**self._read(self.seed_path), **self._read(self.path)}
+        return {**self._read_seed(), **self._read_live()}
 
-    def _read(self, path: Path) -> dict[str, dict]:
-        """One file's contents, or nothing.
+    def _read_seed(self) -> dict[str, dict]:
+        """The seed file's contents, or nothing.
 
-        A half-written or hand-edited file reads as empty rather than raising:
+        A missing or hand-edited-broken seed reads as empty rather than raising:
         the dials are a preference and losing them costs a demo's tuning, while
         failing here would stop the backend starting at all.
         """
-        if not path.exists():
+        if not self.seed_path.exists():
             return {}
         try:
-            with path.open("r") as f:
+            with self.seed_path.open("r") as f:
                 loaded = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
-            print(f"[gain] ignoring unreadable gain store {path}: {e}")
+            print(f"[gain] ignoring unreadable seed {self.seed_path}: {e}")
             return {}
         return loaded if isinstance(loaded, dict) else {}
 
-    def _write(self, data: dict[str, dict]) -> None:
-        """Write the live file, creating its directory if this is the first save."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("w") as f:
-            json.dump(data, f, indent=2)
+    def _read_live(self) -> dict[str, dict]:
+        """Every row of the live table, or nothing if Supabase is unreachable.
+
+        Same reasoning as _read_seed: a tool whose learned gain can't be
+        fetched falls back to its seed default rather than stopping the
+        backend from starting.
+        """
+        try:
+            rows = (
+                get_client()
+                .table(TABLE_NAME)
+                .select("tool_name,value,override")
+                .execute()
+                .data
+            )
+        except Exception as e:
+            print(f"[gain] ignoring unreachable {TABLE_NAME} table: {e}")
+            return {}
+        return {row["tool_name"]: {"value": row["value"], "override": row["override"]} for row in rows}

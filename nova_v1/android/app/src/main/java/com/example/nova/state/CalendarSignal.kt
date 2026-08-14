@@ -34,6 +34,9 @@ object CalendarSignal {
         CalendarContract.Instances.AVAILABILITY,
         CalendarContract.Instances.ALL_DAY,
         CalendarContract.Instances.SELF_ATTENDEE_STATUS,
+        // The underlying Events._ID (an Instances row is one occurrence; a recurring
+        // event's occurrences all share this). What delete_calendar_event targets.
+        CalendarContract.Instances.EVENT_ID,
     )
 
     fun hasPermission(context: Context): Boolean =
@@ -97,6 +100,7 @@ object CalendarSignal {
             val iAvailability = cursor.getColumnIndex(CalendarContract.Instances.AVAILABILITY)
             val iAllDay = cursor.getColumnIndex(CalendarContract.Instances.ALL_DAY)
             val iSelfStatus = cursor.getColumnIndex(CalendarContract.Instances.SELF_ATTENDEE_STATUS)
+            val iEventId = cursor.getColumnIndex(CalendarContract.Instances.EVENT_ID)
 
             while (cursor.moveToNext()) {
                 val start = cursor.getLong(iStart)
@@ -120,6 +124,7 @@ object CalendarSignal {
                     isAllDay = cursor.getInt(iAllDay) != 0,
                     selfStatus = selfStatus,
                     minutesUntilStart = ((start - now) / 60_000L).toInt(),
+                    eventId = cursor.getLong(iEventId),
                 )
             }
         }
