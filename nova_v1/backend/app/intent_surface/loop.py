@@ -867,12 +867,18 @@ def _run_loop(
             tools=tools,
             messages=messages,
         )
-        print(f"[loop] stop_reason={response.stop_reason!r}")
+        print(f"[loop] stop_reason={response.stop_reason!r} "
+              f"blocks={[b.type for b in response.content]!r}")
 
         # finished reasoning
         if response.stop_reason == "end_turn":
+            tool_idx = [
+                i for i, b in enumerate(response.content)
+                if b.type in ("server_tool_use", "web_search_tool_result", "tool_use", "tool_result")
+            ]
+            start = (max(tool_idx) + 1) if tool_idx else 0
             speech = "".join(
-                b.text for b in response.content if b.type == "text"
+                b.text for b in response.content[start:] if b.type == "text"
             )
             if not speech:
                 print(f"[loop] empty speech - raw content: {response.content!r}")
