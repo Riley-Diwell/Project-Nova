@@ -22,19 +22,26 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Talks to the backend's POST /event seam (DESIGN.md Sections 5.1/5.3/6:
- * {event, user_state} -> {speech, actions[]}). [BASE_URL] targets the dev machine's LAN IP
- * for testing on a physical device on the same WiFi network - run `uvicorn main:app --reload
- * --host 0.0.0.0` on the backend (not just the bare default, which only binds to loopback),
- * and update this IP if it changes (e.g. reconnecting to a different network). Use
- * "http://10.0.2.2:8000" instead if running against the Android emulator.
+ * {event, user_state} -> {speech, actions[]}). [BASE_URL] points at the deployed Cloud Run
+ * service (see backend/DEPLOY.md) - swap back to "http://127.0.0.1:8000" (or
+ * "http://10.0.2.2:8000" for the emulator) for local dev against `uvicorn --reload --host
+ * 0.0.0.0` on the same WiFi network. [API_KEY] must match the backend's NOVA_API_KEY
+ * (main.py's _require_api_key) - required once the service is reachable over the public
+ * internet; leave blank for local dev, where the backend has no key configured.
  */
 object NovaApiClient {
-    private const val BASE_URL = "http://127.0.0.1:8000"
+    private const val BASE_URL = "https://nova-backend-1021689546881.australia-southeast1.run.app"
+    private const val API_KEY = "4ad66894a3504d58b7b8be7f38b0ff63"
     private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .addInterceptor { chain ->
+            val request = if (API_KEY.isEmpty()) chain.request()
+                else chain.request().newBuilder().addHeader("X-Nova-Api-Key", API_KEY).build()
+            chain.proceed(request)
+        }
         .build()
 
     /**

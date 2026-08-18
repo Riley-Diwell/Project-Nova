@@ -22,11 +22,13 @@ WHO USES THIS
 """
 
 # import necessary libraries
+import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # import nova libraries
@@ -56,6 +58,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 # initialise app
 app = FastAPI(title="NOVA V1", lifespan=_lifespan)
+
+_API_KEY = os.environ.get("NOVA_API_KEY", "").strip()
+if not _API_KEY:
+    print("[auth] NOVA_API_KEY not set - /event and friends are UNAUTHENTICATED. "
+          "Fine for local dev; do not deploy publicly like this.")
+
+
+@app.middleware("http")
+async def _require_api_key(request: Request, call_next):
+    if _API_KEY and request.headers.get("x-nova-api-key") != _API_KEY:
+        return JSONResponse(status_code=401, content={"detail": "missing or invalid X-Nova-Api-Key"})
+    return await call_next(request)
 
 # combine event and user_state into one wrapper - matches what Android posts
 class InputWrapper(BaseModel):
