@@ -1,5 +1,6 @@
 package com.example.nova.network
 
+import com.example.nova.BuildConfig
 import com.example.nova.model.CalendarEventInfo
 import com.example.nova.model.UserState
 import org.json.JSONArray
@@ -31,7 +32,7 @@ import java.util.concurrent.TimeUnit
  */
 object NovaApiClient {
     private const val BASE_URL = "https://nova-backend-1021689546881.australia-southeast1.run.app"
-    private const val API_KEY = "4ad66894a3504d58b7b8be7f38b0ff63"
+    private val API_KEY = BuildConfig.NOVA_API_KEY
     private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 
     private val client = OkHttpClient.Builder()
