@@ -1,0 +1,6 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "Seeed_Xiao_SAM21D") (type "KiCad") (uri "/Users/georgiagill/Downloads/202003075_XIAO_SAMD21_v2.1_SCH&PCB_20260304") (options "") (descr ""))
+	(lib (name "seeed") (type "KiCad") (uri "/Users/georgiagill/OPL_Kicad_Library/Seeed Studio XIAO Series Library/Seeed_Studio_XIAO_Series.kicad_sym") (options "") (descr ""))
+	(lib (name "mic") (type "KiCad") (uri "/Users/georgiagill/KiCad-Custom-Parts/Microphone") (options "") (descr ""))
+)
