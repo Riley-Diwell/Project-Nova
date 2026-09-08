@@ -1,7 +1,7 @@
 # **NOVA V1 \- Build Plan (Prototype Design Document)**
 
 > **Status:** Draft for team review · **Scope:** V1 *build* plan (not evaluation) ·  
-> **Companion:** term definitions live in Appendix 1
+> **Companion:** term definitions live in Appendix 1 
 
 ---
 
