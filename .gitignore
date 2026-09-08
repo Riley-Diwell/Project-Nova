@@ -1,12 +1,13 @@
 .env
 .DS_Store
 .vscode/
+/.idea/
 __pycache__/
 *.pyc
 .venv/
 venv/
 
-silent_speech/.venv
-silent_speech/run_demo.sh
-silent_speech/snapshots/
+creative_selection/silent_speech/.venv
+creative_selection/silent_speech/run_demo.sh
+creative_selection/silent_speech/snapshots/
 **/__pycache__/
