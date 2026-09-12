@@ -43,10 +43,10 @@ void debounceButton() {
   prevButtonStatus   = buttonStatus;
 
   // debug
-  Serial.print("Button Status = ");
-  Serial.println(buttonStatus);
-  Serial.print("Debounced Button Status = ");
-  Serial.println(debouncedButtonStatus);
+  //Serial.print("Button Status = ");
+  //Serial.println(buttonStatus);
+  //Serial.print("Debounced Button Status = ");
+  //Serial.println(debouncedButtonStatus);
 }
 
 void checkButton() {
@@ -119,11 +119,17 @@ void loop() {
 
   // If data was read successfully and the buffer isn't empty
   if (result == ESP_OK && bytesIn > 0) {
-       //Serial.print("Result = ")
-       //Serial.println(result)
+  int samplesRead = bytesIn / sizeof(int16_t);
+  int16_t peak = 0;
+  for (int i = 0; i < samplesRead; i++) {
+    int16_t v = abs(sBuffer[i]);
+    if (v > peak) peak = v;
   }
+  Serial.print("peak = ");
+  Serial.println(peak);   // open Tools → Serial Plotter to see it live
 }
 
+}
 
 // ------------- references -------------
 // https://easyelecmodule.com/a-complete-guide-to-the-inmp441-i2s-microphone/ accessed 11/09/2026
