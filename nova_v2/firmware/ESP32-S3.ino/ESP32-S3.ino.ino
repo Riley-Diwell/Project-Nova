@@ -1,10 +1,6 @@
 // ------------- import packages -------------
-//#include <driver/i2s.h>
-//#include <Adafruit_I2S.h>
 #include <Arduino.h>
-//#include <WiFi.h>
 #include <driver/i2s.h>
-//#include <WiFiUdp.h>
 #include <Wire.h>
 #include <BluetoothSerial.h>
 #include <string>
@@ -35,6 +31,10 @@ int16_t sBuffer[bufferLen]; // Buffer array to hold 16-bit audio samples
 #define HAPTIC D0
 static unsigned int haptic_level = 0;
 
+// leds
+const int led1 = D3;
+const int led2 = D4;
+
 // ------------- define functions -------------
 // button
 void debounceButton() {
@@ -48,12 +48,6 @@ void debounceButton() {
   }
   prevDebouncedButtonStatus = debouncedButtonStatus;
   prevButtonStatus   = buttonStatus;
-
-  // debug
-  //Serial.print("Button Status = ");
-  //Serial.println(buttonStatus);
-  //Serial.print("Debounced Button Status = ");
-  //Serial.println(debouncedButtonStatus);
 }
 
 void checkButton() {
@@ -105,6 +99,9 @@ void setup() {
   pinMode(buttonPin, INPUT_PULLUP);
   pinMode(HAPTIC, OUTPUT);
 
+  pinMode(led1, OUTPUT);
+  pinMode(led2, OUTPUT);
+
   // initialize the digital pin with an off state
   digitalWrite(HAPTIC, LOW);
 
@@ -123,6 +120,16 @@ void loop() {
   // button stuff
   debounceButton();
   checkButton();
+
+  digitalWrite(led1, HIGH);   // Turn the LED on (HIGH is the voltage level)
+  delay(1000);                       // Wait for a second
+  digitalWrite(led1, LOW);    // Turn the LED off by making the voltage LOW
+  delay(1000);     
+
+  digitalWrite(led2, HIGH);   // Turn the LED on (HIGH is the voltage level)
+  delay(1000);                       // Wait for a second
+  digitalWrite(led2, LOW);    // Turn the LED off by making the voltage LOW
+  delay(1000);  
 
   // microphone stuff
   size_t bytesIn = 0;
