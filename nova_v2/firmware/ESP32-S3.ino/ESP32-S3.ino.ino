@@ -10,13 +10,15 @@
 
 // button
 const int buttonPin = D2;
+//int buttonStatus = 0;
 int prevButtonStatus = 0;
+int prevDebouncedButtonStatus = 0;
+int debouncedButtonStatus = 0;
+const int debounceDelay = 50; // milliseconds
+uint32_t lastDebounceTime = 0; // milliseconds
+
 
 // microphone
-//const int sck = D8;
-//const int sd = D9;
-//const int ws = D10;
-
 #define I2S_SCK D8
 #define I2S_WS D10
 #define I2S_SD D9
@@ -24,25 +26,40 @@ int prevButtonStatus = 0;
 
 // Audio buffer configuration
 #define bufferLen 1024  // Increase buffer size to accommodate more audio data
-
 int16_t sBuffer[bufferLen]; // Buffer array to hold 16-bit audio samples
 
 // ------------- define functions -------------
 // button
-void checkButton() {
+void debounceButton() {
   int buttonStatus = digitalRead(buttonPin);
-  buttonStatus = !buttonStatus; // invert because of internal pull-up resistor
+  if (buttonStatus != prevButtonStatus) { // raw input changed — restart timer
+    lastDebounceTime = millis();
+  }
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    debouncedButtonStatus = buttonStatus; // reading held steady long enough
+    debouncedButtonStatus = !debouncedButtonStatus; // invert for internal pull-up: pressed = 1
+  }
+  prevDebouncedButtonStatus = debouncedButtonStatus;
+  prevButtonStatus   = buttonStatus;
+
+  // debug
+  Serial.print("Button Status = ");
+  Serial.println(buttonStatus);
+  Serial.print("Debounced Button Status = ");
+  Serial.println(debouncedButtonStatus);
+}
+
+void checkButton() {
   static uint32_t pressedAt = 0;
 
-  if (buttonStatus == HIGH && prevButtonStatus == LOW) {
+  if (debouncedButtonStatus == HIGH && prevDebouncedButtonStatus == LOW) {
     // just pressed
     pressedAt = millis();
-  } else if ((buttonStatus == HIGH) &&((millis() - pressedAt) > 2000)) {
+  } else if ((debouncedButtonStatus == HIGH) &&((millis() - pressedAt) > 2000)) {
     Serial.println("Held!");
-  } else if (buttonStatus == LOW && prevButtonStatus == HIGH) {
+  } else if (debouncedButtonStatus == LOW && prevDebouncedButtonStatus == HIGH) {
     Serial.println("Stopped being held!");
   }
-  prevButtonStatus = buttonStatus;
 }
 
 // microphone
@@ -91,16 +108,20 @@ void setup() {
 // ------------- main loop -------------
 
 void loop() {
+  // button stuff
+  debounceButton();
   checkButton();
 
-    size_t bytesIn = 0;
-    // Read audio data from the I2S buffer
-    esp_err_t result = i2s_read(I2S_PORT, &sBuffer, bufferLen * sizeof(int16_t), &bytesIn, portMAX_DELAY);
+  // microphone stuff
+  size_t bytesIn = 0;
+  // Read audio data from the I2S buffer
+  esp_err_t result = i2s_read(I2S_PORT, &sBuffer, bufferLen * sizeof(int16_t), &bytesIn, portMAX_DELAY);
 
-    // If data was read successfully and the buffer isn't empty
-    if (result == ESP_OK && bytesIn > 0) {
-        Serial.println("Result = " + result);
-    }
+  // If data was read successfully and the buffer isn't empty
+  if (result == ESP_OK && bytesIn > 0) {
+       //Serial.print("Result = ")
+       //Serial.println(result)
+  }
 }
 
 
