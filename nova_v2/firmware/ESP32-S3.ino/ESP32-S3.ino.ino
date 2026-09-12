@@ -2,8 +2,9 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
 #include <Wire.h>
-#include <BluetoothSerial.h>
 #include <string>
+#include "BLESerial.h"
+#include "Linereader.h"
 
 // ------------- define pins and variables -------------
 
@@ -34,6 +35,13 @@ static unsigned int haptic_level = 0;
 // leds
 const int led1 = D3;
 const int led2 = D4;
+
+// bluetooth
+//Init Library
+BLESerial        ble;
+
+//LineReader<128>  lr;
+const char helpmsg[] = "Commands: ?=help, stats, echo <text>";
 
 // ------------- define functions -------------
 // button
@@ -93,6 +101,40 @@ void i2s_setpin() {
     i2s_set_pin(I2S_PORT, &pin_config); // Apply the pin configuration
 }
 
+// bluetooth
+void setupBLE(){
+  while (!Serial) { /* wait for USB serial */ }
+
+  // SecurityMode::None | JustWorks | PasskeyDisplay
+  // Mode::Fast | LowPower | LongRange | Balanced
+  ble.begin(BLESerial::Mode::Fast, "georgias_esp32", BLESerial::Security::None);
+
+  #ifdef ARDUINO_ARCH_ESP32
+    ble.setPumpMode(BLESerial::PumpMode::Task); // background TX pump
+  #endif
+
+  Serial.println("BLESerial demo started.");
+}
+
+void bleTx(){
+  static int lastSent = -1; // init case
+  int dat; // Variable to store transmitted byte
+  if (debouncedButtonStatus!=lastSent) {
+    dat = debouncedButtonStatus;
+    ble.write(dat); // Send any data received from Serial to ble device.
+    ble.write('\n');                            // helps nRF Connect show it as a line
+    lastSent = debouncedButtonStatus;
+  }  
+
+}
+
+void bleRx(){
+  char dat; // Variable to store received byte
+  if (ble.available()) {
+    dat = ble.read();
+    Serial.print(dat); // Print all received data to Serial Console
+  }
+}
 // ------------- setup -------------
 
 void setup() {
@@ -106,6 +148,7 @@ void setup() {
   digitalWrite(HAPTIC, LOW);
 
   Serial.begin(115200);
+  setupBLE();
   Serial.println("Setting up I2S...");
   i2s_install();   // Configure and install the I2S driver
   i2s_setpin();    // Set the I2S pins
@@ -121,6 +164,7 @@ void loop() {
   debounceButton();
   checkButton();
 
+/*
   digitalWrite(led1, HIGH);   // Turn the LED on (HIGH is the voltage level)
   delay(1000);                       // Wait for a second
   digitalWrite(led1, LOW);    // Turn the LED off by making the voltage LOW
@@ -129,7 +173,10 @@ void loop() {
   digitalWrite(led2, HIGH);   // Turn the LED on (HIGH is the voltage level)
   delay(1000);                       // Wait for a second
   digitalWrite(led2, LOW);    // Turn the LED off by making the voltage LOW
-  delay(1000);  
+  delay(1000);  */
+
+  bleRx();
+  bleTx();
 
   // microphone stuff
   size_t bytesIn = 0;
@@ -144,12 +191,12 @@ void loop() {
     int16_t v = abs(sBuffer[i]);
     if (v > peak) peak = v;
   }
-  Serial.print("peak = ");
-  Serial.println(peak);   // open Tools → Serial Plotter to see it live
+  //Serial.print("peak = "); // debug
+  //Serial.println(peak);   // open Tools → Serial Plotter to see it live
 }
  
   haptic_level = 255;
-  Serial.println("Haptic level: " + String(haptic_level));
+  //Serial.println("Haptic level: " + String(haptic_level));
   
   // create PWM signal for both haptic sensors 
   digitalWrite(HAPTIC, HIGH);
@@ -162,3 +209,4 @@ void loop() {
 // ------------- references -------------
 // https://easyelecmodule.com/a-complete-guide-to-the-inmp441-i2s-microphone/ accessed 11/09/2026
 // https://github.com/kikookraft/HapticPatPat/blob/main/firmware/src/main.cpp accessed 12/09/2026
+// https://github.com/5pIO/BLESerial accessed 12/09/2026
