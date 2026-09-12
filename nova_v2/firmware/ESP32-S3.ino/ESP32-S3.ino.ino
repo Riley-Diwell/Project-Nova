@@ -5,8 +5,11 @@
 //#include <WiFi.h>
 #include <driver/i2s.h>
 //#include <WiFiUdp.h>
+#include <Wire.h>
+#include <BluetoothSerial.h>
+#include <string>
 
-// ------------- define pins -------------
+// ------------- define pins and variables -------------
 
 // button
 const int buttonPin = D2;
@@ -27,6 +30,10 @@ uint32_t lastDebounceTime = 0; // milliseconds
 // Audio buffer configuration
 #define bufferLen 1024  // Increase buffer size to accommodate more audio data
 int16_t sBuffer[bufferLen]; // Buffer array to hold 16-bit audio samples
+
+// haptics
+#define HAPTIC D0
+static unsigned int haptic_level = 0;
 
 // ------------- define functions -------------
 // button
@@ -96,6 +103,11 @@ void i2s_setpin() {
 
 void setup() {
   pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(HAPTIC, OUTPUT);
+
+  // initialize the digital pin with an off state
+  digitalWrite(HAPTIC, LOW);
+
   Serial.begin(115200);
   Serial.println("Setting up I2S...");
   i2s_install();   // Configure and install the I2S driver
@@ -128,8 +140,18 @@ void loop() {
   Serial.print("peak = ");
   Serial.println(peak);   // open Tools → Serial Plotter to see it live
 }
+ 
+  haptic_level = 255;
+  Serial.println("Haptic level: " + String(haptic_level));
+  
+  // create PWM signal for both haptic sensors 
+  digitalWrite(HAPTIC, HIGH);
+  
+  // delay to prevent spamming the server
+  delay(10);
 
 }
 
 // ------------- references -------------
 // https://easyelecmodule.com/a-complete-guide-to-the-inmp441-i2s-microphone/ accessed 11/09/2026
+// https://github.com/kikookraft/HapticPatPat/blob/main/firmware/src/main.cpp accessed 12/09/2026
