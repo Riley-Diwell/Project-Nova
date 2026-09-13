@@ -13,12 +13,16 @@ const int buttonPin = D2;
 int prevButtonStatus = 0;
 int prevDebouncedButtonStatus = 0;
 int debouncedButtonStatus = 0;
-const int debounceDelay = 50; // milliseconds
+const int debounceDelay = 10; // milliseconds
 uint32_t lastDebounceTime = 0; // milliseconds
-int pressedAt = 0;
+int pressedAt = 0; // when was the button pressed?
 
 const int audioStartTime = 500; // start recording audio after 1000 milliseconds
 int isRecording = 0; // 0 for not recording, 1 for recording audio
+
+const int doubleClickDelay = 500; // max time between button press for double click
+int firstClickTime = 0; 
+int clickCount =0;
 
 // --- microphone
 #define I2S_SCK D8
@@ -39,6 +43,7 @@ static unsigned int haptic_level = 0;
 # define led2 D4
 
 uint32_t pulseStartTime = millis();
+bool pulseActive = false;
 
 // --- bluetooth
 BLESerial        ble; // initialise library
@@ -60,36 +65,51 @@ void debounceButton() {
 }
 
 void checkButton() {
-
+  updatePulse(led2);
   if (debouncedButtonStatus == HIGH && prevDebouncedButtonStatus == LOW) {
     // just pressed
     pressedAt = millis();
   } 
 
+  // button stopped being pressed
   else if (debouncedButtonStatus == LOW && prevDebouncedButtonStatus == HIGH) {
     if (isRecording == 1){
       isRecording = 0;
       Serial.println("Stop recording audio");
       digitalWrite(led1, LOW);
       pulseStartTime = millis();
-      pulse(HAPTIC); // quick pulse
+      startPulse(led2); // quick pulse
+      clickCount = 0; // if we were recording audio, we don't want this to influence future single or double clicks
+    } else {
+      if (clickCount == 0) {
+        firstClickTime = millis(); // start window on first click
+        }
+    clickCount++;
     }
     }
-  
 
-  // audio stuff
-  else if ((debouncedButtonStatus == HIGH) &&((millis() - pressedAt) > audioStartTime)) {
-    if (isRecording == 0) { // if not recording already
-    isRecording = 1;
-    Serial.println("Begin audio recording!");
-    digitalWrite(led1, HIGH);
+  // button is held for long enough to start recording audio
+  else if (debouncedButtonStatus == HIGH) {
+    if ((millis() - pressedAt) > audioStartTime) {
+      if (isRecording == 0) { // if not recording already
+      isRecording = 1;
+      Serial.println("Begin audio recording!");
+      digitalWrite(led1, HIGH);
+      }
     }
   } 
 
-  // single click stuff
-
-
-  // double click stuff
+  // dispatch when double click window closes
+  if (clickCount > 0 && (millis() - firstClickTime) > doubleClickDelay) {
+  switch (clickCount) {
+    case 1: Serial.println("Single click!"); break;
+    case 2: Serial.println("Double click!"); break;
+    default:
+      Serial.print("Multi-click: ");
+      Serial.println(clickCount);
+  }
+  clickCount = 0; // reset
+}
 }
 
 // --- microphone
@@ -165,6 +185,19 @@ void pulse(int pinNum){
   }
 }
 
+void startPulse(int pinNum) {
+  pulseStartTime = millis();
+  pulseActive = true;
+  digitalWrite(pinNum, HIGH);
+}
+
+void updatePulse(int pinNum) {
+  if (pulseActive && (millis() - pulseStartTime) > 500) {
+    digitalWrite(pinNum, LOW);
+    pulseActive = false;
+  }
+}
+
 // ------------- setup -------------
 
 void setup() {
@@ -214,13 +247,6 @@ void loop() {
   //Serial.print("peak = "); // debug
   //Serial.println(peak);   // open Tools → Serial Plotter to see it live
 }
- 
-  // --- haptics
-  haptic_level = 255;
-  //Serial.println("Haptic level: " + String(haptic_level));
-  
-  // create PWM signal for both haptic sensors 
-  digitalWrite(HAPTIC, HIGH);
 }
 
 // ------------- references -------------
