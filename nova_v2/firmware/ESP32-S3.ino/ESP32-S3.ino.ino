@@ -102,8 +102,14 @@ void checkButton() {
   // dispatch when double click window closes
   if (clickCount > 0 && (millis() - firstClickTime) > doubleClickDelay) {
   switch (clickCount) {
-    case 1: Serial.println("Single click!"); break;
-    case 2: Serial.println("Double click!"); break;
+    case 1: {
+      Serial.println("Single click!"); 
+      bleTx("isSingleClick");
+      break;}
+    case 2: {
+      Serial.println("Double click!"); 
+      bleTx("isDoubleClick");
+      break;}
     default:
       Serial.print("Multi-click: ");
       Serial.println(clickCount);
@@ -157,17 +163,12 @@ void setupBLE(){
   Serial.println("BLESerial demo started.");
 }
 
-void bleTx(){
+void bleTx(char dat[20]){
   static int lastSent = -1; // init case
-  int dat; // Variable to store transmitted byte
-  if (debouncedButtonStatus!=lastSent) {
-    dat = debouncedButtonStatus;
     ble.write(dat); // Send any data received from Serial to ble device.
     ble.write('\n');                            // helps nRF Connect show it as a line
     lastSent = debouncedButtonStatus;
   }  
-
-}
 
 void bleRx(){
   char dat; // Variable to store received byte
@@ -178,13 +179,6 @@ void bleRx(){
 }
 
 // --- feedback (haptics and led)
-void pulse(int pinNum){
-  digitalWrite(pinNum, HIGH);
-  if ((millis()-pulseStartTime)>500){ // milliseconds
-    digitalWrite(pinNum, LOW);
-  }
-}
-
 void startPulse(int pinNum) {
   pulseStartTime = millis();
   pulseActive = true;
@@ -228,8 +222,6 @@ void loop() {
   checkButton();
 
   // --- BLE stuff
-  bleRx();
-  bleTx();
 
   // --- microphone stuff
   size_t bytesIn = 0;
