@@ -8,17 +8,19 @@
 
 // ------------- define pins and variables -------------
 
-// button
+// --- button
 const int buttonPin = D2;
-//int buttonStatus = 0;
 int prevButtonStatus = 0;
 int prevDebouncedButtonStatus = 0;
 int debouncedButtonStatus = 0;
 const int debounceDelay = 50; // milliseconds
 uint32_t lastDebounceTime = 0; // milliseconds
+int pressedAt = 0;
 
+const int audioStartTime = 500; // start recording audio after 1000 milliseconds
+int isRecording = 0; // 0 for not recording, 1 for recording audio
 
-// microphone
+// --- microphone
 #define I2S_SCK D8
 #define I2S_WS D10
 #define I2S_SD D9
@@ -28,50 +30,69 @@ uint32_t lastDebounceTime = 0; // milliseconds
 #define bufferLen 1024  // Increase buffer size to accommodate more audio data
 int16_t sBuffer[bufferLen]; // Buffer array to hold 16-bit audio samples
 
-// haptics
+// --- haptics
 #define HAPTIC D0
 static unsigned int haptic_level = 0;
 
-// leds
-const int led1 = D3;
-const int led2 = D4;
+// --- leds
+# define led1 D3
+# define led2 D4
 
-// bluetooth
-//Init Library
-BLESerial        ble;
+uint32_t pulseStartTime = millis();
 
-//LineReader<128>  lr;
-const char helpmsg[] = "Commands: ?=help, stats, echo <text>";
+// --- bluetooth
+BLESerial        ble; // initialise library
 
 // ------------- define functions -------------
-// button
+// --- button
 void debounceButton() {
   int buttonStatus = digitalRead(buttonPin);
   if (buttonStatus != prevButtonStatus) { // raw input changed — restart timer
     lastDebounceTime = millis();
   }
-  if ((millis() - lastDebounceTime) > debounceDelay) {
-    debouncedButtonStatus = buttonStatus; // reading held steady long enough
-    debouncedButtonStatus = !debouncedButtonStatus; // invert for internal pull-up: pressed = 1
-  }
+
   prevDebouncedButtonStatus = debouncedButtonStatus;
+
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    debouncedButtonStatus = !buttonStatus; // reading held steady long enough, invert for internal pull up resistor, pressed = 1
+  }
   prevButtonStatus   = buttonStatus;
 }
 
 void checkButton() {
-  static uint32_t pressedAt = 0;
 
   if (debouncedButtonStatus == HIGH && prevDebouncedButtonStatus == LOW) {
     // just pressed
     pressedAt = millis();
-  } else if ((debouncedButtonStatus == HIGH) &&((millis() - pressedAt) > 2000)) {
-    Serial.println("Held!");
-  } else if (debouncedButtonStatus == LOW && prevDebouncedButtonStatus == HIGH) {
-    Serial.println("Stopped being held!");
-  }
+  } 
+
+  else if (debouncedButtonStatus == LOW && prevDebouncedButtonStatus == HIGH) {
+    if (isRecording == 1){
+      isRecording = 0;
+      Serial.println("Stop recording audio");
+      digitalWrite(led1, LOW);
+      pulseStartTime = millis();
+      pulse(HAPTIC); // quick pulse
+    }
+    }
+  
+
+  // audio stuff
+  else if ((debouncedButtonStatus == HIGH) &&((millis() - pressedAt) > audioStartTime)) {
+    if (isRecording == 0) { // if not recording already
+    isRecording = 1;
+    Serial.println("Begin audio recording!");
+    digitalWrite(led1, HIGH);
+    }
+  } 
+
+  // single click stuff
+
+
+  // double click stuff
 }
 
-// microphone
+// --- microphone
 // Function to install and configure the I2S driver
 void i2s_install() {
     const i2s_config_t i2s_config = {
@@ -101,7 +122,7 @@ void i2s_setpin() {
     i2s_set_pin(I2S_PORT, &pin_config); // Apply the pin configuration
 }
 
-// bluetooth
+// --- bluetooth
 void setupBLE(){
   while (!Serial) { /* wait for USB serial */ }
 
@@ -135,6 +156,15 @@ void bleRx(){
     Serial.print(dat); // Print all received data to Serial Console
   }
 }
+
+// --- feedback (haptics and led)
+void pulse(int pinNum){
+  digitalWrite(pinNum, HIGH);
+  if ((millis()-pulseStartTime)>500){ // milliseconds
+    digitalWrite(pinNum, LOW);
+  }
+}
+
 // ------------- setup -------------
 
 void setup() {
@@ -160,25 +190,15 @@ void setup() {
 // ------------- main loop -------------
 
 void loop() {
-  // button stuff
+  // --- button stuff
   debounceButton();
   checkButton();
 
-/*
-  digitalWrite(led1, HIGH);   // Turn the LED on (HIGH is the voltage level)
-  delay(1000);                       // Wait for a second
-  digitalWrite(led1, LOW);    // Turn the LED off by making the voltage LOW
-  delay(1000);     
-
-  digitalWrite(led2, HIGH);   // Turn the LED on (HIGH is the voltage level)
-  delay(1000);                       // Wait for a second
-  digitalWrite(led2, LOW);    // Turn the LED off by making the voltage LOW
-  delay(1000);  */
-
+  // --- BLE stuff
   bleRx();
   bleTx();
 
-  // microphone stuff
+  // --- microphone stuff
   size_t bytesIn = 0;
   // Read audio data from the I2S buffer
   esp_err_t result = i2s_read(I2S_PORT, &sBuffer, bufferLen * sizeof(int16_t), &bytesIn, portMAX_DELAY);
@@ -195,15 +215,12 @@ void loop() {
   //Serial.println(peak);   // open Tools → Serial Plotter to see it live
 }
  
+  // --- haptics
   haptic_level = 255;
   //Serial.println("Haptic level: " + String(haptic_level));
   
   // create PWM signal for both haptic sensors 
   digitalWrite(HAPTIC, HIGH);
-  
-  // delay to prevent spamming the server
-  delay(10);
-
 }
 
 // ------------- references -------------
