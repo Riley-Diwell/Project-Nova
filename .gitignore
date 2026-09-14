@@ -6,6 +6,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.ruff_cache/
+uvicorn.log
 
 creative_selection/silent_speech/.venv
 creative_selection/silent_speech/run_demo.sh
