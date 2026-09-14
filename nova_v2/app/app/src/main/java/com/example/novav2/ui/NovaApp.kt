@@ -25,6 +25,7 @@ import androidx.navigation.compose.rememberNavController
 import com.example.novav2.model.UserProfile
 import com.example.novav2.navigation.NovaDestination
 import com.example.novav2.navigation.bottomNavDestinations
+import com.example.novav2.ui.screens.AuditLogScreen
 import com.example.novav2.ui.screens.DashboardScreen
 import com.example.novav2.ui.screens.DeviceScreen
 import com.example.novav2.ui.screens.GainScreen
@@ -100,6 +101,9 @@ fun NovaApp() {
             }
             composable(NovaDestination.Knowledge.route) {
                 KnowledgeMapScreen()
+            }
+            composable(NovaDestination.Audit.route) {
+                AuditLogScreen()
             }
             composable(NovaDestination.Device.route) {
                 DeviceScreen(

@@ -6,6 +6,7 @@ import com.example.novav2.model.UserState
 import org.json.JSONArray
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -350,6 +351,72 @@ object NovaApiClient {
             }
         }
     }
+
+    // --- Audit log (Autonomy pillar) -----------------------------------------
+
+    /**
+     * One Tool call as the audit log shows it (schemas/audit.py's AuditEntryOut) - one row
+     * per entry in a past turn's actions[], newest turn first. [reason] is the Controller's
+     * Decision.reason (e.g. "zero_gain") explaining why the tool did or didn't run; it is
+     * shown here even though the model itself is never allowed to see it back
+     * (intent_surface.py's _redact_control_trace). [context] and [summary] are plain-English,
+     * computed server-side (tools/core/narration.py) - render these rather than [tool]/[input].
+     */
+    data class AuditEntry(
+        val episodeId: String,
+        val occurredAt: String?,
+        val eventType: String,
+        val context: String?,
+        val tool: String,
+        val trigger: String,
+        val ran: Boolean,
+        val reason: String?,
+        val speech: String?,
+        val summary: String,
+    )
+
+    /**
+     * Automated actions Nova has taken, newest first, for the Audit tab. [since]/[until] are
+     * ISO instants bounding the search (either or both may be omitted for an open range);
+     * [tool] restricts to one Function tool's calls; [q] free-text searches summary/context/
+     * speech/reason/tool server-side (narration.py's matches_query).
+     */
+    suspend fun getAuditLog(
+        limit: Int = 50,
+        since: String? = null,
+        until: String? = null,
+        tool: String? = null,
+        q: String? = null,
+    ): List<AuditEntry> = withContext(Dispatchers.IO) {
+        val url = "$BASE_URL/audit".toHttpUrl().newBuilder()
+            .addQueryParameter("limit", limit.toString())
+            .apply {
+                since?.let { addQueryParameter("since", it) }
+                until?.let { addQueryParameter("until", it) }
+                tool?.let { addQueryParameter("tool", it) }
+                q?.takeIf { it.isNotBlank() }?.let { addQueryParameter("q", it) }
+            }
+            .build()
+        val request = Request.Builder().url(url).get().build()
+
+        client.newCall(request).execute().use { response ->
+            val array = JSONArray(response.requireBody())
+            (0 until array.length()).map { array.getJSONObject(it).toAuditEntry() }
+        }
+    }
+
+    private fun JSONObject.toAuditEntry(): AuditEntry = AuditEntry(
+        episodeId = getString("episode_id"),
+        occurredAt = if (isNull("occurred_at")) null else optString("occurred_at"),
+        eventType = optString("event_type"),
+        context = if (isNull("context")) null else optString("context"),
+        tool = getString("tool"),
+        trigger = optString("trigger", "requested"),
+        ran = optBoolean("ran", false),
+        reason = if (isNull("reason")) null else optString("reason"),
+        speech = if (isNull("speech")) null else optString("speech"),
+        summary = optString("summary"),
+    )
 
     private inline fun <T> JSONArray?.mapObjects(transform: (JSONObject) -> T): List<T> =
         if (this == null) emptyList()
