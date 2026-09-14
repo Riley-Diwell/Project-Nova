@@ -55,6 +55,11 @@ class Action(BaseModel):
     error: Optional[float] = None
     authority: Optional[float] = None
     gain: Optional[float] = None
+    # The Controller's Reason for this Decision (Reason.value, e.g. "zero_gain"),
+    # for the audit log's "why". Additive like the rest of the trace - see
+    # _redact_control_trace in intent_surface.py, which must strip this the
+    # same way it strips error/authority/gain before the model ever sees it.
+    reason: Optional[str] = None
 
     def for_wire(self) -> dict[str, Any]:
         """This Action as the phone and the Episode see it.
@@ -69,7 +74,7 @@ class Action(BaseModel):
             "trigger": self.trigger,
             "ran": self.ran,
         }
-        for name in ("error", "authority", "gain"):
+        for name in ("error", "authority", "gain", "reason"):
             value = getattr(self, name)
             if value is not None:
                 wire[name] = value
@@ -121,6 +126,7 @@ class Action(BaseModel):
             error=_as_float(entry.get("error")),
             authority=_as_float(entry.get("authority")),
             gain=_as_float(entry.get("gain")),
+            reason=entry.get("reason") if isinstance(entry.get("reason"), str) else None,
         )
 
 

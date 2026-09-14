@@ -10,6 +10,7 @@ The episodic Memory store: an append-only log of Episodes, backed by the
     append(entry)                  -> episode_id
     get(episode_id)                -> one Episode, or None
     recent(event_type, limit)      -> the last few Episodes of that type
+    recent_all(limit)              -> the last few Episodes of any type
     all()                          -> every Episode, oldest first
     close(episode_id, ...)         -> fill in what happened
 
@@ -89,6 +90,28 @@ def recent(event_type: str, limit: int) -> list[dict[str, Any]]:
         .data
     )
     return list(reversed(rows))
+
+
+def recent_all(
+    limit: int, since: str | None = None, until: str | None = None
+) -> list[dict[str, Any]]:
+    """
+    The last `limit` Episodes of any type, newest first, optionally bounded to
+    [since, until] (ISO datetime strings, either end optional).
+
+    What the audit log reads - unlike recent(), not filtered by event_type,
+    since a user reviewing what NOVA has done wants everything in one
+    chronological list, not one type at a time. Date bounds are pushed down as
+    a real query constraint for the same reason `limit` is: a growing log
+    should not mean dragging the whole history across the wire to filter it
+    in Python.
+    """
+    query = get_client().table(_TABLE).select("*")
+    if since:
+        query = query.gte(_ORDER_COLUMN, since)
+    if until:
+        query = query.lte(_ORDER_COLUMN, until)
+    return query.order(_ORDER_COLUMN, desc=True).limit(limit).execute().data
 
 
 def all() -> list[dict[str, Any]]:

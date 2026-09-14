@@ -32,12 +32,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # import nova libraries
+from app.schemas.audit import AuditEntryOut
 from app.schemas.event import Event
 from app.schemas.event_out import EventOut, EventResponse, NeedMoreOut
 from app.schemas.tool_gain import ToolGainOut, ToolGainUpdate
 from app.schemas.user_state import UserState
 from app import intent_surface
 from app.intent_surface import IntentResult, NeedMoreResult
+from app.tools.core import narration
+from app.tools.core.action import Action
 from app.tools.functions.notification_batcher import NotificationBatcher
 from app.tools.functions.notification_management import register_batcher
 
@@ -319,6 +322,72 @@ async def run_consolidation(preview: bool = False) -> dict[str, Any]:
     print(f"[consolidation] {'preview' if preview else 'run'}: "
           f"{len(derived)} derived, {len(stated)} stated")
     return {"preview": preview, "derived": derived, "stated": stated}
+
+
+# --- Audit log (Autonomy pillar) ---------------------------------------------
+# The Android app's Audit tab (ui/screens/AuditLogScreen.kt): every automated
+# action NOVA has taken, and why, so the user can review and verify it. Reads
+# episodic_memory back out - nothing here writes to it - and flattens each
+# episode's action.actions[] into one row per Tool call, newest episode first.
+# Non-fatal like every other Memory touch (_open_episode, _close_episode): an
+# unconfigured or unreachable Supabase must not fail /audit, just show nothing.
+#
+# `tool` and `q` filter after flattening (they depend on the computed
+# `summary`/`context` text, not a raw column), so when either is set the
+# episode fetch widens past the requested `limit` - otherwise a filter could
+# legitimately return fewer than `limit` matches while older matching entries
+# still existed just outside a `limit`-sized window.
+_AUDIT_FILTERED_FETCH_CAP = 500
+_AUDIT_DEFAULT_FETCH_CAP = 200
+
+
+@app.get("/audit", response_model=list[AuditEntryOut])
+async def list_audit(
+    limit: int = 50,
+    since: str | None = None,
+    until: str | None = None,
+    tool: str | None = None,
+    q: str | None = None,
+) -> list[dict[str, Any]]:
+    filtering = bool(tool or q)
+    fetch_limit = _AUDIT_FILTERED_FETCH_CAP if filtering else min(limit, _AUDIT_DEFAULT_FETCH_CAP)
+    try:
+        episodes = memory.recent_all(fetch_limit, since=since, until=until)
+    except Exception as e:
+        print(f"[memory] audit read skipped: {e}")
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for episode in episodes:
+        action_column = episode.get("action")
+        if not isinstance(action_column, dict):
+            continue
+        speech = action_column.get("speech")
+        event_type = episode.get("event_type", "unknown")
+        event = episode.get("event") if isinstance(episode.get("event"), dict) else {}
+        context = narration.describe_event(event_type, event)
+
+        for action in Action.from_episode(action_column):
+            if tool and action.tool != tool:
+                continue
+            entry = {
+                "episode_id": str(episode["id"]),
+                "occurred_at": episode.get("created_at"),
+                "event_type": event_type,
+                "context": context,
+                "speech": speech,
+                "summary": narration.describe_action(action.tool, action.input, action.ran),
+                **action.for_wire(),
+            }
+            if q and not narration.matches_query(entry, q):
+                continue
+            entries.append(entry)
+            if len(entries) >= limit:
+                break
+        if len(entries) >= limit:
+            break
+
+    return entries
 
 
 # Android posts here after resolving a need_more request from /event (see

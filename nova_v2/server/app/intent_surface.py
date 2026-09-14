@@ -380,6 +380,7 @@ def _record_action(
         input=dict(tool_input),
         trigger="requested" if decision.reason is Reason.COMMANDED else "inferred",
         ran=ran,
+        reason=decision.reason.value,
         **decision.trace(),
     ))
 
@@ -667,7 +668,9 @@ def _redact_control_trace(action_column: Any) -> Any:
     return {
         **{k: v for k, v in action_column.items() if k not in ("actions", "calls", "tool", "params")},
         "actions": [
-            a.model_copy(update={"error": None, "authority": None, "gain": None}).for_wire()
+            a.model_copy(
+                update={"error": None, "authority": None, "gain": None, "reason": None}
+            ).for_wire()
             for a in Action.from_episode(action_column)
         ],
     }
