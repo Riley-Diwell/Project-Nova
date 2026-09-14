@@ -31,7 +31,7 @@ import java.util.concurrent.TimeUnit
  * internet; leave blank for local dev, where the backend has no key configured.
  */
 object NovaApiClient {
-    private const val BASE_URL = "https://nova-backend-1021689546881.australia-southeast1.run.app"
+    private const val BASE_URL = "https://nova-v1-1021689546881.australia-southeast1.run.app"
     private val API_KEY = BuildConfig.NOVA_API_KEY
     private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 
