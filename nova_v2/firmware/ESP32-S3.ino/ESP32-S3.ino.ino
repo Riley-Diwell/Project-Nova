@@ -30,9 +30,37 @@ int clickCount =0;
 #define I2S_SD D9
 #define I2S_PORT I2S_NUM_0 // Use I2S port 0
 
-// Audio buffer configuration
-#define bufferLen 1024  // Increase buffer size to accommodate more audio data
-int16_t sBuffer[bufferLen]; // Buffer array to hold 16-bit audio samples
+// adpcm compression stuff
+#define bufferLen 512  // Increase buffer size to accommodate more audio data
+int32_t sBuffer[bufferLen]; // raw32-bit i2s samples
+int16_t pcmBuffer[bufferLen]; // converted 16-bit PCM samples
+// --- ADPCM (IMA ADPCM, 4 bits per sample, ~4:1 compression)
+struct ADPCMState {
+  int16_t predictor;
+  int8_t  index;
+};
+ADPCMState adpcmState = {0, 0};
+
+static const int16_t adpcmStepTable[89] = {
+  7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+  19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+  50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+  130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+  337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+  876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+  2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+  5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+  15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+};
+
+static const int8_t adpcmIndexTable[16] = {
+  -1, -1, -1, -1, 2, 4, 6, 8,
+  -1, -1, -1, -1, 2, 4, 6, 8
+};
+
+// Fixed-size encoded output: 4-byte block header + one nibble per sample.
+// With bufferLen=512 this is 4 + 256 = 260 bytes per BLE burst.
+uint8_t adpcmOut[4 + bufferLen / 2];
 
 // --- haptics
 #define HAPTIC D0
@@ -124,7 +152,7 @@ void i2s_install() {
     const i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX), // Set as master receiver
         .sample_rate = 16000,              // Audio sample rate (16kHz)
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT, // 16-bit per sample
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT, // 32-bit per sample
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT, // Use left channel only (mono)
         .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_STAND_I2S), // Standard I2S format
         .intr_alloc_flags = 0,             // No interrupt flags
@@ -146,6 +174,59 @@ void i2s_setpin() {
     };
 
     i2s_set_pin(I2S_PORT, &pin_config); // Apply the pin configuration
+}
+
+// --- ADPCM encoder
+uint8_t encodeADPCMSample(int16_t sample, ADPCMState& s) {
+  int step = adpcmStepTable[s.index];
+  int diff = sample - s.predictor;
+  uint8_t code = 0;
+
+  if (diff < 0) { code = 8; diff = -diff; }
+
+  int t = step;
+  if (diff >= t) { code |= 4; diff -= t; }
+  t >>= 1;
+  if (diff >= t) { code |= 2; diff -= t; }
+  t >>= 1;
+  if (diff >= t) { code |= 1; }
+
+  int diffq = step >> 3;
+  if (code & 4) diffq += step;
+  if (code & 2) diffq += step >> 1;
+  if (code & 1) diffq += step >> 2;
+
+  int pred = s.predictor + ((code & 8) ? -diffq : diffq);
+  if (pred >  32767) pred =  32767;
+  if (pred < -32768) pred = -32768;
+  s.predictor = (int16_t)pred;
+
+  s.index += adpcmIndexTable[code];
+  if (s.index < 0)  s.index = 0;
+  if (s.index > 88) s.index = 88;
+
+  return code;
+}
+
+// Encode one block. Header = predictor(2) + index(1) + reserved(1).
+size_t encodeADPCMBlock(const int16_t* pcm, int samples, uint8_t* out, ADPCMState& s) {
+  out[0] = s.predictor & 0xFF;
+  out[1] = (s.predictor >> 8) & 0xFF;
+  out[2] = (uint8_t)s.index;
+  out[3] = 0;
+
+  size_t idx = 4;
+  for (int i = 0; i < samples; i += 2) {
+    uint8_t lo = encodeADPCMSample(pcm[i], s);
+    uint8_t hi = (i + 1 < samples) ? encodeADPCMSample(pcm[i + 1], s) : 0;
+    out[idx++] = lo | (hi << 4);
+  }
+  return idx;
+}
+
+void resetADPCM() {
+  adpcmState.predictor = 0;
+  adpcmState.index = 0;
 }
 
 // --- bluetooth
@@ -222,26 +303,54 @@ void loop() {
   checkButton();
 
   // --- BLE stuff
+  bleRx();
 
   // --- microphone stuff
-  size_t bytesIn = 0;
-  // Read audio data from the I2S buffer
-  esp_err_t result = i2s_read(I2S_PORT, &sBuffer, bufferLen * sizeof(int16_t), &bytesIn, portMAX_DELAY);
+  static bool wasRecording = false;
 
-  // If data was read successfully and the buffer isn't empty
-  if (result == ESP_OK && bytesIn > 0) {
-  int samplesRead = bytesIn / sizeof(int16_t);
-  int16_t peak = 0;
-  for (int i = 0; i < samplesRead; i++) {
-    int16_t v = abs(sBuffer[i]);
-    if (v > peak) peak = v;
+  if (!isRecording) {
+    if (wasRecording) wasRecording = false;
+    // Non-blocking drain so the DMA ring doesn't hand us stale data next time.
+    size_t bytesIn = 0;
+    i2s_read(I2S_PORT, sBuffer, bufferLen * sizeof(int32_t), &bytesIn, 0);
+    return;
   }
-  //Serial.print("peak = "); // debug
-  //Serial.println(peak);   // open Tools → Serial Plotter to see it live
-}
+
+  // First loop of a new recording: reset encoder so the decoder can lock on.
+  if (!wasRecording) {
+    resetADPCM();
+    wasRecording = true;
+  }
+
+  // Blocks up to ~32 ms while the DMA fills — fine, button poll resumes after.
+  size_t bytesIn = 0;
+  esp_err_t result = i2s_read(I2S_PORT, sBuffer,
+                              bufferLen * sizeof(int32_t),
+                              &bytesIn, portMAX_DELAY);
+  if (result != ESP_OK || bytesIn == 0) return;
+
+  int samplesRead = bytesIn / sizeof(int32_t);
+
+  // 32-bit -> 16-bit PCM. INMP441 data sits in the upper bits;
+  // >>14 gives audible signal with headroom. Increase shift to cut, decrease to boost.
+  for (int i = 0; i < samplesRead; i++) {
+    int32_t v = sBuffer[i] >> 14;
+    if (v >  32767) v =  32767;
+    if (v < -32768) v = -32768;
+    pcmBuffer[i] = (int16_t)v;
+  }
+
+  size_t outBytes = encodeADPCMBlock(pcmBuffer, samplesRead, adpcmOut, adpcmState);
+  ble.write(adpcmOut, outBytes);
+  // Also dump the block as hex to Serial so you can copy-paste into the decoder.
+  for (size_t i = 0; i < outBytes; i++) {
+    Serial.printf("%02X", adpcmOut[i]);
+  }
+  Serial.println();
 }
 
 // ------------- references -------------
 // https://easyelecmodule.com/a-complete-guide-to-the-inmp441-i2s-microphone/ accessed 11/09/2026
 // https://github.com/kikookraft/HapticPatPat/blob/main/firmware/src/main.cpp accessed 12/09/2026
 // https://github.com/5pIO/BLESerial accessed 12/09/2026
+// https://www.cs.columbia.edu/~hgs/audio/dvi/IMA_ADPCM.pdf accessed 13/09/2026
