@@ -333,7 +333,7 @@ private fun AuditCard(entry: NovaApiClient.AuditEntry) {
             Text(
                 text = formatOccurredAt(entry.occurredAt),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Spacer(Modifier.height(8.dp))
