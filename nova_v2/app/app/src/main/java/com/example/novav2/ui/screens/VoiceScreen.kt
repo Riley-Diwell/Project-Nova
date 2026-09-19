@@ -205,6 +205,30 @@ private fun MessageBubble(message: ChatMessage) {
 }
 
 /**
+ * Nova's side of the thread while a turn is in flight or something needs saying that isn't a
+ * real reply (listening, sending, a recognizer miss…) - the same bubble a finished reply would
+ * use, so the transcript never has a second, differently-styled place to look for what's
+ * happening. Replaces what used to be a fixed "Nova is thinking…" bubble plus a separate
+ * caption below the chat - one indicator, driven by whatever `statusText` currently says.
+ */
+@Composable
+private fun PendingStatusBubble(text: String) {
+    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomEnd = 16.dp, bottomStart = 4.dp),
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            )
+        }
+    }
+}
+
+/**
  * DESIGN.md §5.1/§5.3: text or SpeechRecognizer input -> POST /event -> TextToSpeech, rendered
  * as a message thread (user bubbles on the right, Nova's replies on the left) rather than a
  * single last-turn readout, so the reply is always visible even before/without TTS finishing.
@@ -395,6 +419,19 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
         }
     }
 
+    /**
+     * A failed turn, told the same way a successful one is - added to the transcript and
+     * spoken - rather than left as a caption underneath that a narrow screen truncates to
+     * something like "Couldn't reach the back…". No episodeId: a failed turn is evidence
+     * about the network or the clock, never about the tools, so there is nothing here for
+     * [reportOutcome] to score.
+     */
+    fun sayFailure(text: String) {
+        statusText = ""
+        chatViewModel.addMessage(text, fromUser = false)
+        speak(text, episodeId = null)
+    }
+
     /** Sends one turn to the backend, whether it came from typing or from a voice transcript. */
     fun sendMessage(text: String) {
         if (text.isBlank()) return
@@ -460,14 +497,11 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
                 // Distinct from "couldn't reach": the backend IS answering, it
                 // just took longer than readTimeout. Worth its own message,
                 // because the fix is a slower client rather than a broken server.
-                voiceState = VoiceState.IDLE
-                statusText = "Nova took too long to answer - tap to try again."
+                sayFailure("Sorry, that's taking too long - can you try again?")
             } catch (e: IOException) {
-                voiceState = VoiceState.IDLE
-                statusText = "Couldn't reach the Nova backend - tap to try again."
+                sayFailure("Sorry, I couldn't reach the network - can you try again?")
             } catch (e: DateTimeParseException) {
-                voiceState = VoiceState.IDLE
-                statusText = "Nova sent a date it couldn't understand - tap to try again."
+                sayFailure("Sorry, something about that didn't come through right - can you try again?")
             }
         }
     }
@@ -589,11 +623,15 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
     ) {
         if (messages.isEmpty()) {
             Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text(
-                    text = "Say something or type a message to get started.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                if (statusText.isNotBlank()) {
+                    PendingStatusBubble(statusText)
+                } else {
+                    Text(
+                        text = "Say something or type a message to get started.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         } else {
             Row(
@@ -616,33 +654,12 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
                 items(messages, key = { it.id }) { message ->
                     MessageBubble(message)
                 }
-                if (voiceState == VoiceState.THINKING) {
-                    item(key = "thinking-indicator") {
-                        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
-                            Surface(
-                                color = MaterialTheme.colorScheme.surfaceVariant,
-                                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomEnd = 16.dp, bottomStart = 4.dp),
-                            ) {
-                                Text(
-                                    text = "Nova is thinking…",
-                                    style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                                )
-                            }
-                        }
+                if (statusText.isNotBlank()) {
+                    item(key = "status-indicator") {
+                        PendingStatusBubble(statusText)
                     }
                 }
             }
-        }
-
-        if (statusText.isNotBlank()) {
-            Text(
-                text = statusText,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-            )
         }
 
         // Only while NOVA is talking, because that is the only moment it means
