@@ -36,7 +36,9 @@ class BaseEvent(BaseModel):
 
 class TimeEvent(BaseEvent):
     """
-    This event is triggered when the time since the last TimeEvent exceeds 10 minutes. 
+    This event is triggered when the time since the last TimeEvent exceeds a
+    fixed interval - currently 10 minutes, set by Android's SignalMonitorService
+    (AMBIENT_CHECK_INTERVAL_MILLIS), not by anything on this side.
     """
     type: Literal["timestamp"] = "timestamp"
 

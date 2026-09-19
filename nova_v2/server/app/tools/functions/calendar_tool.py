@@ -220,7 +220,10 @@ class AddCalendarEventTool(BaseTool):
                 "with no timezone suffix, exactly as get_calendar_range takes "
                 "them - work from the top-level local_time, never from the "
                 "triggering event's UTC timestamp. If they name a start but no "
-                "end, give it a sensible duration rather than asking."
+                "end, give it a sensible duration rather than asking. Always "
+                "set location when they name a building, room or address for "
+                "it - a class or meeting saved without one can't later be "
+                "given a departure time or directions."
             ),
             gain_description=(
                 "How readily Nova puts things in your calendar without being "
@@ -249,9 +252,21 @@ class AddCalendarEventTool(BaseTool):
                             "pick a sensible duration if the user did not say one."
                         ),
                     },
+                    "location": {
+                        "type": "string",
+                        "description": (
+                            "Where it is, e.g. a building/room name or address - "
+                            "'CSIT Building 108', 'the library'. Capture it "
+                            "verbatim when the user names one; this is what "
+                            "navigation_departure_time later resolves to give "
+                            "directions, so leaving it out of a class or meeting "
+                            "with a stated location means Nova won't be able to "
+                            "say when to leave for it."
+                        ),
+                    },
                     "description": {
                         "type": "string",
-                        "description": "Optional detail - where, with whom, anything they added.",
+                        "description": "Optional detail - with whom, anything else they added.",
                     },
                     "recurrence": {
                         **_RECURRENCE_SCHEMA,
@@ -279,6 +294,7 @@ class AddCalendarEventTool(BaseTool):
             "title": tool_input.get("title"),
             "start_time": tool_input.get("start_time"),
             "end_time": tool_input.get("end_time"),
+            "location": tool_input.get("location"),
             "recurrence": tool_input.get("recurrence"),
         }
 
@@ -349,6 +365,13 @@ class EditCalendarEventTool(BaseTool):
                             "rather than leaving it out."
                         ),
                     },
+                    "location": {
+                        "type": "string",
+                        "description": (
+                            "New location, only if it's changing - same use as "
+                            "add_calendar_event's location."
+                        ),
+                    },
                     "description": {
                         "type": "string",
                         "description": "New detail text, only if it's changing.",
@@ -374,6 +397,7 @@ class EditCalendarEventTool(BaseTool):
             "title": tool_input.get("title"),
             "start_time": tool_input.get("start_time"),
             "end_time": tool_input.get("end_time"),
+            "location": tool_input.get("location"),
             "description": tool_input.get("description"),
             "recurrence": tool_input.get("recurrence"),
         }

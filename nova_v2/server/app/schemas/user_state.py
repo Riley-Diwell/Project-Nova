@@ -76,3 +76,7 @@ class UserState(BaseModel):
     # Rich calendar detail
     current_events: List[CalendarEventInfo] = []
     upcoming_events: List[CalendarEventInfo] = []
+
+    # Declared (not inferred) in Settings - navigation_departure_time's default
+    # mode when the model doesn't name one. "transit" / "walking" / "driving".
+    preferred_travel_mode: Optional[str] = None

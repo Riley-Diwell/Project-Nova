@@ -197,6 +197,14 @@ def register_batcher(batcher: NotificationBatcher) -> None:
     _batcher_instance = batcher
 
 
+def set_batcher_mode(mode: str) -> None:
+    """Called by intent_surface.run() every turn with the Observer's derived
+    mode, so the batcher stops needing its own copy of calendar_ctx/dnd. A
+    no-op before the batcher exists (e.g. NOVA_MOCK_LLM local runs)."""
+    if _batcher_instance is not None:
+        _batcher_instance.set_mode(mode)
+
+
 #Action handler
 
 def _query(batcher: NotificationBatcher | None) -> dict:

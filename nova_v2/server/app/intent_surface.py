@@ -39,6 +39,7 @@ from app.control.gain.reinforcement import Outcome, Reinforcer
 from app.tools.core.action import Action
 from app.tools.core.catalogue import CLIENT_TOOLS, build_registry
 from app.tools.core.dispatcher import Dispatcher
+from app.tools.functions.notification_management import set_batcher_mode
 
 from app.store import memory
 from app.store import persona
@@ -100,7 +101,12 @@ SYSTEM_PROMPT = (
     "actually ran. Acknowledge what they said without promising an action "
     "that did not happen. "
     "For ambient events - a notification arriving, a calendar trigger - staying "
-    "quiet is usually right. But if the user is speaking to you directly and "
+    "quiet is usually right, and quiet means an empty string, never a "
+    "description of the event that triggered you. The user never sees the "
+    "event JSON, only your words, so if nothing is worth interrupting for, do "
+    "not explain what kind of event happened or that no action was needed "
+    "(never say something like \"this is a timestamp event with no user "
+    "action\") - just return \"\". But if the user is speaking to you directly and "
     "you cannot do what they asked, never return an empty string: say briefly "
     "that you're not sure and why (for example: \"I'm not sure - I don't have a "
     "way to add calendar events yet.\"). Check the memory tool and the sources "
@@ -132,6 +138,26 @@ SYSTEM_PROMPT = (
     "this week, a date - call get_calendar_range for it in local time, even if "
     "upcoming_events appears to hold something already: that list is a preview "
     "and is routinely incomplete for the day being asked about. "
+    "WHEN TO LEAVE. If the user asks when they need to leave, how long it "
+    "takes to get somewhere, or which way to go, without naming a "
+    "destination - 'when do I need to leave', 'how do I get to class', 'which "
+    "way from here' - take the destination from their next current_events/ "
+    "upcoming_events entry's location and its start_local as arrival_time, "
+    "rather than asking them to repeat what they're clearly already going to. "
+    "Also pass that entry's own minutes_until_start straight through as the "
+    "tool's minutes_until_start - copy the number, never convert it - so Nova "
+    "can schedule a precise alert for the real leave-by moment rather than "
+    "only answering right now. Leave minutes_until_start out for a "
+    "destination with no calendar anchor. "
+    "If that entry has no location, say you don't have one for it rather than "
+    "guessing. This also covers 'which way do I walk' when they're already "
+    "there - call navigation_departure_time with mode 'walking'. On an ambient "
+    "event (nobody spoke - a timer or a location change), this is the one "
+    "case worth breaking silence for: if navigation_departure_time is "
+    "available, call it for the next commitment and only speak if it says "
+    "leaving is imminent - a comfortable answer is not worth interrupting for. "
+    "If it reports the user has already arrived, that is not imminent either - "
+    "stay quiet on an ambient event, but say so plainly if they asked directly. "
     "EDITING OR DELETING A CALENDAR EVENT both need its event_id, which only "
     "ever comes from a get_calendar_range result (this turn's or one in "
     "recent_episodes) - call get_calendar_range first if you don't already "
@@ -300,6 +326,12 @@ class TurnContext:
 
     location_ctx: str | None = None
 
+    # The user's declared travel-mode preference (Settings), injected into a
+    # tool call's "mode" the same way location_ctx becomes "origin" below -
+    # so "when do I leave for class" doesn't require the model to guess how
+    # this particular user gets around.
+    preferred_travel_mode: str | None = None
+
     # Minutes east of UTC for this turn's user_state, kept so a client-tool hop
     # can localise what the phone sends back on the far side of the pause.
     utc_offset_minutes: int = 0
@@ -317,6 +349,13 @@ class TurnContext:
     # can be closed once the turn resolves - which may be on the far side of a
     # client-tool hop, in /event/continue rather than /event.
     episode_id: str | None = None
+
+    # Set when navigation_departure_time ran this turn and returned a
+    # leave_in_minutes - {destination, mode, leave_in_minutes}. Carried
+    # separately from `actions` because that records the tool's *input*, not
+    # its *result*, and this is the one result Android needs structured
+    # rather than folded into speech (see the tool loop below).
+    scheduled_departure: dict[str, Any] | None = None
 
     @property
     def ran(self) -> list[str]:
@@ -409,6 +448,8 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
     if _REGISTRY.has(name):
         if ctx.location_ctx and "origin" not in tool_input:
             tool_input = {**tool_input, "origin": ctx.location_ctx}
+        if ctx.preferred_travel_mode and "mode" not in tool_input:
+            tool_input = {**tool_input, "mode": ctx.preferred_travel_mode}
         # Authorisation already happened in _gate. The dispatcher just runs it.
         result = _DISPATCHER.dispatch_reactive(name, tool_input)
         # Recorded after the call, so a tool that raises is not reported as run -
@@ -507,6 +548,11 @@ class IntentResult(BaseModel):
     # Actions above, and passes the id on to the phone so it can name the same
     # Episode when it reports the Outcome.
     episode_id: str | None = None
+
+    # See TurnContext.scheduled_departure - carried through so Android can
+    # schedule a precise alarm even on a turn where speech stayed empty (an
+    # ambient check that isn't urgent yet, but now knows exactly when it will be).
+    scheduled_departure: dict[str, Any] | None = None
 
 
 class NeedMoreResult(BaseModel):
@@ -768,6 +814,9 @@ def run(
     # what may happen this turn is already settled; the model's job is to choose
     # parameters and words.
     observation = observe(event, user_state, trends=trends_from_facts(facts))
+    # The batcher used to keep its own copy of calendar_ctx/dnd to derive this -
+    # now it just gets told, same source of truth as everything else this turn.
+    set_batcher_mode(observation.mode.value)
     command = classify(event)
     turn = _CONTROLLER.open_turn(observation, command)
     authorised = turn.authorised()
@@ -807,6 +856,7 @@ def run(
     ctx = TurnContext(
         turn=turn,
         location_ctx=user_state.location_ctx,
+        preferred_travel_mode=user_state.preferred_travel_mode,
         utc_offset_minutes=user_state.utc_offset_minutes,
         episode_id=episode_id,
     )
@@ -900,6 +950,7 @@ def _run_loop(
             return IntentResult(
                 event_id=event_id, speech=speech, actions=ctx.for_wire(),
                 episode_id=ctx.episode_id, confirmation=confirmation,
+                scheduled_departure=ctx.scheduled_departure,
             )
 
         # if a tool is called
@@ -948,6 +999,14 @@ def _run_loop(
                     result = blocked if blocked is not None else _run_local_tool(
                         block.name, block.input, ctx
                     )
+                    if (block.name == "navigation_departure_time"
+                            and isinstance(result, dict)
+                            and "leave_in_minutes" in result):
+                        ctx.scheduled_departure = {
+                            "destination": result.get("destination"),
+                            "mode": result.get("mode"),
+                            "leave_in_minutes": result["leave_in_minutes"],
+                        }
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -971,5 +1030,5 @@ def _run_loop(
     print("[loop] exited loop with no end_turn - returning empty speech")
     return IntentResult(
         event_id=event_id, speech="", actions=ctx.for_wire(),
-        episode_id=ctx.episode_id,
+        episode_id=ctx.episode_id, scheduled_departure=ctx.scheduled_departure,
     )

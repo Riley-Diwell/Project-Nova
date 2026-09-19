@@ -80,9 +80,12 @@ _IMPERATIVE_VERBS = frozenset({
     "repeat", "summarise", "summarize",
     # calendar
     "add", "schedule", "book", "put", "create", "move", "cancel", "delete",
-    "clear", "block",
+    "clear", "block", "change", "reschedule", "edit", "update", "rename",
+    "shift", "postpone", "adjust", "delay", "push", "extend", "shorten",
+    "bump", "remove", "drop", "swap",
     # navigation
-    "navigate", "take", "get", "drive", "walk", "route", "direct",
+    "navigate", "take", "get", "drive", "walk", "route", "direct", "go",
+    "head",
     # notifications
     "snooze", "mute", "silence", "dismiss", "acknowledge", "hold", "pause",
     # generic

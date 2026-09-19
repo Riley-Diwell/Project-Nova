@@ -140,6 +140,7 @@ def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
         actions=intent.actions,
         episode_id=intent.episode_id,
         confirmation=intent.confirmation,
+        scheduled_departure=intent.scheduled_departure,
     )
 
 
