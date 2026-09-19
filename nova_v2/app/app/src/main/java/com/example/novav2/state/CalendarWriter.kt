@@ -40,6 +40,7 @@ object CalendarWriter {
         startMillis: Long,
         endMillis: Long,
         description: String? = null,
+        location: String? = null,
         rrule: String? = null,
     ): Uri? {
         if (!hasPermission(context)) return null
@@ -49,6 +50,7 @@ object CalendarWriter {
             put(CalendarContract.Events.CALENDAR_ID, calendar.id)
             put(CalendarContract.Events.TITLE, title)
             put(CalendarContract.Events.DESCRIPTION, description)
+            put(CalendarContract.Events.EVENT_LOCATION, location)
             put(CalendarContract.Events.DTSTART, startMillis)
             put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
             if (rrule.isNullOrBlank()) {
@@ -92,6 +94,7 @@ object CalendarWriter {
         startMillis: Long? = null,
         endMillis: Long? = null,
         description: String? = null,
+        location: String? = null,
         rrule: String? = null,
     ): Boolean {
         if (!hasPermission(context)) return false
@@ -107,6 +110,7 @@ object CalendarWriter {
         val values = ContentValues().apply {
             put(CalendarContract.Events.TITLE, title ?: existing.title)
             put(CalendarContract.Events.DESCRIPTION, description ?: existing.description)
+            put(CalendarContract.Events.EVENT_LOCATION, location ?: existing.location)
             put(CalendarContract.Events.DTSTART, finalStart)
             if (finalRrule.isNullOrBlank()) {
                 putNull(CalendarContract.Events.RRULE)
@@ -125,6 +129,7 @@ object CalendarWriter {
     private data class ExistingEvent(
         val title: String?,
         val description: String?,
+        val location: String?,
         val dtStart: Long,
         val dtEnd: Long?,
         val duration: String?,
@@ -136,6 +141,7 @@ object CalendarWriter {
         val projection = arrayOf(
             CalendarContract.Events.TITLE,
             CalendarContract.Events.DESCRIPTION,
+            CalendarContract.Events.EVENT_LOCATION,
             CalendarContract.Events.DTSTART,
             CalendarContract.Events.DTEND,
             CalendarContract.Events.DURATION,
@@ -146,10 +152,11 @@ object CalendarWriter {
             ExistingEvent(
                 title = cursor.getString(0),
                 description = cursor.getString(1),
-                dtStart = cursor.getLong(2),
-                dtEnd = if (cursor.isNull(3)) null else cursor.getLong(3),
-                duration = cursor.getString(4),
-                rrule = cursor.getString(5),
+                location = cursor.getString(2),
+                dtStart = cursor.getLong(3),
+                dtEnd = if (cursor.isNull(4)) null else cursor.getLong(4),
+                duration = cursor.getString(5),
+                rrule = cursor.getString(6),
             )
         }
     }

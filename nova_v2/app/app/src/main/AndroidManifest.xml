@@ -46,6 +46,10 @@
             android:name=".state.ActivityTransitionReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".service.DepartureAlarmReceiver"
+            android:exported="false" />
+
         <service
             android:name=".service.SignalMonitorService"
             android:exported="false"

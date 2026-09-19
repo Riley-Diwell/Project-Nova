@@ -83,6 +83,7 @@ import com.example.novav2.model.ChatMessage
 import com.example.novav2.network.NovaApiClient
 import com.example.novav2.state.CalendarSignal
 import com.example.novav2.state.CalendarWriter
+import com.example.novav2.state.DepartureAlarmScheduler
 import com.example.novav2.state.UserStateCollector
 import com.example.novav2.viewmodel.ChatViewModel
 import kotlinx.coroutines.launch
@@ -130,6 +131,7 @@ private fun writeCalendarActions(
                 startMillis = start,
                 endMillis = end,
                 description = action.description,
+                location = action.location,
                 rrule = action.rrule,
             )
             if (uri != null) created++
@@ -166,6 +168,7 @@ private fun writeEditActions(
             startMillis = start,
             endMillis = end,
             description = action.description,
+            location = action.location,
             rrule = action.rrule,
         )
     }
@@ -442,6 +445,11 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
                     // Appended, not replaced - a dialog already awaiting an earlier turn's answer
                     // must not be dropped by a new one arriving.
                     pendingDeleteConfirmations = pendingDeleteConfirmations + deleteActions
+                }
+                // Asking once sets up the reminder for later, too - not just an answer read out
+                // now. Same mechanism SignalMonitorService's ambient checks use.
+                finalResult?.scheduledDeparture?.let {
+                    DepartureAlarmScheduler.schedule(context, it)
                 }
                 val reply = finalResult?.speech ?: "Sorry, I couldn't finish that."
                 statusText = ""

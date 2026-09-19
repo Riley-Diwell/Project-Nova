@@ -73,6 +73,10 @@ object NovaApiClient {
             /** Names the Episode this turn wrote, for [postOutcome]. Absent if Memory was unreachable. */
             val episodeId: String?,
             val confirmation: String?,
+            /** Set when navigation_departure_time ran this turn and could measure a countdown -
+             * present even when [speech] is empty (an ambient check that isn't urgent yet, but now
+             * knows exactly when it will be). See [com.example.novav2.state.DepartureAlarmScheduler]. */
+            val scheduledDeparture: ScheduledDeparture?,
         ) : EventResult()
         data class NeedMore(
             val sessionId: String,
@@ -81,6 +85,13 @@ object NovaApiClient {
             val toIso: String,
         ) : EventResult()
     }
+
+    /** Mirrors EventOut.scheduled_departure - {destination, mode, leave_in_minutes}. */
+    data class ScheduledDeparture(
+        val destination: String?,
+        val mode: String?,
+        val leaveInMinutes: Double,
+    )
 
     /**
      * An add_calendar_event Action from the backend's actions[] (schemas/event_out.py). Every entry
@@ -93,6 +104,7 @@ object NovaApiClient {
         val startIso: String,
         val endIso: String,
         val description: String?,
+        val location: String?,
         /** RFC 5545 RRULE built from the backend's structured recurrence input, e.g.
          * "FREQ=WEEKLY;INTERVAL=2;COUNT=5" - null for a one-off event. */
         val rrule: String?,
@@ -118,6 +130,7 @@ object NovaApiClient {
         val startIso: String?,
         val endIso: String?,
         val description: String?,
+        val location: String?,
         val rrule: String?,
     )
 
@@ -130,6 +143,34 @@ object NovaApiClient {
                     put("timestamp", Instant.now().toString())
                     put("type", "voice")
                     put("text", transcript)
+                })
+                put("user_state", userState.toJson())
+            }
+
+            val request = Request.Builder()
+                .url("$BASE_URL/event")
+                .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            client.newCall(request).execute().use { parseEventResponse(it) }
+        }
+
+    /**
+     * Posts a bare "timestamp" Event (schemas/event.py's TimeEvent) - no user speech, just this
+     * turn's [UserState] snapshot. This is the ambient heartbeat [com.example.novav2.service.
+     * SignalMonitorService] posts periodically so navigation_departure_time (and anything else
+     * with enough gain) gets a chance to act on inferred state rather than only ever running
+     * inside a voice turn. A [EventResult.NeedMore] response (e.g. the model wanting a client-tool
+     * round-trip) is valid but unhandled by ambient callers today - there is no open conversation
+     * to resume it on, so it's dropped rather than answered.
+     */
+    suspend fun postAmbientEvent(userState: UserState): EventResult =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject().apply {
+                put("event", JSONObject().apply {
+                    put("id", UUID.randomUUID().toString())
+                    put("timestamp", Instant.now().toString())
+                    put("type", "timestamp")
                 })
                 put("user_state", userState.toJson())
             }
@@ -481,6 +522,13 @@ object NovaApiClient {
                 confirmation = json.optString("confirmation").takeIf {
                     json.has("confirmation") && !json.isNull("confirmation")
                 },
+                scheduledDeparture = json.optJSONObject("scheduled_departure")?.let {
+                    ScheduledDeparture(
+                        destination = it.optString("destination").takeIf { d -> d.isNotBlank() },
+                        mode = it.optString("mode").takeIf { m -> m.isNotBlank() },
+                        leaveInMinutes = it.optDouble("leave_in_minutes"),
+                    )
+                },
             )
         }
     }
@@ -509,6 +557,8 @@ object NovaApiClient {
                 endIso = end,
                 description = input.optString("description")
                     .takeIf { input.has("description") && !input.isNull("description") },
+                location = input.optString("location")
+                    .takeIf { input.has("location") && !input.isNull("location") },
                 rrule = recurrence?.let { buildRrule(it) },
             )
         }
@@ -538,6 +588,8 @@ object NovaApiClient {
                     .takeIf { input.has("end_time") && !input.isNull("end_time") },
                 description = input.optString("description")
                     .takeIf { input.has("description") && !input.isNull("description") },
+                location = input.optString("location")
+                    .takeIf { input.has("location") && !input.isNull("location") },
                 rrule = recurrence?.let { buildRrule(it) },
             )
         }
@@ -619,6 +671,7 @@ object NovaApiClient {
         put("foreground_app", foregroundApp)
         put("current_events", currentEvents.toJsonArray())
         put("upcoming_events", upcomingEvents.toJsonArray())
+        put("preferred_travel_mode", preferredTravelMode)
     }
 
     private fun List<CalendarEventInfo>.toJsonArray(): JSONArray =
