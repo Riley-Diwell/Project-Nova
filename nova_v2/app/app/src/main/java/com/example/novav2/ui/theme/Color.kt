@@ -18,6 +18,12 @@ val NovaOnBackground = Color(0xFFECECF1)
 val NovaOnSurfaceMuted = Color(0xFFA6A6B0)
 val NovaError = Color(0xFFFF6B6B)
 
+// Signal-status semantics (StateScreen's chips) - separate from the blue brand accent above,
+// since "this needs attention" and "this is Nova's own colour" are different questions.
+// NovaError above doubles as the "critical" tone rather than adding a redundant fourth red.
+val NovaOk = Color(0xFF6FCF8E)
+val NovaWarn = Color(0xFFE0B44C)
+
 // M3 tokens the base darkColorScheme() otherwise fills in from its own baseline
 // palette (which leans purple) - set explicitly so nothing purple leaks through
 // on components we don't style directly (nav bar, cards, menus, etc).
