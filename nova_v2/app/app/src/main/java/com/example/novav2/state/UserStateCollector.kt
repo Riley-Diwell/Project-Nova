@@ -60,6 +60,7 @@ object UserStateCollector {
             foregroundApp = foregroundApp,
             currentEvents = calendarSnap?.currentEvents ?: emptyList(),
             upcomingEvents = calendarSnap?.upcomingEvents ?: emptyList(),
+            preferredTravelMode = TravelModePreference.get(context),
         )
     }
 }

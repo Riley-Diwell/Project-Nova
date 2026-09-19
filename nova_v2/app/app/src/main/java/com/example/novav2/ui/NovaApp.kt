@@ -112,11 +112,7 @@ fun NovaApp() {
                 )
             }
             composable(NovaDestination.Settings.route) {
-                SettingsScreen(
-                    profile = profile,
-                    onNameChange = { userName = it },
-                    onGoalChange = { dailyGoalMinutes = it }
-                )
+                SettingsScreen()
             }
         }
     }

@@ -21,18 +21,19 @@ sealed class NovaDestination(val route: String, val label: String, val icon: Ima
     data object Knowledge : NovaDestination("knowledge", "Map", Icons.Default.Hub)
     data object Audit : NovaDestination("audit", "Audit", Icons.Default.History)
     data object Device : NovaDestination("device", "Device", Icons.Default.Bluetooth)
-    data object Settings : NovaDestination("settings", "Profile", Icons.Default.Person)
+    data object Settings : NovaDestination("settings", "Settings", Icons.Default.Person)
 }
 
-// Dashboard and Profile are temporarily hidden from the bottom nav during the Phase 0/1 spike
-// (DESIGN.md §7) - the screens/routes still exist, just not linked here for now.
+// Dashboard and Device are still hidden from the bottom nav - the screens/routes exist, just not
+// linked here yet. Settings is re-enabled: it now carries the preferred-travel-mode setting
+// navigation_departure_time reads (see SettingsScreen.kt), so it needs to be reachable.
 val bottomNavDestinations = listOf(
 //    NovaDestination.Dashboard
     NovaDestination.Voice,
     NovaDestination.State,
     NovaDestination.Gain,
     NovaDestination.Knowledge,
-    NovaDestination.Audit
+    NovaDestination.Audit,
 //    NovaDestination.Device,
-//    NovaDestination.Settings
+    NovaDestination.Settings
 )

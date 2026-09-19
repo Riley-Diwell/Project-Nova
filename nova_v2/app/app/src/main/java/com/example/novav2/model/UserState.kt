@@ -45,4 +45,7 @@ data class UserState(
     // Rich calendar detail (additive - calendarCtx frozen-seam string unchanged above)
     val currentEvents: List<CalendarEventInfo> = emptyList(),
     val upcomingEvents: List<CalendarEventInfo> = emptyList(),
+    // Declared in Settings, not inferred - navigation_departure_time's default
+    // mode when the model doesn't name one. "transit" / "walking" / "driving".
+    val preferredTravelMode: String? = null,
 )
