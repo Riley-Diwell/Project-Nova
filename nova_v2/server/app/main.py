@@ -23,6 +23,7 @@ WHO USES THIS
 
 # import necessary libraries
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal
 from uuid import UUID
@@ -48,8 +49,52 @@ from app.store import memory
 from app.store import persona
 
 
+# On a fresh container, the first request to touch Persona was paying ~28s
+# inside persona_search, and the first to touch Supabase an extra ~550ms
+# inside episode_open - both are lazy singletons (get_store()/get_client())
+# that construct on first call rather than at import time, so whichever live
+# request happens to go first eats the one-time setup cost. Fine for a
+# long-lived process; bad on Cloud Run, which scales nova-v2 to zero when
+# idle, so this recurred on every cold start rather than only once.
+#
+# _warm_up pays that cost here instead, during container startup - Cloud
+# Run's startup probe waits for the app to come up before routing any real
+# traffic to it, so this delays "ready", not a user's turn.
+def _warm_up() -> None:
+    """Force-construct Persona's embedder and the Supabase client before the
+    server starts accepting requests. Non-fatal like every other Supabase/
+    persona touch in this codebase - an unconfigured or unreachable backend
+    must not stop the server from starting, it just leaves the cost where it
+    was (paid on first real use instead of here). Skipped under
+    NOVA_MOCK_LLM: local pipeline testing has no real Supabase/model to warm
+    and shouldn't be stuck waiting on a 1.2GB model load for it."""
+    if intent_surface.MOCK_LLM:
+        print("[warmup] NOVA_MOCK_LLM set - skipping persona/db warm-up")
+        return
+
+    # A trivial real read, not just constructing the client - create_client()
+    # mainly builds the Python wrapper and may not open the connection itself,
+    # so only an actual request pays the TLS/auth cost episode_open otherwise
+    # would. Goes through memory's own public API rather than naming the
+    # table directly, same boundary memory.py itself asks callers to respect.
+    start = time.perf_counter()
+    try:
+        memory.recent_all(1)
+        print(f"[warmup] Supabase connection ready ({(time.perf_counter() - start) * 1000:.0f}ms)")
+    except Exception as e:
+        print(f"[warmup] Supabase warm-up skipped: {e}")
+
+    start = time.perf_counter()
+    try:
+        persona.get_store()
+        print(f"[warmup] persona embedder ready ({(time.perf_counter() - start) * 1000:.0f}ms)")
+    except Exception as e:
+        print(f"[warmup] persona warm-up skipped: {e}")
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    _warm_up()
     # Shared with the notification_management tool (see intent_surface.py's
     # ToolRegistry) - without this, the tool has no batcher to query.
     batcher = NotificationBatcher()
