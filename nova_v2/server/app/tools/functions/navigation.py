@@ -161,6 +161,17 @@ class NavigationTool(BaseTool):
                             "anchor, e.g. 'get me downtown by 3pm'."
                         ),
                     },
+                    "event_title": {
+                        "type": "string",
+                        "description": (
+                            "That calendar entry's own title, copied verbatim - "
+                            "never invented or paraphrased. Same condition as "
+                            "minutes_until_start: only when the destination came "
+                            "from a calendar entry, left out otherwise. Not used "
+                            "for the travel calculation itself; it only lets the "
+                            "leave-soon notification name what the trip is for."
+                        ),
+                    },
                 },
                 "required": ["destination"],
             },

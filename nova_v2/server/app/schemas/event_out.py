@@ -28,10 +28,14 @@ class EventOut(BaseModel):
     # replies alongside its usual text/voice input, "open" if it's a question
     # but not one a Yes/No answer fits, None otherwise.
     confirmation: Literal["yes_no", "open"] | None = None
-    # {destination, mode, leave_in_minutes} when navigation_departure_time ran
-    # this turn and could measure a countdown - see intent_surface.py's
-    # TurnContext.scheduled_departure. Android schedules a precise local alarm
-    # against leave_in_minutes rather than waiting for the next ambient poll.
+    # {destination, mode, leave_in_minutes, minutes_until_start,
+    # event_title} when navigation_departure_time ran this turn and could
+    # measure a countdown - see intent_surface.py's
+    # TurnContext.scheduled_departure. Android schedules a precise local
+    # alarm against leave_in_minutes rather than waiting for the next
+    # ambient poll, and builds the leave-soon notification text itself from
+    # these fields - the model's speech is never used for it (see
+    # AmbientCheckRunner.kt).
     scheduled_departure: dict[str, Any] | None = None
 
 

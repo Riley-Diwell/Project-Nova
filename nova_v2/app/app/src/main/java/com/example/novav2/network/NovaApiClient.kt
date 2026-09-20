@@ -92,11 +92,21 @@ object NovaApiClient {
         ) : EventResult()
     }
 
-    /** Mirrors EventOut.scheduled_departure - {destination, mode, leave_in_minutes}. */
+    /** Mirrors EventOut.scheduled_departure - {destination, mode, leave_in_minutes,
+     * minutes_until_start, event_title}. */
     data class ScheduledDeparture(
         val destination: String?,
         val mode: String?,
         val leaveInMinutes: Double,
+        /** The commitment's own countdown - null for a destination with no calendar anchor
+         * (see intent_surface.py's WHEN TO LEAVE). [AmbientCheckRunner.kt]'s notification text
+         * needs both this and [leaveInMinutes], since a bare "leave in N minutes" doesn't say
+         * what for. */
+        val minutesUntilStart: Double?,
+        /** That calendar entry's own title, copied verbatim server-side - never model-phrased.
+         * Same null condition as [minutesUntilStart]. Falls back to [destination] in the
+         * notification text when absent (see AmbientCheckRunner.kt's leaveSoonText). */
+        val eventTitle: String?,
     )
 
     /**
@@ -550,6 +560,9 @@ object NovaApiClient {
                         destination = it.optString("destination").takeIf { d -> d.isNotBlank() },
                         mode = it.optString("mode").takeIf { m -> m.isNotBlank() },
                         leaveInMinutes = it.optDouble("leave_in_minutes"),
+                        minutesUntilStart = it.optDouble("minutes_until_start")
+                            .takeIf { v -> !v.isNaN() },
+                        eventTitle = it.optString("event_title").takeIf { t -> t.isNotBlank() },
                     )
                 },
             )

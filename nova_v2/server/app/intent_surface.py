@@ -147,17 +147,19 @@ SYSTEM_PROMPT = (
     "Also pass that entry's own minutes_until_start straight through as the "
     "tool's minutes_until_start - copy the number, never convert it - so Nova "
     "can schedule a precise alert for the real leave-by moment rather than "
-    "only answering right now. Leave minutes_until_start out for a "
-    "destination with no calendar anchor. "
+    "only answering right now. Pass the entry's title the same way, as "
+    "event_title - copy it verbatim, never paraphrase or invent one. Leave "
+    "both out for a destination with no calendar anchor. "
     "If that entry has no location, say you don't have one for it rather than "
     "guessing. This also covers 'which way do I walk' when they're already "
     "there - call navigation_departure_time with mode 'walking'. On an ambient "
-    "event (nobody spoke - a timer or a location change), this is the one "
-    "case worth breaking silence for: if navigation_departure_time is "
-    "available, call it for the next commitment and only speak if it says "
-    "leaving is imminent - a comfortable answer is not worth interrupting for. "
-    "If it reports the user has already arrived, that is not imminent either - "
-    "stay quiet on an ambient event, but say so plainly if they asked directly. "
+    "event (nobody spoke - a timer or a location change), call "
+    "navigation_departure_time for the next commitment when one is available "
+    "- but leave speech empty regardless of what it reports (imminent, "
+    "comfortable, already arrived, whatever). The device builds the leave-soon "
+    "nudge itself from the tool's own numbers, not from anything you say, so "
+    "there is nothing to phrase - just call the tool and return \"\". Only "
+    "answer about leaving out loud when the user asked directly (a voice turn). "
     "TIMERS AND ALARMS. Call set_timer for a countdown with no clock time "
     "named - 'set a timer for 10 minutes', 'ping me in 90 seconds' - "
     "converting whatever they said into whole duration_seconds yourself (10 "
@@ -359,10 +361,12 @@ class TurnContext:
     episode_id: str | None = None
 
     # Set when navigation_departure_time ran this turn and returned a
-    # leave_in_minutes - {destination, mode, leave_in_minutes}. Carried
-    # separately from `actions` because that records the tool's *input*, not
-    # its *result*, and this is the one result Android needs structured
-    # rather than folded into speech (see the tool loop below).
+    # leave_in_minutes - {destination, mode, leave_in_minutes,
+    # minutes_until_start, event_title}. Carried separately from `actions`
+    # because that records the tool's *input*, not its *result*, and this is
+    # the one result Android needs structured rather than folded into speech
+    # (see the tool loop below) - it builds the leave-soon notification text
+    # itself from these fields instead of trusting the model to phrase it.
     scheduled_departure: dict[str, Any] | None = None
 
     @property
@@ -1014,6 +1018,13 @@ def _run_loop(
                             "destination": result.get("destination"),
                             "mode": result.get("mode"),
                             "leave_in_minutes": result["leave_in_minutes"],
+                            # The commitment's own countdown and title, as passed into the
+                            # tool call (see SYSTEM_PROMPT's WHEN TO LEAVE) - carried through
+                            # so Android can fill "you have X in N minutes" without asking the
+                            # model to phrase it. Both None for a destination with no calendar
+                            # anchor.
+                            "minutes_until_start": block.input.get("minutes_until_start"),
+                            "event_title": block.input.get("event_title"),
                         }
                     tool_results.append({
                         "type": "tool_result",
