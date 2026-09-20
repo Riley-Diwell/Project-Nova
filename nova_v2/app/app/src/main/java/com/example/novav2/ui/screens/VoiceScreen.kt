@@ -206,18 +206,31 @@ private fun MessageBubble(message: ChatMessage) {
 }
 
 /**
- * Nova's side of the thread while a turn is in flight or something needs saying that isn't a
- * real reply (listening, sending, a recognizer miss…) - the same bubble a finished reply would
- * use, so the transcript never has a second, differently-styled place to look for what's
- * happening. Replaces what used to be a fixed "Nova is thinking…" bubble plus a separate
- * caption below the chat - one indicator, driven by whatever `statusText` currently says.
+ * A turn in flight or something needing saying that isn't a real reply (listening, sending, a
+ * recognizer miss…) - the same bubble shape a finished reply would use, so the transcript never
+ * has a second, differently-styled place to look for what's happening. Replaces what used to be
+ * a fixed "Nova is thinking…" bubble plus a separate caption below the chat - one indicator,
+ * driven by whatever `statusText` currently says. Defaults to Nova's side; `fromUser` moves it
+ * to the user's side (e.g. "Listening…", which describes what the user is doing, not Nova).
  */
 @Composable
-private fun PendingStatusBubble(text: String) {
-    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+private fun PendingStatusBubble(text: String, fromUser: Boolean = false) {
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = if (fromUser) Alignment.CenterEnd else Alignment.CenterStart,
+    ) {
         Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomEnd = 16.dp, bottomStart = 4.dp),
+            color = if (fromUser) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            shape = RoundedCornerShape(
+                topStart = 16.dp,
+                topEnd = 16.dp,
+                bottomStart = if (fromUser) 16.dp else 4.dp,
+                bottomEnd = if (fromUser) 4.dp else 16.dp,
+            ),
         ) {
             Text(
                 text = text,
@@ -633,7 +646,7 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
         if (messages.isEmpty()) {
             Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 if (statusText.isNotBlank()) {
-                    PendingStatusBubble(statusText)
+                    PendingStatusBubble(statusText, fromUser = voiceState == VoiceState.LISTENING)
                 } else {
                     Text(
                         text = "Say something or type a message to get started.",
@@ -665,7 +678,7 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
                 }
                 if (statusText.isNotBlank()) {
                     item(key = "status-indicator") {
-                        PendingStatusBubble(statusText)
+                        PendingStatusBubble(statusText, fromUser = voiceState == VoiceState.LISTENING)
                     }
                 }
             }

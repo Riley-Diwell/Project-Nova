@@ -100,13 +100,15 @@ SYSTEM_PROMPT = (
     "for example, never say \"I'll remember that\" unless the memory tool "
     "actually ran. Acknowledge what they said without promising an action "
     "that did not happen. "
-    "For ambient events - a notification arriving, a calendar trigger - staying "
-    "quiet is usually right, and quiet means an empty string, never a "
-    "description of the event that triggered you. The user never sees the "
-    "event JSON, only your words, so if nothing is worth interrupting for, do "
-    "not explain what kind of event happened or that no action was needed "
-    "(never say something like \"this is a timestamp event with no user "
-    "action\") - just return \"\". But if the user is speaking to you directly and "
+    "For ambient events - a notification arriving, a calendar trigger - stay "
+    "quiet, and quiet means an empty string, never a description of the "
+    "event that triggered you. The user never sees the event JSON, only "
+    "your words, so do not explain what kind of event happened, that no "
+    "action was needed, or that you decided not to interrupt - any sentence "
+    "describing your own silence is the same mistake as describing the "
+    "event itself (never say things like \"this is a timestamp event with "
+    "no user action\" or \"no interruption warranted\" or \"nothing to "
+    "report\") - just return \"\". But if the user is speaking to you directly and "
     "you cannot do what they asked, never return an empty string: say briefly "
     "that you're not sure and why (for example: \"I'm not sure - I don't have a "
     "way to add calendar events yet.\"). Check the memory tool and the sources "
@@ -215,7 +217,10 @@ GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
         "Reverse-geocodes the user's current coordinates (from their "
         "location_ctx in user_state) into a human-readable address. Call "
         "this when the user asks where they are - never speak raw "
-        "lat/lng coordinates aloud."
+        "lat/lng coordinates aloud. On success, relay the result's own "
+        "'spoken' line rather than composing your own - it is a GPS fix "
+        "snapped to the nearest known address, not a confirmed exact "
+        "location, so it is phrased as 'near', never 'at'."
     ),
     "input_schema": {
         "type": "object",
@@ -531,7 +536,18 @@ def _reverse_geocode(location_ctx: str | None) -> dict[str, Any]:
         )
         data = r.json()
         if data.get("status") == "OK" and data.get("results"):
-            return {"success": True, "address": data["results"][0]["formatted_address"]}
+            address = data["results"][0]["formatted_address"]
+            # "near", not "at" - this is a reverse-geocoded GPS fix, which even at
+            # fine accuracy snaps to the nearest known address point rather than
+            # confirming the user is standing at that exact spot. Every other local
+            # tool hands the model a ready-made "spoken" line for this reason (see
+            # navigation.py/memory_tool.py); this one didn't, so the model was free
+            # to phrase it as flatly certain ("You're at ...").
+            return {
+                "success": True,
+                "address": address,
+                "spoken": f"You're near {address}.",
+            }
         return {
             "success": False,
             "error": f"geocode status: {data.get('status')}",
@@ -925,12 +941,25 @@ def _run_loop(
         response = client.messages.create(
             model=MODEL,
             max_tokens=1024,
-            system=SYSTEM_PROMPT,
+            # Ephemeral breakpoint caches the tools list + this static prompt as
+            # one prefix - identical across every iteration of a turn and across
+            # turns that share the same authorised tool set, so only the first
+            # call in a cache window pays full input-token price for it.
+            system=[
+                {
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ],
             tools=tools,
             messages=messages,
         )
         print(f"[loop] stop_reason={response.stop_reason!r} "
               f"blocks={[b.type for b in response.content]!r}")
+        print(f"[loop] cache_creation={response.usage.cache_creation_input_tokens} "
+              f"cache_read={response.usage.cache_read_input_tokens} "
+              f"input={response.usage.input_tokens}")
 
         # finished reasoning
         if response.stop_reason == "end_turn":
