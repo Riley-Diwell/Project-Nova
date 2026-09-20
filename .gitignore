@@ -8,6 +8,7 @@ __pycache__/
 venv/
 .ruff_cache/
 uvicorn.log
+nova_v2/server/deploy.ps1
 
 creative_selection/silent_speech/.venv
 creative_selection/silent_speech/run_demo.sh
