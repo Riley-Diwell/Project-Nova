@@ -11,6 +11,8 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -36,12 +38,11 @@ import com.example.novav2.ui.screens.StateScreen
 import com.example.novav2.ui.screens.VoiceScreen
 
 @Composable
-fun NovaApp() {
+fun NovaApp(assistRequested: MutableState<Boolean> = mutableStateOf(false)) {
     // TODO: re-enable onboarding gate - skipped for now to speed up dev iteration.
     var onboardingComplete by rememberSaveable { mutableStateOf(true) }
     var userName by rememberSaveable { mutableStateOf("") }
     var dailyGoalMinutes by rememberSaveable { mutableIntStateOf(120) }
-    var deviceConnected by rememberSaveable { mutableStateOf(false) }
 
     val profile = UserProfile(name = userName, dailyGoalMinutes = dailyGoalMinutes)
 
@@ -58,6 +59,16 @@ fun NovaApp() {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
+
+    LaunchedEffect(assistRequested.value) {
+        if (assistRequested.value) {
+            navController.navigate(NovaDestination.Voice.route) {
+                popUpTo(navController.graph.findStartDestination().id) { saveState = false }
+                launchSingleTop = true
+            }
+            assistRequested.value = false
+        }
+    }
 
     Scaffold(
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
@@ -106,10 +117,7 @@ fun NovaApp() {
                 AuditLogScreen()
             }
             composable(NovaDestination.Device.route) {
-                DeviceScreen(
-                    connected = deviceConnected,
-                    onToggleConnected = { deviceConnected = !deviceConnected }
-                )
+                DeviceScreen()
             }
             composable(NovaDestination.Settings.route) {
                 SettingsScreen()

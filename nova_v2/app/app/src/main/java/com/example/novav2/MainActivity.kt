@@ -8,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
 import com.example.novav2.service.SignalMonitorService
 import com.example.novav2.ui.NovaApp
@@ -16,6 +17,11 @@ import com.example.novav2.ui.theme.NovaTheme
 class MainActivity : ComponentActivity() {
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op either way */ }
+
+    // singleTask (see manifest) means the power-button assist gesture reuses this instance via
+    // onNewIntent() instead of creating a new one, so a plain intent.action check in onCreate
+    // would miss that case - this flag is how NovaApp() jumps back to Voice when it fires.
+    private val assistRequested = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,8 +34,16 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             NovaTheme {
-                NovaApp()
+                NovaApp(assistRequested = assistRequested)
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == Intent.ACTION_ASSIST) {
+            assistRequested.value = true
         }
     }
 }

@@ -4,4 +4,15 @@
     <style name="Theme.NovaV2" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/nova_background</item>
     </style>
+
+    <!-- AssistTrampolineActivity's theme - fully invisible, so the assist gesture never flashes
+         a frame on screen while it decides whether to listen headlessly or fall back to opening
+         MainActivity. -->
+    <style name="Theme.Transparent" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
 </resources>

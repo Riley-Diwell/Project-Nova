@@ -15,6 +15,7 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -33,12 +34,43 @@
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.NovaV2"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- No ACTION_ASSIST filter here on purpose - AssistTrampolineActivity is the real
+                 assist target (see below) so the gesture never has to draw MainActivity's normal
+                 UI at all. It only reaches MainActivity, explicitly and with this same action,
+                 as the trampoline's fallback when it can't listen headlessly (see
+                 AssistTrampolineActivity and onNewIntent() below) - singleTask above keeps that
+                 fallback from stacking a second instance if Nova is already running. -->
+        </activity>
+
+        <!-- The phone's actual "Digital assistant app" target (Settings > Apps > Default apps).
+             Theme.Transparent + noHistory: it never draws a visible frame, it just decides
+             whether AssistVoiceService can listen headlessly or MainActivity needs to open as a
+             fallback - see AssistTrampolineActivity.kt. taskAffinity="" is load-bearing: without
+             it, this defaults to the same affinity as MainActivity (same app, no override), so
+             if a MainActivity instance is already resident the system places this activity in
+             MainActivity's own task instead of a fresh one - finish() then reveals MainActivity
+             sitting right underneath it, which looks exactly like "the app opened" even though
+             nothing here ever asked for that. -->
+        <activity
+            android:name=".AssistTrampolineActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Transparent">
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
@@ -54,6 +86,11 @@
             android:name=".service.SignalMonitorService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name=".service.AssistVoiceService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
     </application>
 
 </manifest>
