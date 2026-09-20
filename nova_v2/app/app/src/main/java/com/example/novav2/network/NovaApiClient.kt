@@ -70,6 +70,12 @@ object NovaApiClient {
             /** delete_calendar_event Actions this turn - always confirm with the user before
              * calling [com.example.novav2.state.CalendarWriter.deleteEvent] with these. */
             val deleteActions: List<DeleteCalendarAction>,
+            /** set_timer Actions this turn - fired immediately via
+             * [com.example.novav2.state.AlarmIntents.setTimer], no confirmation needed. */
+            val timerActions: List<TimerAction>,
+            /** set_alarm Actions this turn - fired immediately via
+             * [com.example.novav2.state.AlarmIntents.setAlarm], no confirmation needed. */
+            val alarmActions: List<AlarmAction>,
             /** Names the Episode this turn wrote, for [postOutcome]. Absent if Memory was unreachable. */
             val episodeId: String?,
             val confirmation: String?,
@@ -132,6 +138,21 @@ object NovaApiClient {
         val description: String?,
         val location: String?,
         val rrule: String?,
+    )
+
+    /** A set_timer Action - fires [com.example.novav2.state.AlarmIntents.setTimer] the moment it
+     * arrives, same fire-and-forget shape as [CalendarAction]. */
+    data class TimerAction(
+        val durationSeconds: Int,
+        val label: String?,
+    )
+
+    /** A set_alarm Action - fires [com.example.novav2.state.AlarmIntents.setAlarm] the moment it
+     * arrives. [hour]/[minute] are the user's local wall clock, as resolved server-side. */
+    data class AlarmAction(
+        val hour: Int,
+        val minute: Int,
+        val label: String?,
     )
 
     /** Posts a voice transcript + [UserState] snapshot to /event and returns the spoken reply. */
@@ -518,6 +539,8 @@ object NovaApiClient {
                 actions = json.optJSONArray("actions")?.toCalendarActions().orEmpty(),
                 editActions = json.optJSONArray("actions")?.toEditCalendarActions().orEmpty(),
                 deleteActions = json.optJSONArray("actions")?.toDeleteCalendarActions().orEmpty(),
+                timerActions = json.optJSONArray("actions")?.toTimerActions().orEmpty(),
+                alarmActions = json.optJSONArray("actions")?.toAlarmActions().orEmpty(),
                 episodeId = json.optString("episode_id").takeIf { it.isNotBlank() },
                 confirmation = json.optString("confirmation").takeIf {
                     json.has("confirmation") && !json.isNull("confirmation")
@@ -608,6 +631,41 @@ object NovaApiClient {
             val title = input.optString("title")
             if (title.isBlank()) return@mapNotNull null
             DeleteCalendarAction(eventId = input.optLong("event_id"), title = title)
+        }
+
+    /**
+     * set_timer Actions, picked out the same way as the calendar ones above - only ran=true,
+     * since ran=false was refused by that tool's gain and must not be carried out.
+     */
+    private fun JSONArray.toTimerActions(): List<TimerAction> =
+        (0 until length()).mapNotNull { i ->
+            val obj = optJSONObject(i) ?: return@mapNotNull null
+            if (obj.optString("tool") != "set_timer") return@mapNotNull null
+            if (!obj.optBoolean("ran", false)) return@mapNotNull null
+            val input = obj.optJSONObject("input") ?: return@mapNotNull null
+            if (!input.has("duration_seconds") || input.isNull("duration_seconds")) return@mapNotNull null
+            TimerAction(
+                durationSeconds = input.optInt("duration_seconds"),
+                label = input.optString("label").takeIf { input.has("label") && !input.isNull("label") },
+            )
+        }
+
+    /**
+     * set_alarm Actions, picked out the same way - only ran=true.
+     */
+    private fun JSONArray.toAlarmActions(): List<AlarmAction> =
+        (0 until length()).mapNotNull { i ->
+            val obj = optJSONObject(i) ?: return@mapNotNull null
+            if (obj.optString("tool") != "set_alarm") return@mapNotNull null
+            if (!obj.optBoolean("ran", false)) return@mapNotNull null
+            val input = obj.optJSONObject("input") ?: return@mapNotNull null
+            if (!input.has("hour") || input.isNull("hour")) return@mapNotNull null
+            if (!input.has("minute") || input.isNull("minute")) return@mapNotNull null
+            AlarmAction(
+                hour = input.optInt("hour"),
+                minute = input.optInt("minute"),
+                label = input.optString("label").takeIf { input.has("label") && !input.isNull("label") },
+            )
         }
 
     /**

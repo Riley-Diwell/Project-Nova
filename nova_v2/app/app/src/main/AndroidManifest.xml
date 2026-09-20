@@ -17,6 +17,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Normal protection level, granted at install with no runtime prompt. Required for
+         AlarmClock's EXTRA_SKIP_UI to actually skip the Clock app's confirmation screen when
+         AlarmIntents.kt fires set_timer/set_alarm - without it the OS shows the screen anyway. -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
     <application
         android:allowBackup="true"

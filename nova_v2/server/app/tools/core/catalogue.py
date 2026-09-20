@@ -15,6 +15,7 @@ from typing import Optional
 
 from app.control.gain.gain_store import GainStore
 from app.tools.core.registry import ToolRegistry
+from app.tools.functions.alarm_tool import SetAlarmTool, SetTimerTool
 from app.tools.functions.calendar_tool import (
     AddCalendarEventTool,
     CalendarTool,
@@ -62,4 +63,8 @@ def build_registry(gain_store: Optional[GainStore] = None) -> ToolRegistry:
     registry.register(AddCalendarEventTool())
     registry.register(EditCalendarEventTool())
     registry.register(DeleteCalendarEventTool())
+    # Same fire-and-forget shape as the calendar writes above, just handed to
+    # the Clock app instead of the Calendar Provider - see alarm_tool.py.
+    registry.register(SetTimerTool())
+    registry.register(SetAlarmTool())
     return registry

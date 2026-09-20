@@ -81,6 +81,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.novav2.model.ChatMessage
 import com.example.novav2.network.NovaApiClient
+import com.example.novav2.state.AlarmIntents
 import com.example.novav2.state.CalendarSignal
 import com.example.novav2.state.CalendarWriter
 import com.example.novav2.state.DepartureAlarmScheduler
@@ -482,6 +483,14 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
                     // Appended, not replaced - a dialog already awaiting an earlier turn's answer
                     // must not be dropped by a new one arriving.
                     pendingDeleteConfirmations = pendingDeleteConfirmations + deleteActions
+                }
+                // set_timer/set_alarm actions - fire-and-forget like the calendar writes above,
+                // no permission prompt needed (see AlarmIntents.kt).
+                finalResult?.timerActions.orEmpty().forEach {
+                    AlarmIntents.setTimer(context, it.durationSeconds, it.label)
+                }
+                finalResult?.alarmActions.orEmpty().forEach {
+                    AlarmIntents.setAlarm(context, it.hour, it.minute, it.label)
                 }
                 // Asking once sets up the reminder for later, too - not just an answer read out
                 // now. Same mechanism SignalMonitorService's ambient checks use.
