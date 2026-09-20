@@ -18,8 +18,9 @@ import kotlin.coroutines.resume
  * and duplicating that here would just be a second, possibly-disagreeing answer to the same
  * question.
  *
- * Cached by the exact "lat,lng" string, since LocationSignal already rounds to ~100m - a phone
- * that hasn't moved re-snapshots the same string every 10s and shouldn't re-geocode it.
+ * Cached by the exact "lat,lng" string, since LocationSignal already rounds to ~11m (well under
+ * GPS jitter) - a phone that hasn't moved re-snapshots the same string every 10s and shouldn't
+ * re-geocode it.
  */
 object PlaceNameLookup {
     private val cache = mutableMapOf<String, String?>()

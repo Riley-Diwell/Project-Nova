@@ -278,6 +278,7 @@ fun StateScreen() {
                         Manifest.permission.READ_CALENDAR,
                         Manifest.permission.ACTIVITY_RECOGNITION,
                         Manifest.permission.ACCESS_COARSE_LOCATION,
+                        Manifest.permission.ACCESS_FINE_LOCATION,
                         Manifest.permission.READ_PHONE_STATE,
                     )
                 )
