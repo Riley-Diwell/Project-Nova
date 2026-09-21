@@ -16,8 +16,7 @@ object SignalRepository {
     // How often SignalMonitorService posts an ambient Event (see its own doc comment). Lives
     // here, not there, because this is the one fact both the service (schedules against it) and
     // StateScreen's debug countdown (renders against it) need to agree on.
-    // TEMP for testing: 1 minute instead of the real 10 - revert before this ships.
-    const val AMBIENT_CHECK_INTERVAL_MILLIS = 1 * 60 * 1000L
+    const val AMBIENT_CHECK_INTERVAL_MILLIS = 10 * 60 * 1000L
 
     private val _nextAmbientCheckAtMillis = MutableStateFlow<Long?>(null)
     /** Epoch millis of the next ambient check - debug-only, for StateScreen's countdown circle.
