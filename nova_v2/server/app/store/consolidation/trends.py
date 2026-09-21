@@ -37,7 +37,7 @@ from app.tools.core.action import Action
 # here becomes the signal "<tool>:<field>".
 COUNTED_ACTION_FIELDS: dict[str, list[str]] = {
     "navigation_departure_time": ["destination"],
-    "notification_management": ["decision", "action"],
+    "notification_management": ["action"],
 }
 
 # Event fields worth counting, as {event_type: [field, ...]} -> "<type>:<field>".

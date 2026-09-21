@@ -28,21 +28,15 @@ Interfaces with the notification batcher (notification_batcher.py).
        - current_events contains "lecture" or "tutorial" ending soon
        - location changed (user just left campus)
        - time is a known break point (end of a class hour)
-       - heart rate dropped (user relaxed after a stressful period)
 
-     proposal = dispatcher.dispatch_proactive(
-         "notification_management",
-         {"action": "query"},
-         state_confidence=0.8,
-     )
-     if proposal.proposed:
-         # V1: always ask the user first
-         if user_said_yes:
-             dispatcher.confirm_proactive("notification_management",
-                                          {"action": "query"})
-             reinforcer.reinforce("notification_management", Outcome.ACCEPTED)
-         else:
-             reinforcer.reinforce("notification_management", Outcome.REJECTED)
+     There is no separate propose/confirm step any more (see
+     control/controller.py) - the Controller decides, before the model runs,
+     whether this turn's gain x error x confidence clears FIRING_THRESHOLD. If
+     it does, "notification_management" is simply among the tools the model is
+     offered this turn and it calls it like any other; if not, the tool is
+     absent and calling it is not something the model can even attempt. Once
+     the user's outcome is known, reinforcer.reinforce("notification_management",
+     Outcome.ACCEPTED | REJECTED) moves the learned gain for next time.
 
 THE THREE ACTIONS (subfunctions)
   "query"
@@ -238,9 +232,8 @@ def _query(batcher: NotificationBatcher | None) -> dict:
 
 
 def _snooze(batcher: NotificationBatcher | None, minutes: int) -> dict:
-    # Set batch window temporarily next delivery after N minutes
     if batcher:
-        batcher.BATCH_WINDOW_MINUTES = minutes
+        batcher.snooze(minutes)
     spoken = f"Notifications snoozed for {minutes} minutes."
     return {"success": True, "snoozed_minutes": minutes, "spoken": spoken}
 

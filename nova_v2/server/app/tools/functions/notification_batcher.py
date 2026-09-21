@@ -1,9 +1,10 @@
 """
 This sits between whatever generates notifications (calendar, messages, apps)
-and whatever outputs them (LED ring via hardware_bridge, future display).
+and whatever outputs them (currently: notification_management.py's spoken
+summaries; a future display could subscribe the same way).
 
 Ported from the standalone notification_batcher/ prototype - the LED/serial
-hardware bridge and urgency_classifier pieces of that prototype depend on
+hardware bridge and urgency_classifier pieces of that prototype depended on
 hardware and intent-surface scripts that no longer exist, so only the
 batcher itself (used by tools/notification_management.py) came along.
 """
@@ -11,7 +12,7 @@ batcher itself (used by tools/notification_management.py) came along.
 import time
 import threading
 from dataclasses import dataclass, field
-from typing import List, Optional, Callable
+from typing import List, Optional
 from enum import Enum
 
 
@@ -50,7 +51,6 @@ class NotificationBatcher:
     """
     Holds all incoming notifications and decides when to surface them.
         batcher = NotificationBatcher()
-        batcher.set_led_callback(bridge.send_led_command)  # optional
         batcher.start()
 
         # Add a notification from anywhere
@@ -80,22 +80,33 @@ class NotificationBatcher:
         self._lock = threading.Lock()
         self._mode = Mode.DEFAULT
         self._running = False
-        self._led_callback: Optional[Callable] = None  # send_led_command from bridge
 
         # Tracks when the last batch was delivered
         self._last_batch_time = time.time()
+
+        # Set by snooze(); the automatic batch-ready delivery in _timer_loop
+        # stays quiet while time.time() is before this. None means not snoozed.
+        self._snoozed_until: Optional[float] = None
 
         # Tracks pending intent surface touch (set by hardware bridge)
         self._user_checking_in = threading.Event()
 
     #Public API
 
-    def set_led_callback(self, fn: Callable):
+    def snooze(self, minutes: float) -> None:
         """
-        Pass hardware_bridge.send_led_command here so the batcher can
-        update the LED ring whenever notification state changes.
+        Suppress the automatic batch-ready delivery for the next `minutes`
+        minutes. An explicit query/acknowledge still answers normally in the
+        meantime - "don't interrupt me" is a different ask from "don't answer
+        if I check". Replaces any earlier snooze outright (doesn't stack), so
+        asking to snooze twice takes the later deadline at face value, and
+        expires back to normal delivery on its own rather than needing a
+        separate "unsnooze" call.
         """
-        self._led_callback = fn
+        self._snoozed_until = time.time() + minutes * 60
+
+    def _is_snoozed(self) -> bool:
+        return self._snoozed_until is not None and time.time() < self._snoozed_until
 
     def set_mode(self, mode: str):
         """
@@ -117,8 +128,6 @@ class NotificationBatcher:
             print("[BATCHER] mode exit — triggering batch delivery")
             self._user_checking_in.set()
 
-        self._update_led()
-
     def add_notification(self, notification: Notification):
         """
         Add a notification to the queue.
@@ -128,8 +137,6 @@ class NotificationBatcher:
             if notification.urgency == Urgency.CRITICAL:
                 print(f"[BATCHER] CRITICAL — bypassing queue: {notification.summary}")
                 notification.delivered = True
-                # Still goes through LED so the user sees something
-                self._fire_led_immediate()
                 # In a real system, this would also wake a display or haptic
                 return
 
@@ -171,7 +178,6 @@ class NotificationBatcher:
             self._queue = [n for n in self._queue
                            if not n.delivered or n.age_minutes() < 60]
         self._last_batch_time = time.time()
-        self._update_led()
         print(f"[BATCHER] acknowledged {len(batch)} notifications")
 
     def get_summary(self) -> dict:
@@ -214,28 +220,12 @@ class NotificationBatcher:
         return True  # default mode: deliver everything
 
     def _highest_urgency(self, notifications: List[Notification]) -> str:
-        """Returns the highest urgency level in a list (for LED colour)."""
+        """Returns the highest urgency level in a list, for get_summary()."""
         order = [Urgency.CRITICAL, Urgency.HIGH, Urgency.LOW, Urgency.AMBIENT]
         for u in order:
             if any(n.urgency == u for n in notifications):
                 return u.value
         return "none"
-
-    def _update_led(self):
-        """Tell the LED ring what to show based on current state."""
-        if not self._led_callback:
-            return
-        with self._lock:
-            pending = [n for n in self._queue
-                       if not n.delivered and self._is_deliverable(n)]
-            count   = len(pending)
-            urgency = self._highest_urgency(pending) if pending else "none"
-        self._led_callback(self._mode.value, count, urgency)
-
-    def _fire_led_immediate(self):
-        """Immediate LED flash for CRITICAL notifications."""
-        if self._led_callback:
-            self._led_callback("default", 1, "critical")
 
     def _timer_loop(self):
         """
@@ -256,10 +246,14 @@ class NotificationBatcher:
                 pending_low = [n for n in self._queue
                                if not n.delivered and n.urgency == Urgency.LOW]
 
-            # Deliver if: user checked in, OR batch window elapsed in default mode
+            # Deliver if: user checked in (an explicit ask to see what's
+            # waiting, so snooze doesn't hold this one back), OR the batch
+            # window elapsed in default mode and snooze isn't currently
+            # suppressing that automatic push.
             should_deliver = (
                 triggered or
-                (self._mode == Mode.DEFAULT and
+                (not self._is_snoozed() and
+                 self._mode == Mode.DEFAULT and
                  minutes_elapsed >= self.BATCH_WINDOW_MINUTES and
                  pending_low)
             )
