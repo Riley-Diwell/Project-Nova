@@ -15,8 +15,24 @@
     "value": 0.35,
     "override": null
   },
+  "edit_calendar_event": {
+    "value": 0.3,
+    "override": null
+  },
+  "delete_calendar_event": {
+    "value": 0.2,
+    "override": null
+  },
   "get_calendar_range": {
     "value": 0.3,
+    "override": null
+  },
+  "set_timer": {
+    "value": 0.3,
+    "override": null
+  },
+  "set_alarm": {
+    "value": 0.25,
     "override": null
   }
 }
