@@ -30,6 +30,7 @@ import com.example.novav2.state.CalendarSignal
 import com.example.novav2.state.CalendarWriter
 import com.example.novav2.state.DepartureAlarmScheduler
 import com.example.novav2.state.UserStateCollector
+import com.example.novav2.state.parseIsoToEpochMillis
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,9 +38,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.net.SocketTimeoutException
-import java.time.Instant
-import java.time.LocalDateTime
-import java.time.ZoneId
 import java.time.format.DateTimeParseException
 import java.util.Locale
 
@@ -301,14 +299,3 @@ class AssistVoiceService : Service() {
         private const val NOTIFICATION_ID = 44
     }
 }
-
-/**
- * Same fallback as VoiceScreen.kt's parseIsoToEpochMillis: the backend's get_calendar_range tool
- * is asked for UTC ISO 8601, but it's LLM-produced input, not a validated wire contract.
- */
-private fun parseIsoToEpochMillis(iso: String): Long =
-    try {
-        Instant.parse(iso).toEpochMilli()
-    } catch (e: DateTimeParseException) {
-        LocalDateTime.parse(iso).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-    }

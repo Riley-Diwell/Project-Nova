@@ -86,30 +86,16 @@ import com.example.novav2.state.CalendarSignal
 import com.example.novav2.state.CalendarWriter
 import com.example.novav2.state.DepartureAlarmScheduler
 import com.example.novav2.state.UserStateCollector
+import com.example.novav2.state.parseIsoToEpochMillis
 import com.example.novav2.viewmodel.ChatViewModel
 import kotlinx.coroutines.launch
 import java.io.IOException
-import java.time.Instant
-import java.time.LocalDateTime
-import java.time.ZoneId
 import java.time.format.DateTimeParseException
 import java.util.Locale
 
 private enum class VoiceState { IDLE, LISTENING, THINKING, SPEAKING }
 
 private val NovaMicBlue = Color(0xFF487EE4)
-
-/**
- * The backend's get_calendar_range tool is asked to return UTC ISO 8601 (with a 'Z'), but
- * it's LLM-produced input, not a validated wire contract - fall back to treating a bare/
- * offset-less string as the device's local time rather than crashing the round trip.
- */
-private fun parseIsoToEpochMillis(iso: String): Long =
-    try {
-        Instant.parse(iso).toEpochMilli()
-    } catch (e: DateTimeParseException) {
-        LocalDateTime.parse(iso).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-    }
 
 /**
  * Executes the backend's queued "calendar.create_event" actions (add_calendar_event in
