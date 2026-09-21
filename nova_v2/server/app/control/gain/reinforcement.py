@@ -61,7 +61,7 @@ class Reinforcer:
 
         Raises KeyError if 'name' isn't a registered Function tool.
         """
-        self._require_registered(name)
+        self.registry.require(name)
         gain = self.registry.get_gain(name)
         new_value = gain.adjust(_DELTA[outcome])
 
@@ -69,15 +69,3 @@ class Reinforcer:
             self.gain_store.save(gain)
 
         return new_value
-
-    def _require_registered(self, name: str) -> None:
-        """
-        Make sure this tool has a gain.
-
-        Only registered Function tools
-        can learn from feedback.
-        """
-        if not self.registry.has(name):
-            raise KeyError(
-                f"'{name}' is not a registered Function tool. "
-            )

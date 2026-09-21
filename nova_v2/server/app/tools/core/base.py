@@ -89,6 +89,7 @@ class BaseTool(ABC):
     @abstractmethod
     def _execute(self, tool_input: dict[str, Any]) -> Any:
         """
-        TODO: Implement function here.
+        The Function's actual logic. Every subclass overrides this; invoke()
+        is the only thing that ever calls it.
         """
         raise NotImplementedError

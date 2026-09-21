@@ -1,12 +1,8 @@
 """
 Registry for Nova's Function tools.
 
-The registry stores the three main Nova Functions:
-    - Function 1
-    - Function 2
-    - Function 3
-
-Each Function tool is registered with its controller gain.
+The registry stores every registered Function tool (see tools/core/catalogue.py
+for the current list), each with its controller gain.
 
 BaseTool only contains the tool itself:
 - name
@@ -90,6 +86,17 @@ class ToolRegistry:
         - Context tools (no gain)
         """
         return name in self._entries
+
+    def require(self, name: str) -> None:
+        """
+        Raise KeyError if `name` isn't a registered Function tool.
+
+        The one check every caller that needs a real tool by name shares
+        (Dispatcher, Reinforcer, GainOverrides) - hoisted here so "is this a
+        real tool" has one definition instead of three identical copies.
+        """
+        if not self.has(name):
+            raise KeyError(f"'{name}' is not a registered Function tool.")
 
     def get_tool(self, name: str) -> BaseTool:
         """

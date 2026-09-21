@@ -43,7 +43,7 @@ class GainOverrides:
 
         Raises KeyError if 'name' isn't a registered Function tool.
         """
-        self._require_registered(name)
+        self.registry.require(name)
         gain = self.registry.get_gain(name)
 
         if override is None:
@@ -81,14 +81,3 @@ class GainOverrides:
         Every registered Function tool with its current gain - one dial each.
         """
         return [self.view(name) for name in self.registry.all_names()]
-
-    def _require_registered(self, name: str) -> None:
-        """
-        Make sure this tool has a gain.
-
-        Only registered Function tools can be overridden.
-        """
-        if not self.registry.has(name):
-            raise KeyError(
-                f"'{name}' is not a registered Function tool. "
-            )

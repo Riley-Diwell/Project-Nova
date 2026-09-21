@@ -45,17 +45,5 @@ class Dispatcher:
         Raises KeyError (via the registry) if `name` isn't a registered Function
         tool.
         """
-        self._require_registered(name)
+        self.registry.require(name)
         return self.registry.get_tool(name).invoke(tool_input)
-
-    def _require_registered(self, name: str) -> None:
-        """
-        Make sure this is a real NOVA Function tool.
-
-        Unknown tools should not be dispatched.
-        """
-
-        if not self.registry.has(name):
-            raise KeyError(
-                f"'{name}' is not a registered Function tool. "
-            )

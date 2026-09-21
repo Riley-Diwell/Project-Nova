@@ -11,8 +11,8 @@ Every Function tool in Nova has a ToolSchema which tells the registry:
 Example use:
 
 ToolSchema(
-    name="query_memory",
-    description="Search stored user memories and past events.",
+    name="memory",
+    description="Save or recall notes the user has explicitly asked to remember.",
     input_schema={...},
     gain=0.5,
 )
