@@ -467,6 +467,12 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
             tool_input = {**tool_input, "origin": ctx.location_ctx}
         if ctx.preferred_travel_mode and "mode" not in tool_input:
             tool_input = {**tool_input, "mode": ctx.preferred_travel_mode}
+        if "utc_offset_minutes" not in tool_input:
+            # So a tool that needs to interpret a user-relative clock string (e.g.
+            # navigation_departure_time's arrival_time) can convert it against the
+            # user's own wall clock instead of the server process's - see
+            # navigation.py's _query_google_maps/_estimate_without_api.
+            tool_input = {**tool_input, "utc_offset_minutes": ctx.utc_offset_minutes}
         # Authorisation already happened in _gate. The dispatcher just runs it.
         result = _DISPATCHER.dispatch_reactive(name, tool_input)
         # Recorded after the call, so a tool that raises is not reported as run -
@@ -904,14 +910,15 @@ def resume(session_id: str, tool_result: Any) -> IntentResult | NeedMoreResult:
         _localize_calendar_events(tool_result["events"], utc_offset_minutes)
 
     messages: list[dict[str, Any]] = pending["messages"]
-    messages.append({
-        "role": "user",
-        "content": [{
+    tool_results = [
+        *pending.get("pending_tool_results", []),
+        {
             "type": "tool_result",
             "tool_use_id": pending["tool_use_id"],
             "content": json.dumps(tool_result),
-        }],
-    })
+        },
+    ]
+    messages.append({"role": "user", "content": tool_results})
     # The same TurnContext the turn started with, so the Controller's decisions,
     # the refusals and the Actions carry across the hop to the device and back.
     # The authorisation comes with it, because it is part of the Turn: a hop is the
@@ -1007,12 +1014,59 @@ def _run_loop(
                 (b for b in response.content if b.type == "tool_use" and b.name in CLIENT_TOOLS),
                 None,
             )
-            if client_call is not None and _gate(client_call.name, ctx) is None:
+            client_authorised = client_call is not None and _gate(client_call.name, ctx) is None
+
+            # Every OTHER tool_use block in this same turn runs now regardless of
+            # the client hop below - the Anthropic API requires every tool_use id
+            # in an assistant turn to be answered in the very next user turn, so a
+            # turn that called e.g. both get_calendar_range and
+            # navigation_departure_time can't just answer the first and leave the
+            # second's tool_use dangling until resume(). Its result is carried in
+            # _PENDING_SESSIONS and merged with the device's answer there instead.
+            tool_results = []
+            for block in response.content:
+                if block.type != "tool_use" or block is client_call:
+                    continue
+                blocked = _gate(block.name, ctx)
+                if blocked is not None:
+                    # Refused calls are recorded here; allowed ones are
+                    # recorded by _run_local_tool once they return.
+                    _record_action(block.name, block.input, ctx, ran=False)
+                result = blocked if blocked is not None else _run_local_tool(
+                    block.name, block.input, ctx
+                )
+                if (block.name == "navigation_departure_time"
+                        and isinstance(result, dict)
+                        and "leave_in_minutes" in result):
+                    ctx.scheduled_departure = {
+                        "destination": result.get("destination"),
+                        "mode": result.get("mode"),
+                        "leave_in_minutes": result["leave_in_minutes"],
+                        # The commitment's own countdown and title, as passed into the
+                        # tool call (see SYSTEM_PROMPT's WHEN TO LEAVE) - carried through
+                        # so Android can fill "you have X in N minutes" without asking the
+                        # model to phrase it. Both None for a destination with no calendar
+                        # anchor.
+                        "minutes_until_start": block.input.get("minutes_until_start"),
+                        "event_title": block.input.get("event_title"),
+                    }
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(result, default=str),
+                })
+
+            if client_authorised:
                 _record_action(client_call.name, client_call.input, ctx, ran=True)
                 session_id = str(uuid.uuid4())
                 _PENDING_SESSIONS[session_id] = {
                     "messages": messages,
                     "tool_use_id": client_call.id,
+                    # Any other tool_use block from this same turn already ran
+                    # above and has its tool_result sitting here - resume() sends
+                    # these alongside the device's eventual answer in one user
+                    # turn rather than a turn of their own (see the comment above).
+                    "pending_tool_results": tool_results,
                     "event_id": event_id,
                     "ctx": ctx,
                     # Carried so resume() can localise whatever the phone sends
@@ -1029,37 +1083,6 @@ def _run_loop(
                     to_time=client_call.input.get("to_time", ""),
                 )
 
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    blocked = _gate(block.name, ctx)
-                    if blocked is not None:
-                        # Refused calls are recorded here; allowed ones are
-                        # recorded by _run_local_tool once they return.
-                        _record_action(block.name, block.input, ctx, ran=False)
-                    result = blocked if blocked is not None else _run_local_tool(
-                        block.name, block.input, ctx
-                    )
-                    if (block.name == "navigation_departure_time"
-                            and isinstance(result, dict)
-                            and "leave_in_minutes" in result):
-                        ctx.scheduled_departure = {
-                            "destination": result.get("destination"),
-                            "mode": result.get("mode"),
-                            "leave_in_minutes": result["leave_in_minutes"],
-                            # The commitment's own countdown and title, as passed into the
-                            # tool call (see SYSTEM_PROMPT's WHEN TO LEAVE) - carried through
-                            # so Android can fill "you have X in N minutes" without asking the
-                            # model to phrase it. Both None for a destination with no calendar
-                            # anchor.
-                            "minutes_until_start": block.input.get("minutes_until_start"),
-                            "event_title": block.input.get("event_title"),
-                        }
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(result, default=str),
-                    })
             messages.append({"role": "user", "content": tool_results})
             continue
 

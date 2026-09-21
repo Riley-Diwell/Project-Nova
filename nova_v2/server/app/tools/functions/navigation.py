@@ -43,7 +43,7 @@ Directions API, because deciding whether to speak must not cost a network round
 trip on every event.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 import os
 import re
@@ -74,6 +74,23 @@ _RESOLVED_PLACE_CACHE: dict[str, tuple[str, str]] = {}
 
 def _cache_key(destination: str) -> str:
     return destination.strip().lower()
+
+
+def _user_local_now(utc_offset_minutes: int) -> datetime:
+    """Right now, as the user's own wall clock reads it - a tz-aware UTC
+    datetime whose hour/minute fields are the user's local time, not the
+    server process's. Building arrival_time off this (rather than a naive
+    datetime.now(), which .timestamp() would interpret in the server's own
+    system timezone - UTC on Cloud Run) is what lets "9:00am" mean 9am for the
+    user asking, not 9am wherever the container happens to run."""
+    return datetime.now(timezone.utc) + timedelta(minutes=utc_offset_minutes)
+
+
+def _user_local_clock_to_utc(local_wall_clock: datetime, utc_offset_minutes: int) -> datetime:
+    """Reverses _user_local_now: given a datetime whose wall-clock fields are
+    the user's local time (as produced by replacing hour/minute on
+    _user_local_now's result), returns the real UTC instant it names."""
+    return local_wall_clock - timedelta(minutes=utc_offset_minutes)
 
 # Rough Canberra-specific fallback estimates, used when MAPS_API_KEY is unset
 # or the Directions API call fails.
@@ -245,6 +262,10 @@ class NavigationTool(BaseTool):
         origin = tool_input.get("origin") or f"{DEFAULT_HOME['lat']},{DEFAULT_HOME['lng']}"
         mode = tool_input.get("mode") or DEFAULT_TRAVEL_MODE
         minutes_until_start = tool_input.get("minutes_until_start")
+        # Injected by intent_surface.py's _run_local_tool, same as origin/mode -
+        # how far the user's wall clock is from UTC, so arrival_time ("9:00am")
+        # resolves against their clock rather than the server process's.
+        utc_offset_minutes = tool_input.get("utc_offset_minutes") or 0
 
         if not destination:
             return {
@@ -254,8 +275,10 @@ class NavigationTool(BaseTool):
             }
 
         if MAPS_API_KEY:
-            return _query_google_maps(origin, destination, arrival_time, mode, minutes_until_start)
-        return _estimate_without_api(destination, arrival_time, minutes_until_start)
+            return _query_google_maps(
+                origin, destination, arrival_time, mode, minutes_until_start, utc_offset_minutes
+            )
+        return _estimate_without_api(destination, arrival_time, minutes_until_start, utc_offset_minutes)
 
 
 def _leave_in_minutes(minutes_until_start: Any, travel_minutes: float) -> float | None:
@@ -310,7 +333,8 @@ def _prefer_walking_if_close(origin: str, destination: str, data: dict, mode: st
 
 
 def _query_google_maps(origin: str, destination: str, arrival_time: str | None,
-                        mode: str, minutes_until_start: Any = None) -> dict:
+                        mode: str, minutes_until_start: Any = None,
+                        utc_offset_minutes: int = 0) -> dict:
     """Call Google Maps Directions API and return departure time result."""
     cached = _RESOLVED_PLACE_CACHE.get(_cache_key(destination))
     directions_destination = f"place_id:{cached[0]}" if cached else destination
@@ -324,12 +348,14 @@ def _query_google_maps(origin: str, destination: str, arrival_time: str | None,
 
     if arrival_time:
         try:
-            now = datetime.now()
             arr_hour, arr_min = _parse_time(arrival_time)
-            arr_dt = now.replace(hour=arr_hour, minute=arr_min, second=0)
+            local_wall_clock = _user_local_now(utc_offset_minutes).replace(
+                hour=arr_hour, minute=arr_min, second=0, microsecond=0
+            )
+            arr_dt = _user_local_clock_to_utc(local_wall_clock, utc_offset_minutes)
             params["arrival_time"] = int(arr_dt.timestamp())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[NavigationTool] couldn't parse arrival_time {arrival_time!r}: {e}")
 
     try:
         r = requests.get(
@@ -383,7 +409,7 @@ def _query_google_maps(origin: str, destination: str, arrival_time: str | None,
     except Exception as e:
         print(f"[NavigationTool] Maps API failed: {e}")
 
-    return _estimate_without_api(destination, arrival_time, minutes_until_start)
+    return _estimate_without_api(destination, arrival_time, minutes_until_start, utc_offset_minutes)
 
 
 def _estimated_travel_minutes(destination: str) -> int | None:
@@ -489,7 +515,8 @@ def _find_place_from_text(text: str) -> tuple[str, str] | None:
 
 
 def _estimate_without_api(destination: str, arrival_time: str | None,
-                           minutes_until_start: Any = None) -> dict:
+                           minutes_until_start: Any = None,
+                           utc_offset_minutes: int = 0) -> dict:
     """Rough fallback when the Maps API isn't available or the call failed.
 
     Only answers for destinations there is actually an estimate for. For anything
@@ -514,16 +541,15 @@ def _estimate_without_api(destination: str, arrival_time: str | None,
     spoken = f"It usually takes about {travel_mins} minutes to get to {destination}"
     if arrival_time:
         try:
-            now = datetime.now()
             h, m = _parse_time(arrival_time)
-            arr = now.replace(hour=h, minute=m)
+            arr = _user_local_now(utc_offset_minutes).replace(hour=h, minute=m, second=0, microsecond=0)
             depart = arr - timedelta(minutes=travel_mins + 5)
             spoken = (
                 f"Leave by {depart.strftime('%H:%M')} to reach "
                 f"{destination} by {arrival_time} — about {travel_mins} minutes away"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[NavigationTool] couldn't parse arrival_time {arrival_time!r}: {e}")
 
     result = {
         "success": True,
