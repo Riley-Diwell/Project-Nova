@@ -44,6 +44,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.novav2.network.NovaApiClient
 import kotlinx.coroutines.launch
+import org.json.JSONException
+import java.io.IOException
 import kotlin.math.hypot
 import kotlin.math.sqrt
 import kotlin.random.Random
@@ -104,7 +106,9 @@ fun KnowledgeMapScreen() {
         scope.launch {
             try {
                 graph = NovaApiClient.getKnowledgeGraph(minSimilarity)
-            } catch (e: Exception) {
+            } catch (e: IOException) {
+                error = e.message ?: "Couldn't load the knowledge map."
+            } catch (e: JSONException) {
                 error = e.message ?: "Couldn't load the knowledge map."
             } finally {
                 loading = false
@@ -145,7 +149,9 @@ fun KnowledgeMapScreen() {
                                 else -> "Learned $derived habit(s) and $stated thing(s) you said."
                             }
                             reload()
-                        } catch (e: Exception) {
+                        } catch (e: IOException) {
+                            error = e.message ?: "Couldn't consolidate."
+                        } catch (e: JSONException) {
                             error = e.message ?: "Couldn't consolidate."
                         } finally {
                             consolidating = false
@@ -223,7 +229,9 @@ fun KnowledgeMapScreen() {
                             NovaApiClient.deleteFact(node.id)
                             selected = null
                             reload()
-                        } catch (e: Exception) {
+                        } catch (e: IOException) {
+                            error = e.message ?: "Couldn't delete that."
+                        } catch (e: JSONException) {
                             error = e.message ?: "Couldn't delete that."
                         }
                     }
@@ -234,7 +242,9 @@ fun KnowledgeMapScreen() {
                             NovaApiClient.editFact(node.id, newText, null)
                             selected = null
                             reload()
-                        } catch (e: Exception) {
+                        } catch (e: IOException) {
+                            error = e.message ?: "Couldn't save that."
+                        } catch (e: JSONException) {
                             error = e.message ?: "Couldn't save that."
                         }
                     }
