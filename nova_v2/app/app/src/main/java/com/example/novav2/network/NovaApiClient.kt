@@ -167,23 +167,9 @@ object NovaApiClient {
 
     /** Posts a voice transcript + [UserState] snapshot to /event and returns the spoken reply. */
     suspend fun postVoiceEvent(transcript: String, userState: UserState): EventResult =
-        withContext(Dispatchers.IO) {
-            val body = JSONObject().apply {
-                put("event", JSONObject().apply {
-                    put("id", UUID.randomUUID().toString())
-                    put("timestamp", Instant.now().toString())
-                    put("type", "voice")
-                    put("text", transcript)
-                })
-                put("user_state", userState.toJson())
-            }
-
-            val request = Request.Builder()
-                .url("$BASE_URL/event")
-                .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
-                .build()
-
-            client.newCall(request).execute().use { parseEventResponse(it) }
+        postEvent(userState) {
+            put("type", "voice")
+            put("text", transcript)
         }
 
     /**
@@ -196,23 +182,35 @@ object NovaApiClient {
      * to resume it on, so it's dropped rather than answered.
      */
     suspend fun postAmbientEvent(userState: UserState): EventResult =
-        withContext(Dispatchers.IO) {
-            val body = JSONObject().apply {
-                put("event", JSONObject().apply {
-                    put("id", UUID.randomUUID().toString())
-                    put("timestamp", Instant.now().toString())
-                    put("type", "timestamp")
-                })
-                put("user_state", userState.toJson())
-            }
-
-            val request = Request.Builder()
-                .url("$BASE_URL/event")
-                .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
-                .build()
-
-            client.newCall(request).execute().use { parseEventResponse(it) }
+        postEvent(userState) {
+            put("type", "timestamp")
         }
+
+    /**
+     * The envelope every /event POST shares - an id, a timestamp and [userState] - with
+     * [eventFields] filling in whatever the specific event type still needs (just `type` for an
+     * ambient timestamp; `type` and `text` for a voice transcript).
+     */
+    private suspend fun postEvent(
+        userState: UserState,
+        eventFields: JSONObject.() -> Unit,
+    ): EventResult = withContext(Dispatchers.IO) {
+        val body = JSONObject().apply {
+            put("event", JSONObject().apply {
+                put("id", UUID.randomUUID().toString())
+                put("timestamp", Instant.now().toString())
+                eventFields()
+            })
+            put("user_state", userState.toJson())
+        }
+
+        val request = Request.Builder()
+            .url("$BASE_URL/event")
+            .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        client.newCall(request).execute().use { parseEventResponse(it) }
+    }
 
     /**
      * Resumes a paused conversation after resolving a [EventResult.NeedMore] request on-device
@@ -352,9 +350,7 @@ object NovaApiClient {
     data class KnowledgeGraph(
         val nodes: List<GraphNode> = emptyList(),
         val edges: List<GraphEdge> = emptyList(),
-    ) {
-        val facts: List<GraphNode> get() = nodes.filter { it.isFact }
-    }
+    )
 
     /**
      * The whole Persona as a graph. [minSimilarity] controls how densely facts
@@ -570,17 +566,22 @@ object NovaApiClient {
     }
 
     /**
-     * Picks the executable Actions out of actions[]. Each entry is {tool, input, trigger, ran};
-     * anything this client does not recognise is another tool's Action passing through, and
-     * anything with ran=false was refused by that tool's gain and must NOT be carried out - it is
-     * there so the turn's record is complete, not as an instruction.
+     * The {tool, input, trigger, ran} entries in actions[] belonging to [tool] that actually
+     * ran - ran=false was refused by that tool's gain and must NOT be carried out, it is there
+     * so the turn's record is complete, not as an instruction. Shared preamble behind every
+     * toXActions() below; each still does its own field extraction from here, since which
+     * fields are required and how they're validated genuinely differs per tool.
      */
-    private fun JSONArray.toCalendarActions(): List<CalendarAction> =
+    private fun JSONArray.inputsFor(tool: String): List<JSONObject> =
         (0 until length()).mapNotNull { i ->
             val obj = optJSONObject(i) ?: return@mapNotNull null
-            if (obj.optString("tool") != "add_calendar_event") return@mapNotNull null
+            if (obj.optString("tool") != tool) return@mapNotNull null
             if (!obj.optBoolean("ran", false)) return@mapNotNull null
-            val input = obj.optJSONObject("input") ?: return@mapNotNull null
+            obj.optJSONObject("input")
+        }
+
+    private fun JSONArray.toCalendarActions(): List<CalendarAction> =
+        inputsFor("add_calendar_event").mapNotNull { input ->
             val title = input.optString("title")
             val start = input.optString("start_time")
             val end = input.optString("end_time")
@@ -600,17 +601,11 @@ object NovaApiClient {
         }
 
     /**
-     * edit_calendar_event Actions, picked out the same way as add's - only ran=true ones, since
-     * ran=false was refused by that tool's gain and must not be carried out. Every field but
-     * event_id is optional on the wire (only changed fields are present), so each one is only
-     * populated when the backend actually sent it.
+     * Every field but event_id is optional on the wire (only changed fields are present), so
+     * each one is only populated when the backend actually sent it.
      */
     private fun JSONArray.toEditCalendarActions(): List<EditCalendarAction> =
-        (0 until length()).mapNotNull { i ->
-            val obj = optJSONObject(i) ?: return@mapNotNull null
-            if (obj.optString("tool") != "edit_calendar_event") return@mapNotNull null
-            if (!obj.optBoolean("ran", false)) return@mapNotNull null
-            val input = obj.optJSONObject("input") ?: return@mapNotNull null
+        inputsFor("edit_calendar_event").mapNotNull { input ->
             if (!input.has("event_id") || input.isNull("event_id")) return@mapNotNull null
             val recurrence = input.optJSONObject("recurrence")
                 .takeIf { input.has("recurrence") && !input.isNull("recurrence") }
@@ -630,32 +625,16 @@ object NovaApiClient {
             )
         }
 
-    /**
-     * delete_calendar_event Actions, picked out the same way as add's - only ran=true ones, since
-     * ran=false was refused by that tool's gain and must not be carried out.
-     */
     private fun JSONArray.toDeleteCalendarActions(): List<DeleteCalendarAction> =
-        (0 until length()).mapNotNull { i ->
-            val obj = optJSONObject(i) ?: return@mapNotNull null
-            if (obj.optString("tool") != "delete_calendar_event") return@mapNotNull null
-            if (!obj.optBoolean("ran", false)) return@mapNotNull null
-            val input = obj.optJSONObject("input") ?: return@mapNotNull null
+        inputsFor("delete_calendar_event").mapNotNull { input ->
             if (!input.has("event_id") || input.isNull("event_id")) return@mapNotNull null
             val title = input.optString("title")
             if (title.isBlank()) return@mapNotNull null
             DeleteCalendarAction(eventId = input.optLong("event_id"), title = title)
         }
 
-    /**
-     * set_timer Actions, picked out the same way as the calendar ones above - only ran=true,
-     * since ran=false was refused by that tool's gain and must not be carried out.
-     */
     private fun JSONArray.toTimerActions(): List<TimerAction> =
-        (0 until length()).mapNotNull { i ->
-            val obj = optJSONObject(i) ?: return@mapNotNull null
-            if (obj.optString("tool") != "set_timer") return@mapNotNull null
-            if (!obj.optBoolean("ran", false)) return@mapNotNull null
-            val input = obj.optJSONObject("input") ?: return@mapNotNull null
+        inputsFor("set_timer").mapNotNull { input ->
             if (!input.has("duration_seconds") || input.isNull("duration_seconds")) return@mapNotNull null
             TimerAction(
                 durationSeconds = input.optInt("duration_seconds"),
@@ -663,15 +642,8 @@ object NovaApiClient {
             )
         }
 
-    /**
-     * set_alarm Actions, picked out the same way - only ran=true.
-     */
     private fun JSONArray.toAlarmActions(): List<AlarmAction> =
-        (0 until length()).mapNotNull { i ->
-            val obj = optJSONObject(i) ?: return@mapNotNull null
-            if (obj.optString("tool") != "set_alarm") return@mapNotNull null
-            if (!obj.optBoolean("ran", false)) return@mapNotNull null
-            val input = obj.optJSONObject("input") ?: return@mapNotNull null
+        inputsFor("set_alarm").mapNotNull { input ->
             if (!input.has("hour") || input.isNull("hour")) return@mapNotNull null
             if (!input.has("minute") || input.isNull("minute")) return@mapNotNull null
             AlarmAction(
