@@ -71,9 +71,6 @@ object CalendarSignal {
         return CalendarSnapshot(calendarCtx, currentEvents, upcomingEvents)
     }
 
-    /** Thin wrapper so any code that only needs the frozen-seam string can still call this. */
-    fun currentCalendarContext(context: Context): String? = snapshot(context)?.calendarCtx
-
     /**
      * On-demand query over an arbitrary [fromMillis, toMillis) range, for when the backend's
      * Intent Surface asks for calendar data outside the [snapshot] window (e.g. "today",
