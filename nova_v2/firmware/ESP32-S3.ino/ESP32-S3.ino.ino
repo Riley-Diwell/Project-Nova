@@ -63,7 +63,7 @@ static const int8_t adpcmIndexTable[16] = {
 uint8_t adpcmOut[4 + bufferLen / 2];
 
 // --- haptics
-#define HAPTIC D0
+#define HAPTIC D1 // debug check this, should it be analog?
 static unsigned int haptic_level = 0;
 
 // --- leds
@@ -72,6 +72,9 @@ static unsigned int haptic_level = 0;
 
 uint32_t pulseStartTime = millis();
 bool pulseActive = false;
+
+// --- battery
+# define battPin A0
 
 // --- bluetooth
 BLESerial        ble; // initialise library
@@ -273,6 +276,17 @@ void updatePulse(int pinNum) {
   }
 }
 
+// --- battery
+
+void checkBatteryLevel(){
+  uint32_t Vbatt = 0;
+  for(int i = 0; i < 16; i++) {
+    Vbatt = Vbatt + analogReadMilliVolts(A0); // ADC with correction   
+  }
+  float Vbattf = 2 * Vbatt / 16 / 1000.0;     // attenuation ratio 1/2, mV --> V
+  Serial.println(Vbattf, 3);
+}
+
 // ------------- setup -------------
 
 void setup() {
@@ -281,6 +295,8 @@ void setup() {
 
   pinMode(led1, OUTPUT);
   pinMode(led2, OUTPUT);
+
+  pinMode(battPin, INPUT);
 
   // initialize the digital pin with an off state
   digitalWrite(HAPTIC, LOW);
