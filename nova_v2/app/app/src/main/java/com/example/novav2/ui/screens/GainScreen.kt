@@ -156,7 +156,7 @@ private fun GainCard(
                 fontWeight = FontWeight.Bold
             )
             Spacer(Modifier.height(6.dp))
-                        Text(
+            Text(
                 text = tool.description,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
