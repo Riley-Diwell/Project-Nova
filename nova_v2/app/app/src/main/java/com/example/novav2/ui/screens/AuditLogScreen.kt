@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
@@ -243,7 +243,15 @@ fun AuditLogScreen() {
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
-            items(entries, key = { "${it.episodeId}:${it.tool}:${it.occurredAt}" }) { entry ->
+            // Keyed with the list index as well as the entry's own fields: one episode can run
+            // the same tool more than once (e.g. a retry), and every action row it produces
+            // shares that episode's occurred_at - so episodeId+tool+occurredAt alone isn't
+            // guaranteed unique, and LazyColumn crashes (IllegalArgumentException) on a
+            // repeated key.
+            itemsIndexed(
+                entries,
+                key = { index, entry -> "$index:${entry.episodeId}:${entry.tool}:${entry.occurredAt}" },
+            ) { _, entry ->
                 AuditCard(entry)
             }
         }
