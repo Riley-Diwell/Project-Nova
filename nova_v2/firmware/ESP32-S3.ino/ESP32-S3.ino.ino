@@ -3,8 +3,66 @@
 #include <driver/i2s.h>
 #include <Wire.h>
 #include <string>
-#include "BLESerial.h"
-#include "Linereader.h"
+#include <NimBLEDevice.h>
+
+// ------------- BLE protocol -------------
+// See nova_v2/docs/ble-protocol.md for the full spec. UUIDs are fixed - the
+// Android app hardcodes these same values to find these characteristics, so
+// don't regenerate them without updating both sides.
+//
+// Needs the "NimBLE-Arduino" library (by h2zero) installed via the Arduino
+// Library Manager - not bundled with the core, and not the same as the old
+// BLESerial dependency this replaces.
+//
+// Written against the NimBLE-Arduino 2.x callback API (onConnect/onDisconnect/
+// onWrite all take a NimBLEConnInfo& parameter). If the installed version
+// differs, those callback signatures may need adjusting - this has not been
+// compiled or run against real hardware yet.
+#define NOVA_SERVICE_UUID    "0f016870-7232-4454-8f07-c3f09eab3fcc"
+#define NOVA_EVENTS_UUID     "2d75cb8a-3dbe-441e-bc69-ba91ad698089"
+#define NOVA_AUDIO_UUID      "98a3d8ca-c54d-4266-8706-cf15447d2058"
+#define NOVA_COMMANDS_UUID   "660d7ca3-765e-41d2-8c5a-c282ce9cdf90"
+
+// events characteristic (device -> phone, Notify): 1 type byte + payload.
+enum NovaEventType : uint8_t {
+  EVENT_SINGLE_CLICK = 0x01, // no payload
+  EVENT_DOUBLE_CLICK = 0x02, // no payload
+  EVENT_MULTI_CLICK  = 0x03, // payload: 1 byte click count
+  EVENT_BATTERY      = 0x04, // payload: 1 byte percent 0-100 - NOT SENT YET,
+                              // this board revision has no confirmed battery-
+                              // sense circuit to read from. Type reserved so
+                              // the Android side can already handle it.
+  EVENT_HEARTBEAT    = 0x05, // no payload
+};
+
+// commands characteristic (phone -> device, Write no response): 1 type byte + payload.
+enum NovaCommandType : uint8_t {
+  COMMAND_HAPTIC_PULSE = 0x01, // payload: 1 byte duration, x10ms
+  COMMAND_LED_PULSE    = 0x02, // payload: 1 byte duration, x10ms
+  COMMAND_PING         = 0x03, // no payload - device replies with EVENT_HEARTBEAT
+};
+
+// audio characteristic (device -> phone, Notify) envelope flags - see
+// docs/ble-protocol.md. Byte 0 of every notification is a wrapping sequence
+// number, byte 1 is these flags, bytes 2+ are the existing ADPCM block
+// (empty for the dedicated end-of-utterance notification below).
+const uint8_t AUDIO_FLAG_START = 0x01;
+const uint8_t AUDIO_FLAG_END   = 0x02;
+
+const uint32_t HEARTBEAT_INTERVAL_MS = 5000; // keeps the phone able to tell
+                                              // "connected, quiet" from "gone"
+uint32_t lastHeartbeatSent = 0;
+
+// A BLE link stays up at the radio level even after the phone-side app's
+// process dies (e.g. Android Studio redeploying it) - there is no onDisconnect
+// in that case, so bleConnected would otherwise stay true forever and this
+// device would never resume advertising, requiring a physical restart to pair
+// again. NovaDeviceService pings every 5s (PING_INTERVAL_MS) purely as
+// proof-of-life while connected; if nothing at all has been written to
+// commandsChar in three of those intervals, the central is gone even though
+// the radio link never told us so - force it closed ourselves.
+const uint32_t CENTRAL_STALE_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3;
+uint32_t lastCentralActivityMs = 0;
 
 // ------------- define pins and variables -------------
 
@@ -21,7 +79,7 @@ const int audioStartTime = 500; // start recording audio after 1000 milliseconds
 int isRecording = 0; // 0 for not recording, 1 for recording audio
 
 const int doubleClickDelay = 500; // max time between button press for double click
-int firstClickTime = 0; 
+int firstClickTime = 0;
 int clickCount =0;
 
 // --- microphone
@@ -59,7 +117,8 @@ static const int8_t adpcmIndexTable[16] = {
 };
 
 // Fixed-size encoded output: 4-byte block header + one nibble per sample.
-// With bufferLen=512 this is 4 + 256 = 260 bytes per BLE burst.
+// With bufferLen=512 this is 4 + 256 = 260 bytes per block, sent as a 262-byte
+// BLE notification once the 2-byte audio envelope (seq + flags) is added.
 uint8_t adpcmOut[4 + bufferLen / 2];
 
 // --- haptics
@@ -70,14 +129,28 @@ static unsigned int haptic_level = 0;
 # define led1 D3
 # define led2 D4
 
-uint32_t pulseStartTime = millis();
-bool pulseActive = false;
+// Per-pin pulse state, so the led2 confirmation flash and a haptic pulse
+// (driven by the phone over BLE) can run independently instead of sharing
+// one global timer like the original single-pulse implementation did.
+struct PulseState {
+  uint32_t startTime = 0;
+  uint32_t durationMs = 500;
+  bool active = false;
+};
+PulseState led2Pulse;
+PulseState hapticPulse;
 
 // --- battery
 # define battPin A0
 
-// --- bluetooth
-BLESerial        ble; // initialise library
+// --- bluetooth (NimBLE)
+NimBLEServer* bleServer = nullptr;
+NimBLECharacteristic* eventsChar = nullptr;
+NimBLECharacteristic* audioChar = nullptr;
+NimBLECharacteristic* commandsChar = nullptr;
+volatile bool bleConnected = false;
+uint16_t bleConnHandle = 0; // set on connect, used by the stale-connection watchdog to disconnect
+uint8_t audioSeq = 0;
 
 // ------------- define functions -------------
 // --- button
@@ -96,11 +169,11 @@ void debounceButton() {
 }
 
 void checkButton() {
-  updatePulse(led2);
+  updatePulse(led2, led2Pulse);
   if (debouncedButtonStatus == HIGH && prevDebouncedButtonStatus == LOW) {
     // just pressed
     pressedAt = millis();
-  } 
+  }
 
   // button stopped being pressed
   else if (debouncedButtonStatus == LOW && prevDebouncedButtonStatus == HIGH) {
@@ -108,8 +181,7 @@ void checkButton() {
       isRecording = 0;
       Serial.println("Stop recording audio");
       digitalWrite(led1, LOW);
-      pulseStartTime = millis();
-      startPulse(led2); // quick pulse
+      startPulse(led2, led2Pulse, 500); // quick pulse
       clickCount = 0; // if we were recording audio, we don't want this to influence future single or double clicks
     } else {
       if (clickCount == 0) {
@@ -128,22 +200,25 @@ void checkButton() {
       digitalWrite(led1, HIGH);
       }
     }
-  } 
+  }
 
   // dispatch when double click window closes
   if (clickCount > 0 && (millis() - firstClickTime) > doubleClickDelay) {
   switch (clickCount) {
     case 1: {
-      Serial.println("Single click!"); 
-      bleTx("isSingleClick");
+      Serial.println("Single click!");
+      sendEvent(EVENT_SINGLE_CLICK, nullptr, 0);
       break;}
     case 2: {
-      Serial.println("Double click!"); 
-      bleTx("isDoubleClick");
+      Serial.println("Double click!");
+      sendEvent(EVENT_DOUBLE_CLICK, nullptr, 0);
       break;}
-    default:
+    default: {
       Serial.print("Multi-click: ");
       Serial.println(clickCount);
+      uint8_t count = (uint8_t)min(clickCount, 255);
+      sendEvent(EVENT_MULTI_CLICK, &count, 1); // previously detected but never sent
+    }
   }
   clickCount = 0; // reset
 }
@@ -233,46 +308,181 @@ void resetADPCM() {
 }
 
 // --- bluetooth
-void setupBLE(){
+class NovaServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override {
+    bleConnected = true;
+    bleConnHandle = connInfo.getConnHandle();
+    lastCentralActivityMs = millis(); // starts the stale-connection countdown fresh
+    Serial.println("[BLE] phone connected");
+    // commands/audio are ENC-gated (see docs/ble-protocol.md "Connection
+    // setup"), but commands is WRITE_NR (write without response), which gets
+    // no ATT response at all - so a write to it over an unencrypted link
+    // can't trigger the usual "insufficient encryption" error that would
+    // otherwise make the phone's BLE stack auto-start pairing. Request
+    // security proactively instead of waiting for some GATT operation to
+    // demand it. Security is started via NimBLEDevice (a static/host-level
+    // call), not NimBLEServer - there is no NimBLEServer::startSecurity in
+    // this installed library version.
+    NimBLEDevice::startSecurity(connInfo.getConnHandle());
+  }
+  void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connInfo, int reason) override {
+    bleConnected = false;
+    Serial.println("[BLE] phone disconnected — resuming advertising");
+    NimBLEDevice::startAdvertising();
+  }
+};
+
+class NovaCommandsCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo) override {
+    lastCentralActivityMs = millis(); // any write at all proves the phone app is still there
+    std::string value = characteristic->getValue();
+    if (value.empty()) return;
+
+    uint8_t type = (uint8_t)value[0];
+    switch (type) {
+      case COMMAND_HAPTIC_PULSE: {
+        uint32_t durationMs = (value.size() > 1) ? (uint8_t)value[1] * 10 : 100;
+        Serial.printf("[BLE] command: haptic pulse (%lums)\n", durationMs);
+        startPulse(HAPTIC, hapticPulse, durationMs);
+        break;
+      }
+      case COMMAND_LED_PULSE: {
+        uint32_t durationMs = (value.size() > 1) ? (uint8_t)value[1] * 10 : 500;
+        Serial.printf("[BLE] command: LED pulse (%lums)\n", durationMs);
+        startPulse(led2, led2Pulse, durationMs);
+        break;
+      }
+      case COMMAND_PING:
+        Serial.println("[BLE] command: ping");
+        sendHeartbeat();
+        break;
+      default:
+        Serial.printf("[BLE] unknown command type 0x%02X\n", type);
+    }
+  }
+};
+
+void setupBLE() {
   while (!Serial) { /* wait for USB serial */ }
 
-  // SecurityMode::None | JustWorks | PasskeyDisplay
-  // Mode::Fast | LowPower | LongRange | Balanced
-  ble.begin(BLESerial::Mode::Fast, "georgias_esp32", BLESerial::Security::None);
+  NimBLEDevice::init("NovaDevice"); // was "georgias_esp32" - a real,
+                                     // filterable product name so the phone
+                                     // can tell a Nova device apart from any
+                                     // other BLE peripheral nearby.
 
-  #ifdef ARDUINO_ARCH_ESP32
-    ble.setPumpMode(BLESerial::PumpMode::Task); // background TX pump
-  #endif
+  // TEMP bring-up aid: prints the exact address to look for in a scanner
+  // app, since whether this is the chip's public MAC or a random static
+  // address isn't obvious from the code alone. Remove once pairing works.
+  Serial.print("[BLE] address: ");
+  Serial.println(NimBLEDevice::getAddress().toString().c_str());
 
-  Serial.println("BLESerial demo started.");
+  // Default ATT MTU is 23 bytes (20 usable) - nowhere near enough for a
+  // 262-byte audio notification. 265 covers that plus the 3-byte ATT header,
+  // per docs/ble-protocol.md "Connection setup". The Android side has to
+  // request/accept this too - MTU is negotiated, not unilaterally set by
+  // either side alone.
+  NimBLEDevice::setMTU(265);
+
+  // JustWorks bonding: bonding on, no MITM/passkey (this device has no
+  // display or keyboard to show or enter one), secure connections on. This
+  // is the actual mechanism that stops a second, unpaired phone connecting
+  // once bonded — see docs/ble-protocol.md "Connection setup".
+  NimBLEDevice::setSecurityAuth(/*bonding=*/true, /*mitm=*/false, /*sc=*/true);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+
+  bleServer = NimBLEDevice::createServer();
+  bleServer->setCallbacks(new NovaServerCallbacks());
+
+  NimBLEService* service = bleServer->createService(NOVA_SERVICE_UUID);
+
+  // READ_ENC/WRITE_ENC require an encrypted (i.e. bonded) link before the
+  // characteristic will notify or accept writes at all - without this,
+  // bonding would be configured but not actually enforced per-characteristic.
+  eventsChar = service->createCharacteristic(
+    NOVA_EVENTS_UUID,
+    NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ_ENC
+  );
+
+  audioChar = service->createCharacteristic(
+    NOVA_AUDIO_UUID,
+    NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ_ENC
+  );
+
+  commandsChar = service->createCharacteristic(
+    NOVA_COMMANDS_UUID,
+    NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::WRITE_ENC
+  );
+  commandsChar->setCallbacks(new NovaCommandsCallbacks());
+
+  service->start();
+
+  NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+  advertising->addServiceUUID(NOVA_SERVICE_UUID);
+  advertising->setName("NovaDevice");
+  advertising->start();
+
+  Serial.println("NovaDevice BLE service started, advertising.");
 }
 
-void bleTx(char dat[20]){
-  static int lastSent = -1; // init case
-    ble.write(dat); // Send any data received from Serial to ble device.
-    ble.write('\n');                            // helps nRF Connect show it as a line
-    lastSent = debouncedButtonStatus;
-  }  
-
-void bleRx(){
-  char dat; // Variable to store received byte
-  if (ble.available()) {
-    dat = ble.read();
-    Serial.print(dat); // Print all received data to Serial Console
+// Sends one events-characteristic notification: 1 type byte + up to 8 bytes
+// of payload (every event type defined today needs at most 1). No-op while
+// nothing is connected - there is no reconnect-and-flush queue, an event
+// missed while disconnected is just missed, same stance as every other
+// best-effort signal in this codebase.
+//
+// No default arguments here on purpose - the Arduino .ino build step
+// auto-generates function prototypes by scanning this file, and a defaulted
+// parameter repeated between that generated prototype and this definition
+// is a known source of "redefinition of default argument" compile errors.
+// Every call site passes all three explicitly instead.
+void sendEvent(uint8_t type, const uint8_t* payload, size_t payloadLen) {
+  if (!bleConnected || eventsChar == nullptr) return;
+  uint8_t frame[1 + 8];
+  frame[0] = type;
+  size_t len = min(payloadLen, sizeof(frame) - 1);
+  if (payload && len > 0) {
+    memcpy(frame + 1, payload, len);
   }
+  eventsChar->setValue(frame, 1 + len);
+  eventsChar->notify();
+}
+
+void sendHeartbeat() {
+  sendEvent(EVENT_HEARTBEAT, nullptr, 0);
+  lastHeartbeatSent = millis();
+}
+
+// Sends one audio-characteristic notification: 1 sequence byte (wraps at
+// 256, lets the phone notice a dropped notification) + 1 flags byte +
+// the ADPCM block itself (empty for the dedicated end-of-utterance call in
+// loop() below - there's no audio left to send at that point, only the
+// marker). `frame` is static and reused across calls rather than
+// re-allocated every ~32ms tick; NimBLE copies the value internally on
+// setValue()/notify(), so reusing the buffer before the next call is safe.
+void sendAudioChunk(uint8_t flags, const uint8_t* adpcmBlock, size_t blockLen) {
+  if (!bleConnected || audioChar == nullptr) return;
+  static uint8_t frame[2 + sizeof(adpcmOut)];
+  frame[0] = audioSeq++;
+  frame[1] = flags;
+  if (adpcmBlock && blockLen > 0) {
+    memcpy(frame + 2, adpcmBlock, blockLen);
+  }
+  audioChar->setValue(frame, 2 + blockLen);
+  audioChar->notify();
 }
 
 // --- feedback (haptics and led)
-void startPulse(int pinNum) {
-  pulseStartTime = millis();
-  pulseActive = true;
+void startPulse(int pinNum, PulseState& state, uint32_t durationMs) {
+  state.startTime = millis();
+  state.durationMs = durationMs;
+  state.active = true;
   digitalWrite(pinNum, HIGH);
 }
 
-void updatePulse(int pinNum) {
-  if (pulseActive && (millis() - pulseStartTime) > 500) {
+void updatePulse(int pinNum, PulseState& state) {
+  if (state.active && (millis() - state.startTime) > state.durationMs) {
     digitalWrite(pinNum, LOW);
-    pulseActive = false;
+    state.active = false;
   }
 }
 
@@ -318,23 +528,40 @@ void loop() {
   debounceButton();
   checkButton();
 
-  // --- BLE stuff
-  bleRx();
+  // --- BLE feedback stuff (RX is callback-driven now, not polled here)
+  updatePulse(HAPTIC, hapticPulse);
+  if (bleConnected && (millis() - lastHeartbeatSent) > HEARTBEAT_INTERVAL_MS) {
+    sendHeartbeat();
+  }
+  if (bleConnected && (millis() - lastCentralActivityMs) > CENTRAL_STALE_TIMEOUT_MS) {
+    // See CENTRAL_STALE_TIMEOUT_MS's comment - the radio link is still up but
+    // nothing has proven the phone app is still on the other end of it.
+    Serial.println("[BLE] central gone quiet - disconnecting to resume advertising");
+    lastCentralActivityMs = millis(); // don't re-trigger every loop() until onDisconnect clears bleConnected
+    bleServer->disconnect(bleConnHandle); // NimBLEServer::disconnect(uint16_t, uint8_t reason = ...) in
+    // NimBLE-Arduino 1.4/2.x - like the rest of this file's BLE calls, not yet verified against the
+    // exact installed library version on real hardware.
+  }
 
   // --- microphone stuff
   static bool wasRecording = false;
 
   if (!isRecording) {
-    if (wasRecording) wasRecording = false;
+    if (wasRecording) {
+      wasRecording = false;
+      sendAudioChunk(AUDIO_FLAG_END, nullptr, 0); // explicit end-of-utterance marker
+    }
     // Non-blocking drain so the DMA ring doesn't hand us stale data next time.
     size_t bytesIn = 0;
     i2s_read(I2S_PORT, sBuffer, bufferLen * sizeof(int32_t), &bytesIn, 0);
     return;
   }
 
-  // First loop of a new recording: reset encoder so the decoder can lock on.
+  // First loop of a new recording: reset encoder so the decoder can lock on,
+  // and restart the sequence number so the phone knows this is a new stream.
   if (!wasRecording) {
     resetADPCM();
+    audioSeq = 0;
     wasRecording = true;
   }
 
@@ -357,7 +584,8 @@ void loop() {
   }
 
   size_t outBytes = encodeADPCMBlock(pcmBuffer, samplesRead, adpcmOut, adpcmState);
-  ble.write(adpcmOut, outBytes);
+  uint8_t flags = (audioSeq == 0) ? AUDIO_FLAG_START : 0x00;
+  sendAudioChunk(flags, adpcmOut, outBytes);
   // Also dump the block as hex to Serial so you can copy-paste into the decoder.
   for (size_t i = 0; i < outBytes; i++) {
     Serial.printf("%02X", adpcmOut[i]);
@@ -368,5 +596,6 @@ void loop() {
 // ------------- references -------------
 // https://easyelecmodule.com/a-complete-guide-to-the-inmp441-i2s-microphone/ accessed 11/09/2026
 // https://github.com/kikookraft/HapticPatPat/blob/main/firmware/src/main.cpp accessed 12/09/2026
-// https://github.com/5pIO/BLESerial accessed 12/09/2026
+// https://github.com/h2zero/NimBLE-Arduino - replaces the earlier BLESerial
+// dependency (see nova_v2/docs/ble-protocol.md for why)
 // https://www.cs.columbia.edu/~hgs/audio/dvi/IMA_ADPCM.pdf accessed 13/09/2026
