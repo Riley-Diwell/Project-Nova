@@ -100,6 +100,18 @@ _FALLBACK_ESTIMATES = {
     "airport": 30, "queanbeyan": 25,
 }
 
+# ANU's timetable software spells a class location "<room(s)>_<Building Name>
+# Bldg <number>" (e.g. "Lab 1.08 and Lab 1.09_Birch Bldg 35") - it never says
+# "ANU" or "university" anywhere in the string, so the substring table above
+# never matches a class location and error() below would stay open-loop for
+# every single class regardless of how close it is. This is the one shape
+# worth recognising by itself rather than by name, since a new building next
+# semester is otherwise a new row here every time.
+_ANU_TIMETABLE_PATTERN = re.compile(
+    r'(?:^|_)\s*(?P<building>[^_]*?\b(?:Bldg|Building)\.?\s*\d+\w*)\s*$',
+    re.IGNORECASE,
+)
+
 # How much slack has to be left before leaving stops being a live concern. Above
 # this the error term is zero: half an hour of spare time is not a problem NOVA
 # should be volunteering an opinion about, however proactive its dial is.
@@ -274,6 +286,12 @@ class NavigationTool(BaseTool):
                 "needs_clarification": True,
             }
 
+        # The room numbers a timetable glues onto the front are noise to a maps
+        # API, and "Birch" alone is ambiguous with every other Birch building
+        # anywhere - see _clean_campus_location. A no-op for a destination that
+        # was never in that shape to begin with (e.g. "Coffee Club").
+        destination = _clean_campus_location(destination)
+
         if MAPS_API_KEY:
             return _query_google_maps(
                 origin, destination, arrival_time, mode, minutes_until_start, utc_offset_minutes
@@ -428,7 +446,33 @@ def _estimated_travel_minutes(destination: str) -> int | None:
     for key in sorted(_FALLBACK_ESTIMATES, key=len, reverse=True):
         if key in where:
             return _FALLBACK_ESTIMATES[key]
+    if _ANU_TIMETABLE_PATTERN.search(destination):
+        # Same flat estimate as the "anu"/"university" rows above - see
+        # _ANU_TIMETABLE_PATTERN's comment for why a class location never
+        # matches those by name despite being on the same campus.
+        return _FALLBACK_ESTIMATES["anu"]
     return None
+
+
+def _clean_campus_location(destination: str) -> str:
+    """Strips a timetable location down to the building Directions/Places can
+    actually resolve, and anchors it to the campus.
+
+    "Lab 1.08 and Lab 1.09_Birch Bldg 35" fails both APIs as given: the room
+    numbers glued on the front are noise to a geocoder, and "Birch" alone is
+    ambiguous with every other Birch-named place Google knows about. Keeping
+    only the "<Building Name> Bldg <number>" part and naming the university
+    explicitly is what lets a real Directions/Places lookup find the right
+    one - see _ANU_TIMETABLE_PATTERN.
+
+    A no-op for anything not in that shape (e.g. "Coffee Club", a destination
+    named directly), so this is safe to call unconditionally on every
+    destination the tool receives.
+    """
+    match = _ANU_TIMETABLE_PATTERN.search(destination)
+    if not match:
+        return destination
+    return f"{match.group('building').strip()}, Australian National University, Canberra ACT"
 
 
 def _directions_result(data: dict, destination: str, mode: str, arrival_time: str | None,
