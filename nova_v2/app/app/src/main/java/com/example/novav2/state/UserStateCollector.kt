@@ -6,7 +6,7 @@ import com.example.novav2.model.UserState
 /**
  * Fuses all signals into a [UserState] snapshot (DESIGN.md §5.2).
  *
- * Confidence = known signals / 17 total possible:
+ * Confidence = known signals / 19 total possible:
  *   - 9 always readable (dnd, screen, network, battery, ringerMode, musicActive, interruptionFilter,
  *     powerSaveMode, airplaneMode)
  *   - 10 optional (permission-gated or sensor-dependent):
