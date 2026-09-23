@@ -38,7 +38,10 @@ import com.example.novav2.ui.screens.StateScreen
 import com.example.novav2.ui.screens.VoiceScreen
 
 @Composable
-fun NovaApp(assistRequested: MutableState<Boolean> = mutableStateOf(false)) {
+fun NovaApp(
+    assistRequested: MutableState<Boolean> = mutableStateOf(false),
+    autoListenRequested: MutableState<Boolean> = mutableStateOf(false),
+) {
     // TODO: re-enable onboarding gate - skipped for now to speed up dev iteration.
     var onboardingComplete by rememberSaveable { mutableStateOf(true) }
     var userName by rememberSaveable { mutableStateOf("") }
@@ -102,7 +105,10 @@ fun NovaApp(assistRequested: MutableState<Boolean> = mutableStateOf(false)) {
                 DashboardScreen(profile = profile)
             }
             composable(NovaDestination.Voice.route) {
-                VoiceScreen(bottomBarHeight = innerPadding.calculateBottomPadding())
+                VoiceScreen(
+                    bottomBarHeight = innerPadding.calculateBottomPadding(),
+                    autoListenRequested = autoListenRequested,
+                )
             }
             composable(NovaDestination.State.route) {
                 StateScreen()

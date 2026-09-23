@@ -25,6 +25,11 @@ class MainActivity : ComponentActivity() {
     // would miss that case - this flag is how NovaApp() jumps back to Voice when it fires.
     private val assistRequested = mutableStateOf(false)
 
+    // Set alongside assistRequested when AssistTrampolineActivity already found Nova's own UI in
+    // the foreground (see EXTRA_AUTO_LISTEN there) - tells VoiceScreen to trigger its mic button
+    // itself rather than just landing on the Voice tab and waiting for a manual tap.
+    private val autoListenRequested = mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -45,7 +50,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             NovaTheme {
-                NovaApp(assistRequested = assistRequested)
+                NovaApp(assistRequested = assistRequested, autoListenRequested = autoListenRequested)
             }
         }
     }
@@ -55,6 +60,9 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         if (intent.action == Intent.ACTION_ASSIST) {
             assistRequested.value = true
+            if (intent.getBooleanExtra(AssistTrampolineActivity.EXTRA_AUTO_LISTEN, false)) {
+                autoListenRequested.value = true
+            }
         }
     }
 }

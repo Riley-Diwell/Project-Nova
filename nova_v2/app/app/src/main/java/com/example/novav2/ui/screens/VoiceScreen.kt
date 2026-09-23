@@ -54,6 +54,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -234,7 +235,10 @@ private fun PendingStatusBubble(text: String, fromUser: Boolean = false) {
  * single last-turn readout, so the reply is always visible even before/without TTS finishing.
  */
 @Composable
-fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
+fun VoiceScreen(
+    bottomBarHeight: Dp = 0.dp,
+    autoListenRequested: MutableState<Boolean> = mutableStateOf(false),
+) {
     val context = LocalContext.current
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val coroutineScope = rememberCoroutineScope()
@@ -589,6 +593,18 @@ fun VoiceScreen(bottomBarHeight: Dp = 0.dp) {
             speechRecognizer?.stopListening()
         } else if (voiceState == VoiceState.IDLE) {
             startListening()
+        }
+    }
+
+    // The power-button assist gesture, fired while Nova's own UI was already in the foreground
+    // (see AssistTrampolineActivity's EXTRA_AUTO_LISTEN) - reuses onMicClick() so it goes through
+    // the exact same permission check/prompt a manual tap would, rather than assuming
+    // RECORD_AUDIO is already granted. A no-op if a turn is already THINKING/SPEAKING, same as
+    // the mic button being disabled then.
+    LaunchedEffect(autoListenRequested.value) {
+        if (autoListenRequested.value) {
+            onMicClick()
+            autoListenRequested.value = false
         }
     }
 
