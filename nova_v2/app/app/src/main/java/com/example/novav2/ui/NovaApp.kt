@@ -1,15 +1,21 @@
 package com.example.novav2.ui
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
@@ -19,6 +25,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.navigation.NavController
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -82,11 +89,12 @@ fun NovaApp(
                         selected = currentRoute == destination.route,
                         onClick = {
                             navController.navigate(destination.route) {
-                                popUpTo(navController.graph.findStartDestination().id) {
-                                    saveState = true
-                                }
+                                // No saveState/restoreState: those would let a settings
+                                // submenu (Gain/Device/State) hang around underneath the
+                                // Settings tab and reappear when you tab back to it - each
+                                // tab should always land on its own root.
+                                popUpTo(navController.graph.findStartDestination().id)
                                 launchSingleTop = true
-                                restoreState = true
                             }
                         },
                         icon = { Icon(destination.icon, contentDescription = destination.label) },
@@ -111,10 +119,10 @@ fun NovaApp(
                 )
             }
             composable(NovaDestination.State.route) {
-                StateScreen()
+                SettingsSubScreen(NovaDestination.State, navController) { StateScreen() }
             }
             composable(NovaDestination.Gain.route) {
-                GainScreen()
+                SettingsSubScreen(NovaDestination.Gain, navController) { GainScreen() }
             }
             composable(NovaDestination.Knowledge.route) {
                 KnowledgeMapScreen()
@@ -123,11 +131,40 @@ fun NovaApp(
                 AuditLogScreen()
             }
             composable(NovaDestination.Device.route) {
-                DeviceScreen()
+                SettingsSubScreen(NovaDestination.Device, navController) { DeviceScreen() }
             }
             composable(NovaDestination.Settings.route) {
-                SettingsScreen()
+                SettingsScreen(navController)
             }
+        }
+    }
+}
+
+/** Wraps a settings submenu (Device/Gain/State - see SETTINGS_SUBSCREENS in SettingsScreen.kt)
+ * with a top bar and back button, since these are pushed on top of the Settings tab rather than
+ * getting their own bottom nav entry and would otherwise have no visible way back besides the
+ * system gesture. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SettingsSubScreen(
+    destination: NovaDestination,
+    navController: NavController,
+    content: @Composable () -> Unit,
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(destination.label) },
+                navigationIcon = {
+                    IconButton(onClick = { navController.popBackStack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        Box(modifier = Modifier.padding(innerPadding)) {
+            content()
         }
     }
 }
