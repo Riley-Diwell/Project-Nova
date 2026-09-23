@@ -71,7 +71,7 @@ object AmbientCheckRunner {
         departure?.let { DepartureAlarmScheduler.schedule(context, it) }
 
         val text = departure?.let { leaveSoonText(it) } ?: return AmbientCheckResult.QUIET
-        val delivered = AmbientNotifier.notify(context, text)
+        val delivered = AmbientNotifier.notify(context, text, ledFlash = AmbientNotifier.LedFlash.SLOW)
 
         // "Shown" is the ambient equivalent of a voice turn's TTS finishing without being
         // talked over (VoiceScreen.kt's speak()/postOutcome) - there is no barge-in signal

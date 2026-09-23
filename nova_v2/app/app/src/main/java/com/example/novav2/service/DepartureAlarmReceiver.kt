@@ -21,7 +21,7 @@ class DepartureAlarmReceiver : BroadcastReceiver() {
             mode == "walking" -> "Time to head to $destination"
             else -> "Time to leave for $destination"
         }
-        AmbientNotifier.notify(context, text)
+        AmbientNotifier.notify(context, text, ledFlash = AmbientNotifier.LedFlash.FAST)
     }
 
     companion object {
