@@ -16,12 +16,33 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Lets BootCompletedReceiver bring NovaDeviceService's BLE connection back after a
+         reboot without the user having to open the app first. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Normal protection level, granted at install with no runtime prompt. Required for
          AlarmClock's EXTRA_SKIP_UI to actually skip the Clock app's confirmation screen when
          AlarmIntents.kt fires set_timer/set_alarm - without it the OS shows the screen anyway. -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+
+    <!-- Nova device BLE connection (see ble/ package, docs/ble-protocol.md).
+         Legacy pair for API <=30; BLUETOOTH_SCAN/CONNECT replace them from 31.
+         neverForLocation on the scan permission: CompanionDeviceManager's own
+         picker does the scanning, our filter is only a service UUID, never
+         used to derive location - so ACCESS_FINE_LOCATION is not needed. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
+
+    <uses-feature
+        android:name="android.software.companion_device_setup"
+        android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -87,15 +108,28 @@
             android:name=".service.DepartureAlarmReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".service.BootCompletedReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".service.SignalMonitorService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
         <service
+            android:name=".service.NovaDeviceService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <service
             android:name=".service.AssistVoiceService"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="microphone|dataSync" />
     </application>
 
 </manifest>

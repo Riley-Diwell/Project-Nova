@@ -10,6 +10,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
+import com.example.novav2.ble.NovaDevicePairing
+import com.example.novav2.service.NovaDeviceService
 import com.example.novav2.service.SignalMonitorService
 import com.example.novav2.ui.NovaApp
 import com.example.novav2.ui.theme.NovaTheme
@@ -31,6 +33,15 @@ class MainActivity : ComponentActivity() {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         ContextCompat.startForegroundService(this, Intent(this, SignalMonitorService::class.java))
+        // NovaDeviceService is otherwise only ever started once, from DeviceScreen's
+        // pairing button - nothing else restarts it, so a process death (app swiped
+        // away, low memory, ...) silently drops the BLE connection until the app is
+        // reopened. startForegroundService is safe to call even if it's already
+        // running (just redelivers onStartCommand), so this is a no-op most of the
+        // time and a real restart the rest of the time.
+        if (NovaDevicePairing.isPaired(this)) {
+            ContextCompat.startForegroundService(this, Intent(this, NovaDeviceService::class.java))
+        }
 
         setContent {
             NovaTheme {
