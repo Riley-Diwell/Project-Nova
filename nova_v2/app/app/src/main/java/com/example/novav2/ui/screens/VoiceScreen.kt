@@ -107,7 +107,7 @@ private enum class VoiceState { IDLE, LISTENING, THINKING, SPEAKING }
 
 /**
  * Executes the backend's queued "calendar.create_event" actions (add_calendar_event in
- * intent_surface/loop.py) via CalendarWriter, which inserts into the device's Calendar Provider
+ * the server's intent_surface.py) via CalendarWriter, which inserts into the device's Calendar Provider
  * and syncs onward to whichever account owns that calendar (e.g. Google). Assumes
  * WRITE_CALENDAR is already granted - callers must check CalendarWriter.hasPermission first.
  */

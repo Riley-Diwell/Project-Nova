@@ -10,7 +10,7 @@ INPUT
   - destination (required) - where they want to go
   - arrival_time (optional) - when they need to be there
   - origin (optional) - defaults to the user's current location_ctx,
-    injected by intent_surface/loop.py before dispatch (see _run_local_tool)
+    injected by intent_surface.py before dispatch (see _run_local_tool)
   - mode (optional) - transit | walking | driving, defaults to the user's
     preferred_travel_mode (injected the same way as origin) or DEFAULT_TRAVEL_MODE
   - minutes_until_start (optional) - the calendar commitment's own countdown,

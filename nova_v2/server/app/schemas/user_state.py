@@ -13,7 +13,7 @@ declared state may omit them.
 
 WHO USES THIS
 - Riley: Android posts this alongside every Event to POST /event
-- Georgia: intent_surface / loop.py consume it as context
+- intent_surface.py: consumes it as turn context; control/observer.py predicts from it
 """
 
 from typing import List, Optional

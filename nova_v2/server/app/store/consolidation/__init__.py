@@ -39,7 +39,7 @@ COUNTED_* maps are counted, and that list is the guard - it is an allowlist of
 things whose repetition means something, not a scan for anything that recurs.
 
 USAGE
-    from app.consolidation import consolidate, preview
+    from app.store.consolidation import consolidate, preview
 
     preview(user_id)       # what would be written, no writes
     consolidate(user_id)   # phrase and upsert into Persona
@@ -50,6 +50,7 @@ takes the user first, reads only their episodes, facts and tombstones, and
 writes only into their Persona - otherwise a habit counted out of one user's
 trips would be filed as a fact about another.
 
+    POST /persona/consolidate[?preview=true]      # the same, over HTTP
 """
 from __future__ import annotations
 
@@ -108,9 +109,7 @@ UserId = Union[UUID, str]
 # counted candidates, not a reasoning task - it phrases and files, nothing more.
 MODEL = "claude-haiku-4-5"
 
-# A phraser turns counted candidates into filed facts. Injectable so tests (and
-# scripts/consolidate_memory.py --dry-run) can run the whole pipeline without
-# an API key.
+# A phraser turns counted candidates into filed facts. Injectable so tests can run the whole pipeline without an API key.
 Phraser = Callable[[list[Candidate]], list[DerivedFact]]
 
 PHRASING_PROMPT = (

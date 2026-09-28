@@ -8,7 +8,7 @@ calendar lives on the phone, in Android's Calendar Provider. They differ in
 whether anything has to come back.
 
   get_calendar_range     the model needs the answer before it can speak, so
-                         the Intent Surface pauses the conversation (loop.py's
+                         the Intent Surface pauses the conversation (intent_surface.py's
                          CLIENT_TOOLS), hands the range to Android, and
                          resumes with whatever the device sends back.
                          _execute() is unreachable in normal operation and
@@ -32,7 +32,7 @@ volunteers what is coming up, schedules a plan you merely mentioned, applies
 a restated change, or offers to remove something outright; zero means it
 only acts when asked - even though execution happens off-box.
 
-Being registered also means loop.py builds their Claude-facing definitions from
+Being registered also means intent_surface.py builds their Claude-facing definitions from
 here rather than keeping a second copy inline.
 """
 
@@ -181,7 +181,7 @@ class CalendarTool(BaseTool):
         return round(min(1.0, weight / CALENDAR_SATURATION), 4)
 
     def _execute(self, tool_input: dict[str, Any]) -> Any:
-        # loop.py intercepts this tool by name before dispatch (CLIENT_TOOLS) and
+        # intent_surface.py intercepts this tool by name before dispatch (CLIENT_TOOLS) and
         # routes it to the phone, so reaching here means that interception broke.
         return {
             "success": False,

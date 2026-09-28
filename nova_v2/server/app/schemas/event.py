@@ -11,7 +11,6 @@ Defines schemas for events.
 
 WHO USES THIS
 - Riley: POSTs events observed via Android using this schema
-- Georgia: state_estimator.py uses these events as input to estimate state
 
 """
 

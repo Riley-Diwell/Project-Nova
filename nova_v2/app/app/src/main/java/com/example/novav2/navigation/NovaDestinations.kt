@@ -14,8 +14,6 @@ import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.ui.graphics.vector.ImageVector
 
-const val ONBOARDING_ROUTE = "onboarding"
-
 sealed class NovaDestination(val route: String, val label: String, val icon: ImageVector) {
     data object Dashboard : NovaDestination("dashboard", "Dashboard", Icons.Default.Home)
     data object Voice : NovaDestination("voice", "Voice", Icons.Default.Mic)

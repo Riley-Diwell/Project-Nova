@@ -7,9 +7,8 @@ horizon, and how much that prediction is worth.
 
 WHY IT EXISTS
 NOVA was described as a control loop and had no observer. A next-state estimator
-existed early in the project and was deleted before it reached the live path
-(state_estimator/state_estimator.py, still in the tree, marked superseded), and
-nothing replaced it. Without a predicted next state there is no error signal, and
+existed early in the project (V1's state_estimator/) and never reached the live
+path; it was not ported to V2, and nothing replaced it. Without a predicted next state there is no error signal, and
 without an error signal Controller Gain had nothing to multiply - so it multiplied
 the State Estimator's confidence in its own current estimate instead, which
 answers "how sure are we about now" and never "how far off are we".

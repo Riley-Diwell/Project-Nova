@@ -13,7 +13,7 @@ different things:
     the map is worth looking at rather than just a folder tree.
 
 WHY A THRESHOLD WORKS HERE AND NOT IN RETRIEVAL
-loop.py's PERSONA_MIN_SIMILARITY has to be near-useless (0.35) because it
+intent_surface.py's PERSONA_MIN_SIMILARITY has to be near-useless (0.35) because it
 compares a *question* to a *statement*, and those two bands overlap. Here both
 sides are stored facts - same voice, same shape, no query instruction - and the
 distribution separates cleanly. Measured on real facts:
