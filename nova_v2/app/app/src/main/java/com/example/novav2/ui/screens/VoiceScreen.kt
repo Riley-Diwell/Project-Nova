@@ -14,6 +14,8 @@ import android.speech.tts.UtteranceProgressListener
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
@@ -29,6 +31,7 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,9 +40,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.StickyNote2
+import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -76,6 +83,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -89,14 +97,14 @@ import com.example.novav2.state.DepartureAlarmScheduler
 import com.example.novav2.state.UserStateCollector
 import com.example.novav2.state.parseIsoToEpochMillis
 import com.example.novav2.viewmodel.ChatViewModel
+import com.example.novav2.ui.components.EmptyState
+import com.example.novav2.ui.components.ScreenHeader
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.time.format.DateTimeParseException
 import java.util.Locale
 
 private enum class VoiceState { IDLE, LISTENING, THINKING, SPEAKING }
-
-private val NovaMicBlue = Color(0xFF487EE4)
 
 /**
  * Executes the backend's queued "calendar.create_event" actions (add_calendar_event in
@@ -180,12 +188,14 @@ private fun MessageBubble(message: ChatMessage) {
                 bottomStart = if (message.fromUser) 16.dp else 4.dp,
                 bottomEnd = if (message.fromUser) 4.dp else 16.dp,
             ),
-            modifier = Modifier.widthIn(max = 280.dp),
+            modifier = Modifier.fillMaxWidth(0.82f).wrapContentWidth(
+                if (message.fromUser) Alignment.End else Alignment.Start,
+            ),
         ) {
             Text(
                 text = message.text,
                 style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onBackground,
+                color = if (message.fromUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
             )
         }
@@ -222,7 +232,9 @@ private fun PendingStatusBubble(text: String, fromUser: Boolean = false) {
             Text(
                 text = text,
                 style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                // Muted grey on the blue user-side bubble was close to unreadable.
+                color = if (fromUser) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f)
+                else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
             )
         }
@@ -280,6 +292,16 @@ fun VoiceScreen(
     LaunchedEffect(messages.size, voiceState) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size - 1)
+        }
+    }
+
+    // Once nothing is in flight, whatever statusText still says is a one-off notice ("Didn't
+    // catch that", "Stopped.", …) rather than live progress - let it fade instead of sitting at
+    // the bottom of the transcript until the next turn. Restarts if the text or state changes.
+    LaunchedEffect(statusText, voiceState) {
+        if (voiceState == VoiceState.IDLE && statusText.isNotBlank()) {
+            kotlinx.coroutines.delay(4000)
+            statusText = ""
         }
     }
 
@@ -548,6 +570,10 @@ fun VoiceScreen(
             override fun onEndOfSpeech() {}
 
             override fun onError(error: Int) {
+                // SpeechRecognizer can report a stray error after it has already delivered
+                // results (or after stopListening()) - by then the turn is THINKING/SPEAKING
+                // and this must not knock it back to IDLE with a bogus "Didn't catch that".
+                if (voiceState != VoiceState.LISTENING) return
                 voiceState = VoiceState.IDLE
                 statusText = "Didn't catch that - tap to try again."
             }
@@ -645,27 +671,32 @@ fun VoiceScreen(
                 })
             },
     ) {
-        if (messages.isEmpty()) {
-            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                if (statusText.isNotBlank()) {
-                    PendingStatusBubble(statusText, fromUser = voiceState == VoiceState.LISTENING)
-                } else {
-                    Text(
-                        text = "Say something or type a message to get started.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        } else {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                TextButton(onClick = { chatViewModel.clearMessages() }) {
+        ScreenHeader(title = "Nova") {
+            if (messages.isNotEmpty()) {
+                TextButton(onClick = {
+                    chatViewModel.clearMessages()
+                    // A leftover notice ("Didn't catch that", "Stopped.") belongs to the chat
+                    // being cleared; one describing a turn still in flight does not.
+                    if (voiceState == VoiceState.IDLE) statusText = ""
+                }) {
+                    Icon(Icons.Default.DeleteSweep, contentDescription = null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
                     Text("Clear chat")
                 }
             }
+        }
+        // The empty state only when there's truly nothing to show - a status with no messages yet
+        // goes through the LazyColumn below, so it sits where the first message would rather
+        // than floating in the middle of the screen.
+        if (messages.isEmpty() && statusText.isBlank()) {
+            Box(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
+                EmptyState(
+                    Icons.Default.GraphicEq,
+                    "How can I help?",
+                    "Tap the mic and speak, or type a message below.",
+                )
+            }
+        } else {
             LazyColumn(
                 state = listState,
                 modifier = Modifier
@@ -673,7 +704,7 @@ fun VoiceScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(vertical = 16.dp),
+                contentPadding = PaddingValues(vertical = 8.dp),
             ) {
                 items(messages, key = { it.id }) { message ->
                     MessageBubble(message)
@@ -759,9 +790,10 @@ fun VoiceScreen(
                         keyboardActions = KeyboardActions(onSend = { handleSend() }),
                     )
                     Spacer(Modifier.width(8.dp))
-                    IconButton(
+                    FilledIconButton(
                         onClick = { handleSend() },
                         enabled = inputText.isNotBlank(),
+                        modifier = Modifier.size(48.dp),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                     }
@@ -772,19 +804,32 @@ fun VoiceScreen(
                     enabled = voiceState == VoiceState.IDLE || voiceState == VoiceState.LISTENING,
                     shape = RoundedCornerShape(24.dp),
                     colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = NovaMicBlue,
+                        containerColor = if (voiceState == VoiceState.LISTENING) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.primary,
                         contentColor = Color.White,
-                        disabledContainerColor = NovaMicBlue.copy(alpha = 0.4f),
-                        disabledContentColor = Color.White,
+                        disabledContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
+                        disabledContentColor = Color.White.copy(alpha = 0.7f),
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(56.dp),
                 ) {
-                    Icon(
-                        if (voiceState == VoiceState.LISTENING) Icons.Default.Stop else Icons.Default.Mic,
-                        contentDescription = if (voiceState == VoiceState.LISTENING) "Stop" else "Speak",
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (voiceState == VoiceState.LISTENING) Icons.Default.Stop else Icons.Default.Mic,
+                            contentDescription = null,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            when (voiceState) {
+                                VoiceState.LISTENING -> "Tap to send"
+                                VoiceState.THINKING -> "Thinking…"
+                                VoiceState.SPEAKING -> "Speaking…"
+                                VoiceState.IDLE -> "Tap to speak"
+                            },
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                    }
                 }
             }
         }

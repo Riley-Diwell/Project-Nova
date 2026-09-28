@@ -11,6 +11,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,13 +20,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -40,6 +45,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.novav2.model.CalendarEventInfo
@@ -56,6 +62,7 @@ import com.example.novav2.state.LocationSignal
 import com.example.novav2.state.PlaceNameLookup
 import com.example.novav2.state.SignalRepository
 import com.example.novav2.state.UserStateCollector
+import com.example.novav2.ui.components.SectionLabel
 import com.example.novav2.ui.theme.NovaOk
 import com.example.novav2.ui.theme.NovaWarn
 import kotlinx.coroutines.delay
@@ -223,13 +230,13 @@ fun StateScreen() {
                 Text(
                     "Nothing on the calendar in the next couple of hours.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = 8.dp),
                 )
             } else {
                 (userState.currentEvents + userState.upcomingEvents).forEach { event ->
                     Spacer(Modifier.height(6.dp))
-                    HorizontalDivider()
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     Spacer(Modifier.height(10.dp))
                     EventDetail(event)
                 }
@@ -323,7 +330,7 @@ private fun SummaryStrip(
     remainingMillis: Long?,
     nextClassLabel: String,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(IntrinsicSize.Min)) {
         StripTile(label = "Confidence", modifier = Modifier.weight(1f)) {
             Text("$confidencePercent%", style = MaterialTheme.typography.titleLarge)
         }
@@ -345,10 +352,11 @@ private fun SummaryStrip(
 private fun StripTile(label: String, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     Column(
         modifier = modifier
-            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(14.dp))
+            .fillMaxHeight()
+            .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(14.dp))
             .padding(vertical = 14.dp, horizontal = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically),
     ) {
         content()
         Text(
@@ -400,7 +408,7 @@ private fun TriggerBanner(
         }
         Spacer(Modifier.width(12.dp))
         Button(enabled = !running, onClick = onTrigger) {
-            Text(if (running) "Checking…" else "Check now")
+            Text(if (running) "Checking…" else "Check now", maxLines = 1)
         }
     }
 }
@@ -429,14 +437,9 @@ private fun relativeTime(deltaMillis: Long): String {
 @Composable
 private fun GroupCard(title: String, content: @Composable () -> Unit) {
     Column {
-        Text(
-            title.uppercase(),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.outline,
-            modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
-        )
+        SectionLabel(title, Modifier.padding(start = 4.dp, bottom = 6.dp))
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
             shape = RoundedCornerShape(14.dp),
         ) {
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
@@ -458,18 +461,24 @@ private fun DataRow(label: String, value: String, caption: String? = null) {
         Column(modifier = Modifier.weight(1f)) {
             Text(label, style = MaterialTheme.typography.bodyMedium)
             caption?.let {
-                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         Spacer(Modifier.width(12.dp))
+        // Capped at 60% so a long value (an app or place name) ellipsizes instead of squeezing
+        // the label into a one-letter-wide column.
         Text(
             value,
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.End,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth(0.6f).wrapContentWidth(Alignment.End),
         )
     }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
 @Composable
@@ -484,7 +493,7 @@ private fun ChipRow(label: String, chipText: String, tone: Tone) {
         Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
         Chip(chipText, tone)
     }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
 // ============================================================================================
@@ -543,8 +552,12 @@ private fun EventDetailRow(label: String, value: String) {
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-        Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(end = 12.dp))
+        Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface, textAlign = TextAlign.End,
+            maxLines = 2, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth(0.7f).wrapContentWidth(Alignment.End))
     }
 }
 
@@ -562,27 +575,22 @@ private fun DebugToolsSection(
     onAddTestEvent: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            "DEBUG TOOLS",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.outline,
-            modifier = Modifier.padding(start = 4.dp),
-        )
+        SectionLabel("Debug tools", Modifier.padding(start = 4.dp))
         if (!runtimePermissionsGranted) {
-            Button(onClick = onGrantRuntimePermissions, modifier = Modifier.fillMaxWidth()) {
+            FilledTonalButton(onClick = onGrantRuntimePermissions, modifier = Modifier.fillMaxWidth()) {
                 Text("Grant calendar, activity, location & phone permissions")
             }
         }
         if (!foregroundAppPermission) {
-            Button(onClick = onGrantUsageAccess, modifier = Modifier.fillMaxWidth()) {
+            FilledTonalButton(onClick = onGrantUsageAccess, modifier = Modifier.fillMaxWidth()) {
                 Text("Grant usage access (foreground app)")
             }
         }
-        Button(onClick = onAddTestEvent, modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(onClick = onAddTestEvent, modifier = Modifier.fillMaxWidth()) {
             Text("Add test calendar event")
         }
         testEventStatus?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

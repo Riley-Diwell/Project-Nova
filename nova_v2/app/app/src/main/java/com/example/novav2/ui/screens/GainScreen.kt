@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -93,7 +95,7 @@ fun GainScreen() {
                 gains = gains.map { if (it.name == updated.name) updated else it }
                 status = ""
             } catch (e: IOException) {
-                status = "Couldn't save ${tool.name} - backend unreachable."
+                status = "Couldn't save ${prettyToolName(tool.name)} - backend unreachable."
             } finally {
                 // Drop the local value either way: on success the server's is better, and on
                 // failure keeping it would show a setting that was never actually stored.
@@ -103,7 +105,17 @@ fun GainScreen() {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        if (status.isNotBlank()) {
+        Text(
+            text = "0 means a tool only acts when you ask. 1 lets it act on its own whenever Nova is confident.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 4.dp),
+        )
+        if (status.startsWith("Loading")) {
+            Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        } else if (status.isNotBlank()) {
             Text(
                 text = status,
                 style = MaterialTheme.typography.bodyMedium,
@@ -143,7 +155,10 @@ private fun GainCard(
     onValueCommit: () -> Unit,
     onReset: () -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -151,9 +166,10 @@ private fun GainCard(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = tool.name,
+                text = prettyToolName(tool.name),
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center,
             )
             Spacer(Modifier.height(6.dp))
             Text(
@@ -178,7 +194,8 @@ private fun GainCard(
                     "Learned value · not overridden"
                 },
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
             )
 
             if (tool.isOverridden) {
@@ -199,7 +216,8 @@ private fun GainDial(
     onValueChange: (Float) -> Unit,
     onValueCommit: () -> Unit,
 ) {
-    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+    // One step up from the card, so the empty part of the arc is visible against it.
+    val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
     val progressColor = MaterialTheme.colorScheme.primary
 
     Box(
@@ -293,3 +311,7 @@ private fun Offset.toDialValue(width: Float, height: Float): Float {
 }
 
 private fun format(value: Float): String = String.format(Locale.US, "%.2f", value)
+
+/** "add_calendar_event" -> "Add calendar event" - the raw registry name is for the backend. */
+private fun prettyToolName(name: String): String =
+    name.replace('_', ' ').replaceFirstChar { it.uppercase() }
