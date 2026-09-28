@@ -13,6 +13,8 @@
 --                         semantic search.
 --   4. persona_forgotten - deletions that have to stick (see section 4 below).
 --   6. row-level security on every table (anon key gets nothing).
+--   7. reminders       - each account's reminders, synced from the phone
+--                         (app/store/reminders.py).
 --   8. profiles        - display name and onboarding answers (app/store/profile.py).
 --
 -- Every table is per-account: a user_id referencing Supabase Auth's auth.users
@@ -243,6 +245,35 @@ create policy persona_owner on public.persona for all to authenticated
 drop policy if exists persona_forgotten_owner on public.persona_forgotten;
 create policy persona_forgotten_owner on public.persona_forgotten for all to authenticated
     using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+
+-- ---------------------------------------------------------------------------
+-- 7. Reminders  (app/store/reminders.py)
+-- ---------------------------------------------------------------------------
+-- The phone owns reminders day to day; this is the account's copy, so they
+-- survive sign-out, reinstall and a new phone. Last writer wins on updated_at_ms.
+
+create table if not exists public.reminders (
+    user_id        uuid        not null references auth.users (id) on delete cascade,
+    id             text        not null,              -- the phone's UUID for the reminder
+    data           jsonb       not null,              -- the phone's ReminderEntity, as-is
+    status         text        not null,              -- copied out of data, for purging
+    updated_at_ms  bigint      not null,              -- phone's clock at its last edit: last writer wins
+    synced_at      timestamptz not null default now(),-- server's clock at the last write: the pull cursor
+    primary key (user_id, id)
+);
+
+create index if not exists reminders_user_synced_idx on public.reminders (user_id, synced_at);
+
+-- The server uses the service-role key and filters by user itself; this policy
+-- is the backstop for anything that ever reaches the table with a user's token.
+alter table public.reminders enable row level security;
+drop policy if exists reminders_owner on public.reminders;
+create policy reminders_owner on public.reminders for all to authenticated
+    using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+comment on table public.reminders is
+    'Each account''s reminders, synced from the phone (last writer wins on updated_at_ms).';
 
 
 -- ---------------------------------------------------------------------------

@@ -50,6 +50,7 @@ from app.store import memory
 from app.store import persona
 from app.api import auth as auth_api
 from app.api import me as me_api
+from app.api import reminders as reminders_api
 from app.core import auth
 from app.core.auth import AuthUser, current_user
 from app.core.request_user import bind_request_user
@@ -126,6 +127,7 @@ app = FastAPI(
 auth.check_startup()
 app.include_router(auth_api.router)
 app.include_router(me_api.router)
+app.include_router(reminders_api.router)
 
 _API_KEY = os.environ.get("NOVA_API_KEY", "").strip()
 if not _API_KEY:
@@ -181,7 +183,12 @@ def _open_episode(user_id: UUID, event: Event, user_state: UserState) -> str | N
         episode_id = memory.append(user_id, {
             "event_type": event.type,
             "event": event.model_dump(mode="json"),
-            "user_state": user_state.model_dump(mode="json"),
+            # The reminder window stays out of the episode log (privacy): the
+            # account's reminders live only in their own table (store/reminders.py),
+            # and the Action input already records what Nova did.
+            "user_state": user_state.model_dump(
+                mode="json", exclude={"reminders", "reminders_pending_total"}
+            ),
         })
         print(f"[memory] opened episode {episode_id} (event_type={event.type!r})")
         return episode_id
@@ -206,14 +213,17 @@ def _close_episode(user_id: UUID, intent: IntentResult) -> None:
 
 def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
     if isinstance(intent, NeedMoreResult):
+        request = {
+            "type": intent.request_type,
+            "from": intent.from_time,
+            "to": intent.to_time,
+        }
+        if intent.include_done is not None:
+            request["include_done"] = intent.include_done
         return NeedMoreOut(
             event_id=intent.event_id,
             session_id=intent.session_id,
-            request={
-                "type": intent.request_type,
-                "from": intent.from_time,
-                "to": intent.to_time,
-            },
+            request=request,
         )
     return EventOut(
         event_id=intent.event_id,

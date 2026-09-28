@@ -51,6 +51,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
+from app.control.cues import obligation_cue
 from app.control.gain.config import clamp
 from app.schemas.user_state import UserState
 from app.tools.functions.notification_batcher import Mode
@@ -177,6 +178,12 @@ class Observation(BaseModel):
     # --- what Consolidation has counted --------------------------------------
     habitual_places: list[str] = Field(default_factory=list)
 
+    # --- what the user just said ---------------------------------------------
+    # How strongly this turn's words stated an obligation, 0 to 1
+    # (control/cues.py) - set_reminder's error term. 0.0 on every non-voice
+    # event. Additive and backend-only, like everything else here.
+    obligation_cue: float = 0.0
+
 
 # Evidence weights for the prediction confidence. They sum to 1.0, so a fully
 # corroborated prediction is worth 1.0 and a bare one is worth what it had.
@@ -239,6 +246,7 @@ def observe(
         predicted=predicted,
         prediction_confidence=confidence,
         habitual_places=habitual,
+        obligation_cue=obligation_cue(event),
     )
 
 

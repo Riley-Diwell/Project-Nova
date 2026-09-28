@@ -25,6 +25,11 @@ from app.tools.functions.calendar_tool import (
 from app.tools.functions.memory_tool import MemoryTool
 from app.tools.functions.navigation import NavigationTool
 from app.tools.functions.notification_management import NotificationManagementTool
+from app.tools.functions.reminder_tool import (
+    GetRemindersTool,
+    SetReminderTool,
+    UpdateReminderTool,
+)
 
 # Tools that run on the phone rather than here, and whose answer the model needs
 # before it can speak - so the Intent Surface pauses the conversation, hands the
@@ -36,7 +41,18 @@ from app.tools.functions.notification_management import NotificationManagementTo
 # wait for. Their Action is the instruction (delete's is gated behind an
 # on-device confirm dialog before it takes effect, but that gate is Android's,
 # not a hop back to here).
-CLIENT_TOOLS: frozenset[str] = frozenset({"get_calendar_range"})
+#
+# get_reminders is the same shape as get_calendar_range: the reminders live in
+# the phone's own table (reminder_tool.py), so a range outside
+# user_state.reminders has to be read there.
+CLIENT_TOOLS: frozenset[str] = frozenset({"get_calendar_range", "get_reminders"})
+
+# Fire-and-forget tools that validate their own input. When one returns
+# {"success": False} its Action is recorded with ran=False, so the phone - which
+# skips ran=false Actions - never carries out an instruction the tool rejected.
+# The calendar and alarm tools are not here because they accept whatever they
+# are given; this is only for tools with something to reject.
+DEVICE_TOOLS: frozenset[str] = frozenset({"set_reminder", "update_reminder"})
 
 
 def build_registry(gain_store: Optional[GainStore] = None) -> ToolRegistry:
@@ -67,4 +83,9 @@ def build_registry(gain_store: Optional[GainStore] = None) -> ToolRegistry:
     # the Clock app instead of the Calendar Provider - see alarm_tool.py.
     registry.register(SetTimerTool())
     registry.register(SetAlarmTool())
+    # Reminders Nova delivers itself - stored and fired on the phone, so the
+    # same fire-and-forget Actions plus a client tool for reading a range.
+    registry.register(SetReminderTool())
+    registry.register(UpdateReminderTool())
+    registry.register(GetRemindersTool())
     return registry

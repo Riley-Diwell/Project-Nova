@@ -107,6 +107,12 @@ _REQUEST_FRAMES = (
     "could you",
     "would you",
     "will you",
+    # A reminder ask that doesn't lead with the verb: "at 5 remind me to call
+    # mum", "tomorrow remind me...". "remind" is already an imperative, but
+    # only as the first word.
+    "remind me",
+    "don't let me forget",
+    "dont let me forget",
 )
 
 

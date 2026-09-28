@@ -38,7 +38,7 @@ from app.control.gain.overrides import GainOverrides
 from app.control.gain.reinforcement import Outcome, Reinforcer
 from app.core.request_user import as_user
 from app.tools.core.action import Action
-from app.tools.core.catalogue import CLIENT_TOOLS, build_registry
+from app.tools.core.catalogue import CLIENT_TOOLS, DEVICE_TOOLS, build_registry
 from app.tools.core.dispatcher import Dispatcher
 from app.tools.core.registry import ToolRegistry
 from app.tools.functions.notification_management import set_batcher_mode
@@ -165,14 +165,41 @@ SYSTEM_PROMPT = (
     "nudge itself from the tool's own numbers, not from anything you say, so "
     "there is nothing to phrase - just call the tool and return \"\". Only "
     "answer about leaving out loud when the user asked directly (a voice turn). "
-    "TIMERS AND ALARMS. Call set_timer for a countdown with no clock time "
-    "named - 'set a timer for 10 minutes', 'ping me in 90 seconds' - "
+    "TIMERS AND ALARMS. Call set_timer for a bare countdown with no clock "
+    "time and nothing to say - 'set a timer for 10 minutes', 'ping me in 90 "
+    "seconds' - "
     "converting whatever they said into whole duration_seconds yourself (10 "
     "minutes -> 600). Call set_alarm instead when they name a clock time - "
     "'wake me up at 7', 'set an alarm for 6:30am' - using hour/minute in the "
     "user's LOCAL time (top-level local_time), never UTC. Both fire on the "
     "device the moment the call is made, so confirm them in speech as done, "
     "not as pending. "
+    "REMINDERS. A reminder has something to say ('remind me to email Dr Chen "
+    "at 4:30', 'remind me in 20 minutes to take the pasta off', 'don't let me "
+    "forget to submit the form') - call set_reminder. A timer is a bare "
+    "countdown, an alarm is a wake-up, and something with a place, people or "
+    "a duration is a calendar event. For a relative time pass in_minutes and "
+    "never add it to local_time yourself. 'After this lecture' or 'after "
+    "class' means copying that current_events entry's end_local exactly. If "
+    "they gave no time, ask when. user_state.reminders lists their reminders "
+    "for the next week and any that just went off - answer questions about "
+    "them from there, and call get_reminders for anything outside it. "
+    "update_reminder completes, snoozes, edits or deletes one, and its "
+    "reminder_id must be copied from user_state.reminders or a get_reminders "
+    "result, never invented. 'That' or 'it' just after a reminder went off "
+    "means the one with the smallest fired_minutes_ago. "
+    "CHANGING A REMINDER. 'Change my dentist reminder to 4pm', 'move the "
+    "form reminder to Friday', 'make the Sam one say call Sam instead' - find "
+    "the reminder whose text matches their words in user_state.reminders; if "
+    "none does, call get_reminders from local_time to a year ahead to look "
+    "for it before saying you can't find it. If two or more match, ask which "
+    "one. Then call update_reminder with action 'edit'. A new clock time "
+    "keeps the reminder's own date (read it off its due_local) and a new day "
+    "keeps its own time, both passed as a full due_local; 'an hour later' or "
+    "'push it back' is shift_minutes; new wording is text. Never create a "
+    "second reminder instead of editing, and never delete and re-add. "
+    "Reminders are stored on the device the moment the call is made, so "
+    "confirm them as done. "
     "EDITING OR DELETING A CALENDAR EVENT both need its event_id, which only "
     "ever comes from a get_calendar_range result (this turn's or one in "
     "recent_episodes) - call get_calendar_range first if you don't already "
@@ -395,6 +422,12 @@ class TurnContext:
     # itself from these fields instead of trusting the model to phrase it.
     scheduled_departure: dict[str, Any] | None = None
 
+    # The reminder ids the model has actually been shown this turn - the
+    # user_state.reminders window plus any get_reminders result. None when the
+    # phone sent no window at all (an older client), which turns the check in
+    # _unknown_reminder off rather than rejecting every update_reminder.
+    known_reminder_ids: set[str] | None = None
+
     @property
     def ran(self) -> list[str]:
         """Names of the tools that actually ran - logging only."""
@@ -480,13 +513,42 @@ def _refused_result(name: str) -> dict[str, Any]:
     }
 
 
+def _unknown_reminder(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> dict[str, Any] | None:
+    """The refusal for an update_reminder naming an id the model was never
+    shown, or None to let it through.
+
+    The phone treats an unknown id as a silent no-op, and by then the model
+    has already said "done" - so a guessed or stale id has to be caught here,
+    where the model can still recover by looking the reminder up.
+    """
+    if name != "update_reminder" or ctx.known_reminder_ids is None:
+        return None
+    if str(tool_input.get("reminder_id")) in ctx.known_reminder_ids:
+        return None
+    return {
+        "success": False,
+        "error": (
+            "That reminder_id isn't in user_state.reminders or a get_reminders "
+            "result this turn. Call get_reminders (from local_time to a year "
+            "ahead) to find the reminder they mean, then use its id."
+        ),
+    }
+
+
 def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> Any:
     if name == "get_current_address":
         return _reverse_geocode(ctx.location_ctx)
+    unknown = _unknown_reminder(name, tool_input, ctx)
+    if unknown is not None:
+        _record_action(name, tool_input, ctx, ran=False)
+        return unknown
     if _REGISTRY.has(name):
-        if ctx.location_ctx and "origin" not in tool_input:
+        # Not for DEVICE_TOOLS: a reminder has no use for the user's
+        # coordinates, and whatever is injected here is written into the Action
+        # and so into the Episode log.
+        if ctx.location_ctx and "origin" not in tool_input and name not in DEVICE_TOOLS:
             tool_input = {**tool_input, "origin": ctx.location_ctx}
-        if ctx.preferred_travel_mode and "mode" not in tool_input:
+        if ctx.preferred_travel_mode and "mode" not in tool_input and name not in DEVICE_TOOLS:
             tool_input = {**tool_input, "mode": ctx.preferred_travel_mode}
         if "utc_offset_minutes" not in tool_input:
             # So a tool that needs to interpret a user-relative clock string (e.g.
@@ -499,7 +561,17 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
         # Recorded after the call, so a tool that raises is not reported as run -
         # and with the augmented tool_input, so the Action carries the origin the
         # tool actually used rather than the one the model supplied.
-        _record_action(name, tool_input, ctx, ran=True)
+        #
+        # A DEVICE_TOOLS call that rejected its own input is recorded as not run:
+        # its Action is an instruction to the phone, which skips ran=false, and
+        # the Audit tab and reinforcement should not count a call that did
+        # nothing. Other tools keep ran=True whatever they returned.
+        ran = not (
+            name in DEVICE_TOOLS
+            and isinstance(result, dict)
+            and result.get("success") is False
+        )
+        _record_action(name, tool_input, ctx, ran=ran)
         return result
     return {"error": f"unknown tool: {name}"}
 
@@ -624,6 +696,8 @@ class NeedMoreResult(BaseModel):
     request_type: str
     from_time: str
     to_time: str
+    # get_reminders only - whether the phone should include completed ones.
+    include_done: bool | None = None
 
 
 _PENDING_SESSIONS: dict[str, dict[str, Any]] = {}
@@ -757,6 +831,10 @@ def _recent_episodes(user_id: UUID | str, event: Event) -> list[dict[str, Any]]:
 
 def _for_model_episode(row: dict[str, Any]) -> dict[str, Any]:
     stored_state = dict(row.get("user_state") or {})
+    # main.py never stores these, but older rows or a hand-written one might.
+    # A stale reminder list must never compete with the live one this turn.
+    stored_state.pop("reminders", None)
+    stored_state.pop("reminders_pending_total", None)
     offset = stored_state.get("utc_offset_minutes")
     offset = offset if isinstance(offset, int) else 0
 
@@ -952,6 +1030,10 @@ def _run(
         or (saved_profile.answers.travel_mode if saved_profile else None),
         utc_offset_minutes=user_state.utc_offset_minutes,
         episode_id=episode_id,
+        known_reminder_ids=(
+            {r.id for r in user_state.reminders}
+            if user_state.reminders_pending_total is not None else None
+        ),
     )
     return _run_loop(messages, MAX_ITERATIONS, event.id, ctx, is_voice=is_voice)
 
@@ -976,6 +1058,12 @@ def _resume(pending: dict[str, Any], tool_result: Any) -> IntentResult | NeedMor
     utc_offset_minutes = pending.get("utc_offset_minutes", 0)
     if isinstance(tool_result, dict) and isinstance(tool_result.get("events"), list):
         _localize_calendar_events(tool_result["events"], utc_offset_minutes)
+
+    # A get_reminders result widens what update_reminder may name this turn.
+    ctx: TurnContext = pending["ctx"]
+    if isinstance(tool_result, dict) and isinstance(tool_result.get("reminders"), list):
+        found = {str(r["id"]) for r in tool_result["reminders"] if isinstance(r, dict) and r.get("id")}
+        ctx.known_reminder_ids = (ctx.known_reminder_ids or set()) | found
 
     messages: list[dict[str, Any]] = pending["messages"]
     tool_results = [
@@ -1155,6 +1243,10 @@ def _run_loop(
                     request_type=client_call.name,
                     from_time=client_call.input.get("from_time", ""),
                     to_time=client_call.input.get("to_time", ""),
+                    include_done=(
+                        bool(client_call.input.get("include_done"))
+                        if client_call.name == "get_reminders" else None
+                    ),
                 )
 
             messages.append({"role": "user", "content": tool_results})

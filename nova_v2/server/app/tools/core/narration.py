@@ -153,7 +153,58 @@ def describe_action(tool: str, tool_input: dict[str, Any], ran: bool) -> str:
             return "Cleared all pending notifications."
         return "Checked pending notifications." if ran else "Considered checking notifications, but didn't."
 
+    if tool == "set_reminder":
+        text = (tool_input.get("text") or "").strip() or "something"
+        if not ran:
+            return f"Considered setting a reminder to '{text}', but didn't."
+        return f"Set a reminder to '{text}'{_reminder_when(tool_input)}."
+
+    if tool == "update_reminder":
+        label = (tool_input.get("label") or "").strip() or "a reminder"
+        action = tool_input.get("action")
+        if not ran:
+            verb = {"complete": "marking", "snooze": "snoozing", "edit": "changing",
+                    "delete": "removing"}.get(action, "changing")
+            return f"Considered {verb} the reminder '{label}', but didn't."
+        if action == "complete":
+            return f"Marked '{label}' done."
+        if action == "snooze":
+            minutes = tool_input.get("in_minutes") or 10
+            return f"Snoozed '{label}' for {_minutes_phrase(minutes)}."
+        if action == "delete":
+            return f"Removed the reminder '{label}'."
+        return f"Changed the reminder '{label}'."
+
+    if tool == "get_reminders":
+        when = _format_local_range(tool_input.get("from_time"), tool_input.get("to_time"))
+        return f"Checked your reminders for {when}." if when else "Checked your reminders."
+
     return f"Ran {tool}." if ran else f"Considered running {tool}, but didn't."
+
+
+def _minutes_phrase(minutes: Any) -> str:
+    """"20 minutes", "1 hour", "1 hour 30 minutes" - for in_minutes values."""
+    if not isinstance(minutes, int) or isinstance(minutes, bool) or minutes <= 0:
+        return f"{minutes} minutes"
+    hours, mins = divmod(minutes, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour" + ("s" if hours != 1 else ""))
+    if mins:
+        parts.append(f"{mins} minute" + ("s" if mins != 1 else ""))
+    return " ".join(parts)
+
+
+def _reminder_when(tool_input: dict[str, Any]) -> str:
+    """" for Wed, Sep 23, 4:30pm" / " in 20 minutes" / "" - set_reminder's time,
+    plus how it repeats if it does."""
+    due = _format_local_dt(tool_input.get("due_local"))
+    minutes = tool_input.get("in_minutes")
+    when = f" for {due}" if due else (f" in {_minutes_phrase(minutes)}" if minutes else "")
+    recurrence = tool_input.get("recurrence")
+    if isinstance(recurrence, dict) and recurrence.get("frequency"):
+        when += f", repeating {recurrence['frequency']}"
+    return when
 
 
 def matches_query(entry: dict[str, Any], q: str) -> bool:

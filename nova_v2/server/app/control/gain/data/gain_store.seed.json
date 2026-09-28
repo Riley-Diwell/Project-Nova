@@ -34,5 +34,17 @@
   "set_alarm": {
     "value": 0.25,
     "override": null
+  },
+  "set_reminder": {
+    "value": 0.15,
+    "override": null
+  },
+  "update_reminder": {
+    "value": 0.2,
+    "override": null
+  },
+  "get_reminders": {
+    "value": 0.2,
+    "override": null
   }
 }
