@@ -227,9 +227,10 @@ class AddCalendarEventTool(BaseTool):
             ),
             gain_description=(
                 "How readily Nova puts things in your calendar without being "
-                "asked outright. At 1.0 a plan you simply mention out loud - "
-                "'coffee with Sam on Thursday at ten' - gets scheduled. At 0.0 "
-                "it only adds events you explicitly ask it to add."
+                "asked outright. Nova can't yet measure on its own that a plan "
+                "you mention - 'coffee with Sam on Thursday at ten' - should be "
+                "scheduled, so for now it only adds events you ask it to add, "
+                "whatever this dial says."
             ),
             input_schema={
                 "type": "object",

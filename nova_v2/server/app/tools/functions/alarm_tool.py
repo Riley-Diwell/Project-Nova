@@ -46,10 +46,9 @@ class SetTimerTool(BaseTool):
                 "e.g. 'timer set for 10 minutes', not as pending."
             ),
             gain_description=(
-                "How readily Nova starts a timer without being asked outright "
-                "- e.g. starting one unprompted off something you said in "
-                "passing. At 1.0 it acts on a stated need. At 0.0 it only "
-                "starts a timer you explicitly ask for."
+                "How readily Nova starts a timer without being asked outright. "
+                "Nova can't yet measure a need for one on its own, so for now "
+                "it only starts a timer you ask for, whatever this dial says."
             ),
             input_schema={
                 "type": "object",
@@ -104,8 +103,8 @@ class SetAlarmTool(BaseTool):
             ),
             gain_description=(
                 "How readily Nova sets an alarm without being asked outright. "
-                "At 1.0 it acts on a stated need - 'I should be up by 7' gets "
-                "one set. At 0.0 it only sets an alarm you explicitly ask for."
+                "Nova can't yet measure a need for one on its own, so for now "
+                "it only sets an alarm you ask for, whatever this dial says."
             ),
             input_schema={
                 "type": "object",
