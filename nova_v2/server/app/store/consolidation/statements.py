@@ -44,12 +44,22 @@ import os
 from typing import Any, Callable, Iterable, Optional
 
 from app.store.consolidation.models import StatedFact
+from app.tools.core.action import Action
 
-# Episode kinds whose text is the user talking. Notes are included: a note is a
-# statement the user dictated, and one saved without a category never got
-# promoted at save time (tools/memory_tool.py keeps those episodic), so this is
-# the pass that gives it a second look.
-SPOKEN_EVENT_TYPES = ("voice", "note")
+# Episode kinds whose text is the user talking.
+#
+# "note" is deliberately NOT here any more. Notes live in their own store
+# (app/store/notes) and the user decides what they are for: a lecture capture
+# is a lecturer's sentences, not facts about the user, and a verbatim quick
+# note is situational by construction. A note only reaches Persona when the
+# user explicitly promotes it.
+SPOKEN_EVENT_TYPES = ("voice",)
+
+# A voice turn in which the memory tool already saved something has been dealt
+# with: whatever the user wanted kept is a note now, promoted or not by their
+# own choice. Re-reading the utterance would put it into Persona by the back
+# door - and after the user deletes that promoted fact, bring it back.
+MEMORY_TOOL = "memory"
 
 # Utterances shorter than this are not worth a phrasing call.
 MIN_UTTERANCE = 8
@@ -102,11 +112,24 @@ def utterances(
         episode_id = str(row.get("id") or "")
         if not episode_id or episode_id in already:
             continue
+        if _saved_a_note(row):
+            continue
         text = ((row.get("event") or {}).get("text") or "").strip()
         if len(text) < MIN_UTTERANCE:
             continue
         out.append({"id": episode_id, "text": text})
     return out
+
+
+def _saved_a_note(row: dict[str, Any]) -> bool:
+    """True if this turn's memory tool ran a save - see MEMORY_TOOL."""
+    action = row.get("action")
+    if not isinstance(action, dict):
+        return False
+    return any(
+        a.tool == MEMORY_TOOL and a.ran and (a.input or {}).get("action") == "save"
+        for a in Action.from_episode(action)
+    )
 
 
 def find_statements(

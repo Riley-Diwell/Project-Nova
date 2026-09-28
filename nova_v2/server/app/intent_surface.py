@@ -30,7 +30,7 @@ from pydantic import BaseModel
 # import nova libraries
 from app.schemas.user_state import UserState
 from app.schemas.event import Event
-from app.control.commands import classify
+from app.control.commands import classify, note_body
 from app.control.controller import Decision, ProportionalController, Reason, Turn
 from app.control.observer import observe, trends_from_facts
 from app.control.gain.gain_store import GainStore
@@ -556,6 +556,11 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
             # user's own wall clock instead of the server process's - see
             # navigation.py's _query_google_maps/_estimate_without_api.
             tool_input = {**tool_input, "utc_offset_minutes": ctx.utc_offset_minutes}
+        if name == "memory" and ctx.episode_id and "episode_id" not in tool_input:
+            # A durable "remember..." is filed straight into Persona, and the
+            # turn's episode is its identity there: the tombstone key if it is
+            # forgotten, and what stops consolidation re-extracting it.
+            tool_input = {**tool_input, "episode_id": ctx.episode_id}
         # Authorisation already happened in _gate. The dispatcher just runs it.
         result = _DISPATCHER.dispatch_reactive(name, tool_input)
         # Recorded after the call, so a tool that raises is not reported as run -
@@ -1035,7 +1040,25 @@ def _run(
             if user_state.reminders_pending_total is not None else None
         ),
     )
+    verbatim = note_body(event)
+    if verbatim is not None and "memory" in authorised:
+        return _save_verbatim_note(verbatim, event.id, ctx)
     return _run_loop(messages, MAX_ITERATIONS, event.id, ctx, is_voice=is_voice)
+
+
+def _save_verbatim_note(text: str, event_id: UUID, ctx: TurnContext) -> IntentResult:
+    """ "note ..." saved word for word, without the model (control/commands.py
+    note_body). Through the memory tool all the same, so it is gated, recorded
+    as an Action and reinforced like any other save - just not rephrased."""
+    # A note answers nothing, so a question left pending before it is dropped.
+    _clear_pending_confirmation(ctx.user_id)
+    result = _run_local_tool("memory", {"action": "save", "text": text}, ctx)
+    speech = result.get("spoken", "") if isinstance(result, dict) else ""
+    print(f"[loop] verbatim note - final speech={speech!r} actions={ctx.ran!r}")
+    return IntentResult(
+        event_id=event_id, speech=speech, actions=ctx.for_wire(),
+        episode_id=ctx.episode_id,
+    )
 
 
 def resume(user_id: UUID | str, session_id: str, tool_result: Any) -> IntentResult | NeedMoreResult:
@@ -1097,6 +1120,11 @@ def _run_loop(
     # Read off the Turn rather than passed in.
     tools = _build_tools(ctx.turn.authorised())
 
+    # The last line a tool offered for the user to hear. Spoken if the model
+    # ends the turn saying nothing - after a save it sometimes returns no text
+    # at all, and a request met with silence reads as not having worked.
+    tool_spoken = ""
+
     # iterate until an appropriate answer is reached
     for _ in range(iterations_left):
         # call model
@@ -1136,6 +1164,7 @@ def _run_loop(
             )
             if not speech:
                 print(f"[loop] empty speech - raw content: {response.content!r}")
+                speech = tool_spoken
             print(f"[loop] final speech={speech!r} actions={ctx.ran!r}")
             # A voice turn that ends by asking a question is left dangling on
             # purpose: stash the real thread (assistant question included) so
@@ -1207,6 +1236,8 @@ def _run_loop(
                         "minutes_until_start": block.input.get("minutes_until_start"),
                         "event_title": block.input.get("event_title"),
                     }
+                if isinstance(result, dict) and result.get("spoken"):
+                    tool_spoken = str(result["spoken"])
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,

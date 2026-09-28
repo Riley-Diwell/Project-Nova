@@ -49,6 +49,17 @@ def describe_event(event_type: str, event: dict[str, Any]) -> str | None:
     if event_type == "screen":
         return "Screen turned on" if event.get("status") else "Screen turned off"
 
+    if event_type == "note_captured":
+        # Content-free by design (api/notes.py _log_captured) - the sentence
+        # can say what kind of note and where, never what it said.
+        kind = {"capture": "a recording", "dictation": "a dictated note"}.get(
+            event.get("kind"), "a voice note")
+        duration = event.get("duration_s")
+        if isinstance(duration, (int, float)) and duration >= 60:
+            kind = f"{kind} ({round(duration / 60)} min)"
+        where = event.get("calendar_title")
+        return f"Captured {kind} during {where}" if where else f"Captured {kind}"
+
     # "timestamp" (a bare periodic tick) and "note" (memory_tool's own episodic
     # bookkeeping row, never closed with an action - see memory_tool.py) have
     # nothing a user would recognise as a trigger.

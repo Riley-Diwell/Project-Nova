@@ -47,13 +47,17 @@ from app.tools.core.action import Action
 from app.tools.functions.notification_management import start_batchers, stop_batchers
 
 from app.store import memory
+from app.store import notes
 from app.store import persona
 from app.api import auth as auth_api
 from app.api import me as me_api
+from app.api import notes as notes_api
+from app.api import notes_pipeline as notes_pipeline_api
 from app.api import reminders as reminders_api
 from app.core import auth
 from app.core.auth import AuthUser, current_user
 from app.core.request_user import bind_request_user
+from app.notes_pipeline import NotesPipelineProcessor
 
 
 # On a fresh container, the first request to touch Persona was paying ~28s
@@ -122,6 +126,12 @@ app = FastAPI(
     title="NOVA V1", lifespan=_lifespan,
     dependencies=[Depends(auth.require_user), Depends(bind_request_user)],
 )
+
+# Notes: the store's REST surface, and the pipeline that
+# chunks and summarises long notes after the router stores them.
+notes.set_processor(NotesPipelineProcessor())
+app.include_router(notes_api.router)
+app.include_router(notes_pipeline_api.router)
 
 # Accounts.
 auth.check_startup()

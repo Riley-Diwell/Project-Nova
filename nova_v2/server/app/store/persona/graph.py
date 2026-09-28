@@ -63,6 +63,9 @@ class GraphNode(BaseModel):
     category: list[str] = Field(default_factory=list)
     support: Optional[int] = None
     detail: Optional[str] = None
+    # The note a belief was promoted from, if any - the Knowledge Map's
+    # "From your note" link.
+    note_id: Optional[str] = None
 
 
 class GraphEdge(BaseModel):
@@ -109,6 +112,7 @@ def build_graph(
             category=list(fact.category),
             support=meta.get("support"),
             detail=meta.get("quote") or meta.get("value"),
+            note_id=str(meta["note_id"]) if meta.get("note_id") else None,
         ))
         edges.extend(_category_chain(fact, category_ids, nodes))
 

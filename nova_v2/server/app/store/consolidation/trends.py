@@ -43,6 +43,9 @@ COUNTED_ACTION_FIELDS: dict[str, list[str]] = {
 # Event fields worth counting, as {event_type: [field, ...]} -> "<type>:<field>".
 COUNTED_EVENT_FIELDS: dict[str, list[str]] = {
     "notification": ["app"],
+    # Content-free voice-note traces (api/notes.py _log_captured): which
+    # calendar event the user keeps capturing notes in. Never the note text.
+    "note_captured": ["calendar_title"],
 }
 
 # Values too generic to be a trend even when they repeat.
