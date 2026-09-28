@@ -120,8 +120,11 @@ each incoming notification gets assigned. The intent surface context directly sh
 as urgent vs ignorable.
 """
 
+import threading
 from typing import Any
+from uuid import UUID
 
+from app.core.request_user import request_user_id
 from app.tools.core.base import BaseTool
 from app.tools.functions.notification_batcher import NotificationBatcher
 
@@ -165,7 +168,9 @@ class NotificationManagementTool(BaseTool):
         action         = tool_input.get("action", "query")
         snooze_minutes = int(tool_input.get("snooze_minutes", 30))
 
-        batcher = _batcher_instance
+        # The signed-in user this turn is for (core/request_user.py), never
+        # anything in tool_input.
+        batcher = batcher_for(request_user_id())
 
         if action == "query":
             return _query(batcher)
@@ -182,21 +187,51 @@ class NotificationManagementTool(BaseTool):
         }
 
 
-# main.py creates the batcher at FastAPI startup — this gets a reference to it.
-_batcher_instance: NotificationBatcher | None = None
+# One batcher per signed-in user: each has
+# its own queue, snooze and mode, so one user's "snooze for an hour" or lecture
+# mode never holds back someone else's. Made on a user's first turn, while
+# main.py has the batchers running (start_batchers/stop_batchers).
+_batchers: dict[str, NotificationBatcher] = {}
+_batchers_running = False
+_batchers_lock = threading.Lock()
 
-def register_batcher(batcher: NotificationBatcher) -> None:
-    """Called by main.py at startup to share its batcher instance."""
-    global _batcher_instance
-    _batcher_instance = batcher
+
+def start_batchers() -> None:
+    """main.py, at start-up."""
+    global _batchers_running
+    _batchers_running = True
 
 
-def set_batcher_mode(mode: str) -> None:
+def stop_batchers() -> None:
+    """main.py, at shutdown."""
+    global _batchers_running
+    with _batchers_lock:
+        _batchers_running = False
+        for batcher in _batchers.values():
+            batcher.stop()
+        _batchers.clear()
+
+
+def batcher_for(user_id: UUID | str | None) -> NotificationBatcher | None:
+    """This user's batcher, made on first use. None with no user, or before
+    main.py has started them (e.g. NOVA_MOCK_LLM local runs, tests)."""
+    if user_id is None or not _batchers_running:
+        return None
+    key = str(user_id)
+    with _batchers_lock:
+        batcher = _batchers.get(key)
+        if batcher is None and _batchers_running:
+            batcher = _batchers[key] = NotificationBatcher()
+            batcher.start()
+        return batcher
+
+
+def set_batcher_mode(user_id: UUID | str, mode: str) -> None:
     """Called by intent_surface.run() every turn with the Observer's derived
-    mode, so the batcher stops needing its own copy of calendar_ctx/dnd. A
-    no-op before the batcher exists (e.g. NOVA_MOCK_LLM local runs)."""
-    if _batcher_instance is not None:
-        _batcher_instance.set_mode(mode)
+    mode, so the batcher stops needing its own copy of calendar_ctx/dnd."""
+    batcher = batcher_for(user_id)
+    if batcher is not None:
+        batcher.set_mode(mode)
 
 
 #Action handler

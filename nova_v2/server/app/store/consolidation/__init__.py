@@ -41,16 +41,22 @@ things whose repetition means something, not a scan for anything that recurs.
 USAGE
     from app.consolidation import consolidate, preview
 
-    preview()       # what would be written, no writes
-    consolidate()   # phrase and upsert into Persona
+    preview(user_id)       # what would be written, no writes
+    consolidate(user_id)   # phrase and upsert into Persona
 
-    python scripts/consolidate_memory.py run     # the same, from the CLI
+WHOSE HISTORY
+One account's at a time. Every entry point
+takes the user first, reads only their episodes, facts and tombstones, and
+writes only into their Persona - otherwise a habit counted out of one user's
+trips would be filed as a fact about another.
+
 """
 from __future__ import annotations
 
 import json
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
+from uuid import UUID
 
 from app.store.consolidation.models import (
     CATEGORY_PREFERENCES,
@@ -96,6 +102,8 @@ __all__ = [
     "MIN_SUPPORT",
 ]
 
+UserId = Union[UUID, str]
+
 # Same family as the Intent Surface. This is a batch job over a handful of
 # counted candidates, not a reasoning task - it phrases and files, nothing more.
 MODEL = "claude-haiku-4-5"
@@ -126,28 +134,28 @@ PHRASING_PROMPT = (
 )
 
 
-def preview(min_support: int = MIN_SUPPORT,
+def preview(user_id: UserId, min_support: int = MIN_SUPPORT,
             phraser: Optional[Phraser] = None) -> list[DerivedFact]:
     """The trend pass only: everything consolidate_trends() would write."""
-    return _derive(min_support, phraser)
+    return _derive(user_id, min_support, phraser)
 
 
-def consolidate_trends(min_support: int = MIN_SUPPORT,
+def consolidate_trends(user_id: UserId, min_support: int = MIN_SUPPORT,
                        phraser: Optional[Phraser] = None) -> list[DerivedFact]:
-    """Count, phrase, and write derived facts into Persona."""
-    facts = _derive(min_support, phraser)
+    """Count, phrase, and write derived facts into this user's Persona."""
+    facts = _derive(user_id, min_support, phraser)
     for fact in facts:
-        _upsert(fact)
+        _upsert(user_id, fact)
     print(f"[consolidation] wrote {len(facts)} derived fact(s)")
     return facts
 
 
-def _forgotten_keys() -> set[str]:
+def _forgotten_keys(user_id: UserId) -> set[str]:
     """Patterns the user has deleted. Empty if Persona is unreachable - which
     fails towards re-deriving rather than towards writing nothing, the same way
     every other store read here degrades."""
     try:
-        return _persona().forgotten()
+        return _persona().forgotten(user_id)
     except Exception as e:
         print(f"[consolidation] forgotten list unavailable: {e}")
         return set()
@@ -161,10 +169,10 @@ def _key_of(candidate: Candidate) -> str:
     return key or ""
 
 
-def _pending_statements(extractor: Optional[Any] = None) -> list[StatedFact]:
+def _pending_statements(user_id: UserId, extractor: Optional[Any] = None) -> list[StatedFact]:
     """Statements not yet held, deduplicated. Shared so `preview` shows exactly
     what `run` would write rather than an optimistic version of it."""
-    held = _persona().all_facts()
+    held = _persona().all_facts(user_id)
     # A deleted statement is an episode that must never be re-read. Folding the
     # tombstones in with the already-extracted ids means one rule covers both:
     # "we have dealt with this utterance", whether the answer was kept or thrown
@@ -172,46 +180,47 @@ def _pending_statements(extractor: Optional[Any] = None) -> list[StatedFact]:
     # episode was ever read, and the next run extracts it again.
     seen = _extracted_episode_ids(held) | {
         key.removeprefix("episode:")
-        for key in _forgotten_keys()
+        for key in _forgotten_keys(user_id)
         if key.startswith("episode:")
     }
     return find_statements(
-        _episodes(),
+        _episodes(user_id),
         seen_episode_ids=seen,
         extractor=extractor,
         existing_texts=[f.text for f in held],
     )
 
 
-def preview_statements(extractor: Optional[Any] = None) -> list[StatedFact]:
+def preview_statements(user_id: UserId, extractor: Optional[Any] = None) -> list[StatedFact]:
     """The statement pass only, without writing."""
-    return _pending_statements(extractor)
+    return _pending_statements(user_id, extractor)
 
 
-def consolidate_statements(extractor: Optional[Any] = None) -> list[StatedFact]:
+def consolidate_statements(user_id: UserId, extractor: Optional[Any] = None) -> list[StatedFact]:
     """Read what the user said about themselves and write it into Persona.
 
     Separate from the trend pass on purpose - see statements.py. A statement
     needs no repetition to count, so this does not take min_support.
     """
-    facts = _pending_statements(extractor)
+    facts = _pending_statements(user_id, extractor)
     for fact in facts:
-        _upsert_stated(fact)
+        _upsert_stated(user_id, fact)
     print(f"[consolidation] wrote {len(facts)} stated fact(s)")
     return facts
 
 
-def consolidate(min_support: int = MIN_SUPPORT,
+def consolidate(user_id: UserId,
+                min_support: int = MIN_SUPPORT,
                 phraser: Optional[Phraser] = None,
                 extractor: Optional[Any] = None) -> dict[str, list[Any]]:
-    """Both passes. Returns {"derived": [...], "stated": [...]}."""
+    """Both passes, for one user. Returns {"derived": [...], "stated": [...]}."""
     return {
-        "derived": consolidate_trends(min_support, phraser),
-        "stated": consolidate_statements(extractor),
+        "derived": consolidate_trends(user_id, min_support, phraser),
+        "stated": consolidate_statements(user_id, extractor),
     }
 
 
-def _derive(min_support: int, phraser: Optional[Phraser]) -> list[DerivedFact]:
+def _derive(user_id: UserId, min_support: int, phraser: Optional[Phraser]) -> list[DerivedFact]:
     """Count, then phrase, then check the phrasing against the counting.
 
     The check is here rather than inside the phraser because it is a property
@@ -222,14 +231,14 @@ def _derive(min_support: int, phraser: Optional[Phraser]) -> list[DerivedFact]:
     hallucinated "hates bagels" would get it written to Persona wearing the
     evidence of a trend about somewhere they go.
     """
-    candidates = find_candidates(_episodes(), min_support=min_support)
+    candidates = find_candidates(_episodes(user_id), min_support=min_support)
     print(f"[consolidation] {len(candidates)} candidate(s) at support>={min_support}")
 
     # A pattern the user deleted from the Knowledge Map stays deleted, however
     # many more times they do the thing. Dropped here rather than at the upsert
     # so a forgotten trend is not even sent to the phrasing model: there is no
     # point paying to word a fact that will never be written.
-    forgotten = _forgotten_keys()
+    forgotten = _forgotten_keys(user_id)
     kept_candidates = [c for c in candidates if _key_of(c) not in forgotten]
     if len(kept_candidates) != len(candidates):
         print(f"[consolidation] {len(candidates) - len(kept_candidates)} candidate(s) "
@@ -253,15 +262,15 @@ def _derive(min_support: int, phraser: Optional[Phraser]) -> list[DerivedFact]:
 
 # --- stage 1: read -----------------------------------------------------------
 
-def _episodes() -> list[dict[str, Any]]:
-    """Every episode, oldest first.
+def _episodes(user_id: UserId) -> list[dict[str, Any]]:
+    """Every one of this user's episodes, oldest first.
 
     Deliberately the whole log: a trend is a property of the history, and the
     last-N window the Intent Surface reads is exactly what this pass exists to
     see past. It is a batch job run occasionally, so the cost is acceptable -
     but it is the reason this does not belong in the request path.
     """
-    rows = _memory().all()
+    rows = _memory().all(user_id)
     print(f"[consolidation] read {len(rows)} episode(s)")
     return rows
 
@@ -371,7 +380,7 @@ def _extracted_episode_ids(held: list[Any]) -> set[str]:
     return ids
 
 
-def _upsert_stated(fact: StatedFact) -> str:
+def _upsert_stated(user_id: UserId, fact: StatedFact) -> str:
     """Write a stated fact into Persona.
 
     Always an insert. A statement is tied to the moment it was said, and two
@@ -380,7 +389,7 @@ def _upsert_stated(fact: StatedFact) -> str:
     this pass's. Overwriting here would quietly destroy the earlier one.
     """
     persona = _persona()
-    fact_id = persona.upsert(persona.Fact(
+    fact_id = persona.upsert(user_id, persona.Fact(
         text=fact.text,
         category=fact.category,
         confidence=fact.confidence,
@@ -390,7 +399,7 @@ def _upsert_stated(fact: StatedFact) -> str:
     return fact_id
 
 
-def _upsert(fact: DerivedFact) -> str:
+def _upsert(user_id: UserId, fact: DerivedFact) -> str:
     """Write into Persona, updating in place if this trend is already held.
 
     Idempotence matters more than it looks: this runs repeatedly over a growing
@@ -398,8 +407,8 @@ def _upsert(fact: DerivedFact) -> str:
     should sharpen one belief, not accumulate near-duplicates of it.
     """
     persona = _persona()
-    existing = _existing_id(persona, fact)
-    fact_id = persona.upsert(persona.Fact(
+    existing = _existing_id(user_id, persona, fact)
+    fact_id = persona.upsert(user_id, persona.Fact(
         id=existing,
         text=fact.text,
         category=fact.category,
@@ -412,7 +421,7 @@ def _upsert(fact: DerivedFact) -> str:
     return fact_id
 
 
-def _existing_id(persona: Any, fact: DerivedFact) -> Optional[str]:
+def _existing_id(user_id: UserId, persona: Any, fact: DerivedFact) -> Optional[str]:
     """The id of the belief already holding this trend, if there is one.
 
     Matched on (signal, value) in metadata - the identity of the pattern, not
@@ -426,7 +435,7 @@ def _existing_id(persona: Any, fact: DerivedFact) -> Optional[str]:
 
     for query in (fact.text, value):
         try:
-            matches = persona.search(persona.PersonaQuery(text=query, limit=20))
+            matches = persona.search(user_id, persona.PersonaQuery(text=query, limit=20))
         except Exception as e:
             print(f"[consolidation] persona lookup skipped: {e}")
             return None

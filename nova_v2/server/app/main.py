@@ -24,12 +24,13 @@ WHO USES THIS
 # import necessary libraries
 import hmac
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -43,11 +44,15 @@ from app import intent_surface
 from app.intent_surface import IntentResult, NeedMoreResult
 from app.tools.core import narration
 from app.tools.core.action import Action
-from app.tools.functions.notification_batcher import NotificationBatcher
-from app.tools.functions.notification_management import register_batcher
+from app.tools.functions.notification_management import start_batchers, stop_batchers
 
 from app.store import memory
 from app.store import persona
+from app.api import auth as auth_api
+from app.api import me as me_api
+from app.core import auth
+from app.core.auth import AuthUser, current_user
+from app.core.request_user import bind_request_user
 
 
 # On a fresh container, the first request to touch Persona was paying ~28s
@@ -58,9 +63,12 @@ from app.store import persona
 # long-lived process; bad on Cloud Run, which scales nova-v2 to zero when
 # idle, so this recurred on every cold start rather than only once.
 #
-# _warm_up pays that cost here instead, during container startup - Cloud
-# Run's startup probe waits for the app to come up before routing any real
-# traffic to it, so this delays "ready", not a user's turn.
+# _warm_up pays that cost here instead, right after startup - on a background
+# thread, not before serving. Blocking startup on it made *every* request on a
+# cold instance wait ~30s for the model, including a token refresh that needs
+# no model at all, which made sign-out slow. Now light requests
+# are answered at once, and only a request that needs Persona before the model
+# is ready waits for it (persona's init lock makes that wait, not a 2nd load).
 def _warm_up() -> None:
     """Force-construct Persona's embedder and the Supabase client before the
     server starts accepting requests. Non-fatal like every other Supabase/
@@ -78,9 +86,10 @@ def _warm_up() -> None:
     # so only an actual request pays the TLS/auth cost episode_open otherwise
     # would. Goes through memory's own public API rather than naming the
     # table directly, same boundary memory.py itself asks callers to respect.
+    # ping(), not a read: there's no signed-in user at start-up to read for.
     start = time.perf_counter()
     try:
-        memory.recent_all(1)
+        memory.ping()
         print(f"[warmup] Supabase connection ready ({(time.perf_counter() - start) * 1000:.0f}ms)")
     except Exception as e:
         print(f"[warmup] Supabase warm-up skipped: {e}")
@@ -95,18 +104,28 @@ def _warm_up() -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    _warm_up()
-    # Shared with the notification_management tool (see intent_surface.py's
-    # ToolRegistry) - without this, the tool has no batcher to query.
-    batcher = NotificationBatcher()
-    batcher.start()
-    register_batcher(batcher)
+    threading.Thread(target=_warm_up, name="warm-up", daemon=True).start()
+    # The notification_management tool gets one batcher per user, made on their
+    # first turn - see tools/functions/notification_management.py.
+    start_batchers()
     yield
-    batcher.stop()
+    stop_batchers()
 
 
 # initialise app
-app = FastAPI(title="NOVA V1", lifespan=_lifespan)
+# Every route needs a signed-in user (a Supabase access token) unless it's in
+# auth.PUBLIC_ROUTES - see core/auth.py.
+# bind_request_user makes the verified user visible to Function tools deep inside
+# /event (the memory tool reads the user's notes) - see core/request_user.py.
+app = FastAPI(
+    title="NOVA V1", lifespan=_lifespan,
+    dependencies=[Depends(auth.require_user), Depends(bind_request_user)],
+)
+
+# Accounts.
+auth.check_startup()
+app.include_router(auth_api.router)
+app.include_router(me_api.router)
 
 _API_KEY = os.environ.get("NOVA_API_KEY", "").strip()
 if not _API_KEY:
@@ -157,9 +176,9 @@ class ContinueWrapper(BaseModel):
 # Logged before the loop runs so an episode survives a failing Claude call, and
 # so intent_surface.run() can read prior episodes back as context.
 # Non-fatal: an unconfigured or unreachable Supabase must not fail /event.
-def _open_episode(event: Event, user_state: UserState) -> str | None:
+def _open_episode(user_id: UUID, event: Event, user_state: UserState) -> str | None:
     try:
-        episode_id = memory.append({
+        episode_id = memory.append(user_id, {
             "event_type": event.type,
             "event": event.model_dump(mode="json"),
             "user_state": user_state.model_dump(mode="json"),
@@ -171,11 +190,11 @@ def _open_episode(event: Event, user_state: UserState) -> str | None:
         return None
 
 # log that looked like feedback and was not.
-def _close_episode(intent: IntentResult) -> None:
+def _close_episode(user_id: UUID, intent: IntentResult) -> None:
     if not intent.episode_id:
         return
     try:
-        memory.close(intent.episode_id, action={
+        memory.close(user_id, intent.episode_id, action={
             "actions": intent.actions,
             "speech": intent.speech,
         })
@@ -208,16 +227,22 @@ def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
 
 # this is how I receive events from Riley
 # app.post handles incoming HTTP POST requests
+#
+# Every route below is the signed-in user's: `user`
+# comes from the verified token, and everything read or written is theirs.
+# Plain `def`, not `async def`: the handlers make blocking calls (Anthropic,
+# Supabase), and FastAPI runs a plain def in its threadpool - as async they
+# held the event loop, so one instance served one turn at a time.
 @app.post("/event", response_model=EventResponse)
-async def receive_event(input_wrapper: InputWrapper) -> EventResponse:
+def receive_event(input_wrapper: InputWrapper, user: AuthUser = Depends(current_user)) -> EventResponse:
     print(f"[/event] received text: {getattr(input_wrapper.event, 'text', None)!r}")
     us = input_wrapper.user_state
     print(f"[/event] calendar_ctx={us.calendar_ctx!r} "
           f"current_events={len(us.current_events)} upcoming_events={len(us.upcoming_events)}")
-    episode_id = _open_episode(input_wrapper.event, us)
-    intent = intent_surface.run(input_wrapper.user_state, input_wrapper.event, episode_id)
+    episode_id = _open_episode(user.id, input_wrapper.event, us)
+    intent = intent_surface.run(user.id, input_wrapper.user_state, input_wrapper.event, episode_id)
     if isinstance(intent, IntentResult):
-        _close_episode(intent)
+        _close_episode(user.id, intent)
     return _to_response(intent)
 
 
@@ -240,16 +265,17 @@ class OutcomeIn(BaseModel):
 
 
 @app.post("/event/outcome", status_code=204)
-async def report_outcome(report: OutcomeIn) -> None:
-    """Record the user's verdict on a turn and move the gain of what it did."""
+def report_outcome(report: OutcomeIn, user: AuthUser = Depends(current_user)) -> None:
+    """Record the user's verdict on one of their turns and move the gain of
+    what it did. Another user's episode id changes nothing."""
     try:
-        memory.close(report.episode_id, outcome=report.outcome)
+        memory.close(user.id, report.episode_id, outcome=report.outcome)
     except Exception as e:
         # Non-fatal like every other Memory touch, but the reinforcement below
         # still runs: the gain move is the part the user will actually notice.
         print(f"[memory] outcome write skipped: {e}")
 
-    moved = intent_surface.reinforce_episode(report.episode_id, report.outcome)
+    moved = intent_surface.reinforce_episode(user.id, report.episode_id, report.outcome)
     print(f"[gain] episode {report.episode_id} {report.outcome}: moved {moved}")
 
 
@@ -260,16 +286,18 @@ async def report_outcome(report: OutcomeIn) -> None:
 # wins over whatever reinforcement has learned.
 
 @app.get("/tools/gain", response_model=list[ToolGainOut])
-async def get_tool_gains() -> list[dict[str, Any]]:
-    return intent_surface.GAIN_OVERRIDES.view_all()
+def get_tool_gains(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
+    return intent_surface.gain_overrides(user.id).view_all()
 
 
 # PUT, not POST: setting a tool's override to x is idempotent. A null override
 # clears it, reverting that tool to its learned value.
 @app.put("/tools/gain/{tool_name}", response_model=ToolGainOut)
-async def put_tool_gain(tool_name: str, update: ToolGainUpdate) -> dict[str, Any]:
+def put_tool_gain(
+    tool_name: str, update: ToolGainUpdate, user: AuthUser = Depends(current_user)
+) -> dict[str, Any]:
     try:
-        return intent_surface.GAIN_OVERRIDES.set(tool_name, update.override)
+        return intent_surface.gain_overrides(user.id).set(tool_name, update.override)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown tool: {tool_name!r}")
 
@@ -304,17 +332,22 @@ async def get_persona_graph(
 
 
 @app.get("/persona")
-async def list_persona() -> list[dict[str, Any]]:
+def list_persona(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
     """Every belief, newest first - the list view behind the map."""
-    return [f.model_dump(mode="json") for f in persona.all_facts()]
+    return [f.model_dump(mode="json") for f in persona.all_facts(user.id)]
 
 
 @app.patch("/persona/{fact_id}")
-async def edit_persona_fact(fact_id: str, edit: FactEdit) -> dict[str, Any]:
+def edit_persona_fact(
+    fact_id: str, edit: FactEdit, user: AuthUser = Depends(current_user)
+) -> dict[str, Any]:
     """Correct a belief in place. Re-embeds, so an edited fact is findable by
-    what it now says rather than what it used to."""
+    what it now says rather than what it used to. Someone else's fact id is a
+    404, the same as one that doesn't exist."""
+    if not _is_uuid(fact_id):
+        raise HTTPException(status_code=404, detail=f"unknown fact: {fact_id!r}")
     try:
-        current = persona.get(fact_id)
+        current = persona.get(user.id, fact_id)
     except persona.FactNotFound:
         raise HTTPException(status_code=404, detail=f"unknown fact: {fact_id!r}")
 
@@ -325,12 +358,15 @@ async def edit_persona_fact(fact_id: str, edit: FactEdit) -> dict[str, Any]:
         # was before - they have overruled whatever NOVA inferred.
         "metadata": {**(current.metadata or {}), "source": "stated", "edited": True},
     })
-    persona.upsert(updated)
-    return persona.get(fact_id).model_dump(mode="json")
+    try:
+        persona.upsert(user.id, updated)
+        return persona.get(user.id, fact_id).model_dump(mode="json")
+    except persona.FactNotFound:  # deleted in between
+        raise HTTPException(status_code=404, detail=f"unknown fact: {fact_id!r}")
 
 
 @app.delete("/persona/{fact_id}", status_code=204)
-async def delete_persona_fact(fact_id: str) -> None:
+def delete_persona_fact(fact_id: str, user: AuthUser = Depends(current_user)) -> None:
     """Forget a belief (Privacy pillar / REQ1). Deliberately unconditional - the
     user does not have to justify it, and it is gone from the vector store as
     well as the list. A tombstone keeps it gone: consolidation would otherwise
@@ -347,7 +383,7 @@ async def delete_persona_fact(fact_id: str) -> None:
             detail=f"not a fact id: {fact_id!r}. Categories are not separately "
                    f"deletable - they disappear with the last fact filed under them.",
         )
-    persona.delete(fact_id)
+    persona.delete(user.id, fact_id)  # a no-op for someone else's id
     print(f"[persona] deleted {fact_id}")
 
 
@@ -360,7 +396,7 @@ def _is_uuid(value: str) -> bool:
 
 
 @app.post("/persona/consolidate")
-async def run_consolidation(preview: bool = False) -> dict[str, Any]:
+def run_consolidation(preview: bool = False, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
     """Turn what has happened repeatedly into what is true about the user.
 
     Driven from the Knowledge Map rather than a timer, because this is the one
@@ -375,10 +411,10 @@ async def run_consolidation(preview: bool = False) -> dict[str, Any]:
     from app.store.consolidation import preview as preview_trends
 
     if preview:
-        derived = [f.model_dump(mode="json") for f in preview_trends()]
-        stated = [f.model_dump(mode="json") for f in preview_statements()]
+        derived = [f.model_dump(mode="json") for f in preview_trends(user.id)]
+        stated = [f.model_dump(mode="json") for f in preview_statements(user.id)]
     else:
-        result = consolidate()
+        result = consolidate(user.id)
         derived = [f.model_dump(mode="json") for f in result["derived"]]
         stated = [f.model_dump(mode="json") for f in result["stated"]]
 
@@ -405,17 +441,18 @@ _AUDIT_DEFAULT_FETCH_CAP = 200
 
 
 @app.get("/audit", response_model=list[AuditEntryOut])
-async def list_audit(
+def list_audit(
     limit: int = 50,
     since: str | None = None,
     until: str | None = None,
     tool: str | None = None,
     q: str | None = None,
+    user: AuthUser = Depends(current_user),
 ) -> list[dict[str, Any]]:
     filtering = bool(tool or q)
     fetch_limit = _AUDIT_FILTERED_FETCH_CAP if filtering else min(limit, _AUDIT_DEFAULT_FETCH_CAP)
     try:
-        episodes = memory.recent_all(fetch_limit, since=since, until=until)
+        episodes = memory.recent_all(user.id, fetch_limit, since=since, until=until)
     except Exception as e:
         print(f"[memory] audit read skipped: {e}")
         return []
@@ -456,14 +493,15 @@ async def list_audit(
 # Android posts here after resolving a need_more request from /event (see
 # intent_surface.py's CLIENT_TOOLS) - resumes the same paused Claude conversation.
 @app.post("/event/continue", response_model=EventResponse)
-async def continue_event(input_wrapper: ContinueWrapper) -> EventResponse:
+def continue_event(input_wrapper: ContinueWrapper, user: AuthUser = Depends(current_user)) -> EventResponse:
     print(f"[/event/continue] session_id={input_wrapper.session_id!r}")
     try:
-        intent = intent_surface.resume(input_wrapper.session_id, input_wrapper.result)
+        # 404 for someone else's session too - see intent_surface.resume.
+        intent = intent_surface.resume(user.id, input_wrapper.session_id, input_wrapper.result)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     # The turn that started at /event may only finish here, so this is the
     # other place an episode can close.
     if isinstance(intent, IntentResult):
-        _close_episode(intent)
+        _close_episode(user.id, intent)
     return _to_response(intent)

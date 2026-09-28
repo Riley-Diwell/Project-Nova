@@ -139,3 +139,21 @@ class ToolRegistry:
         Return the names of all registered tools.
         """
         return list(self._entries)
+
+    def with_gains(self, gains: dict[str, ControllerGain]) -> "ToolRegistry":
+        """
+        The same tools, with one user's gains.
+
+        The registry built at import holds the tools and the seed's starting
+        gains. Each turn works on a view like this one instead, so the
+        Controller, Reinforcer and GainOverrides read and move that user's dials
+        and never anyone else's. A tool missing from `gains` starts
+        from a copy of this registry's gain - a copy, so moving it can't leak
+        back into the shared registry and on to the next user.
+        """
+        view = ToolRegistry(gain_store=None)
+        for name, entry in self._entries.items():
+            base = entry.gain
+            gain = gains.get(name) or ControllerGain(name=name, value=base.value, override=base.override)
+            view._entries[name] = _Entry(tool=entry.tool, gain=gain)
+        return view

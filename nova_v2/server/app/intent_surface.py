@@ -36,13 +36,16 @@ from app.control.observer import observe, trends_from_facts
 from app.control.gain.gain_store import GainStore
 from app.control.gain.overrides import GainOverrides
 from app.control.gain.reinforcement import Outcome, Reinforcer
+from app.core.request_user import as_user
 from app.tools.core.action import Action
 from app.tools.core.catalogue import CLIENT_TOOLS, build_registry
 from app.tools.core.dispatcher import Dispatcher
+from app.tools.core.registry import ToolRegistry
 from app.tools.functions.notification_management import set_batcher_mode
 
 from app.store import memory
 from app.store import persona
+from app.store import profile
 
 client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
@@ -275,15 +278,24 @@ def _build_tools(authorised: list[str]) -> list[dict[str, Any]]:
     ]
 
 # The registry is built here, so this is where the gain package gets pointed at
-# it. main.py's GET/PUT /tools/gain go straight through this - the tuning logic
-# itself lives in control/gain/overrides.py, next to the reinforcement that moves
-# the same numbers from the other direction.
-GAIN_OVERRIDES = GainOverrides(_REGISTRY, _GAIN_STORE)
-_REINFORCER = Reinforcer(_REGISTRY, _GAIN_STORE)
-_CONTROLLER = ProportionalController(_REGISTRY)
+# it. _REGISTRY holds the tools and the seed's starting gains; every user has
+# their own dials on top, so each turn,
+# outcome and Gain-tab request works on a view carrying that user's gains, read
+# fresh from the table. main.py's GET/PUT /tools/gain go through gain_overrides()
+# - the tuning logic itself lives in control/gain/overrides.py, next to the
+# reinforcement that moves the same numbers from the other direction.
+def _gains_for(user_id: UUID | str) -> tuple[ToolRegistry, GainStore]:
+    """This user's view of the registry, and the store their changes save to."""
+    store = _GAIN_STORE.for_user(user_id)
+    return _REGISTRY.with_gains(store.load_all()), store
 
 
-def reinforce_episode(episode_id: str, outcome: str) -> dict[str, float]:
+def gain_overrides(user_id: UUID | str) -> GainOverrides:
+    """The Gain tab's reads and writes, for this user's dials."""
+    return GainOverrides(*_gains_for(user_id))
+
+
+def reinforce_episode(user_id: UUID | str, episode_id: str, outcome: str) -> dict[str, float]:
     """
     Move the gain of everything an Episode actually did, given the user's
     verdict on it. Returns {tool: new learned value} for what moved.
@@ -300,6 +312,9 @@ def reinforce_episode(episode_id: str, outcome: str) -> dict[str, float]:
     if only proactive calls counted, nothing would ever be scored and no gain
     would ever move. A tool earns the right to act unasked by being useful when
     asked. See docs/adr/0002.
+
+    Only this user's Episode, and only their dials: someone else's episode id
+    reads as no such episode, and nothing moves.
     """
     try:
         verdict = Outcome(outcome)
@@ -308,7 +323,7 @@ def reinforce_episode(episode_id: str, outcome: str) -> dict[str, float]:
         return {}
 
     try:
-        episode = memory.get(episode_id)
+        episode = memory.get(user_id, episode_id)
     except Exception as e:
         print(f"[gain] reinforcement skipped, episode unreadable: {e}")
         return {}
@@ -316,12 +331,13 @@ def reinforce_episode(episode_id: str, outcome: str) -> dict[str, float]:
         print(f"[gain] reinforcement skipped, no such episode {episode_id!r}")
         return {}
 
+    reinforcer = Reinforcer(*_gains_for(user_id))
     moved: dict[str, float] = {}
     for action in Action.from_episode(episode.get("action")):
         if not action.ran or action.tool in moved:
             continue
         try:
-            moved[action.tool] = _REINFORCER.reinforce(action.tool, verdict)
+            moved[action.tool] = reinforcer.reinforce(action.tool, verdict)
         except KeyError:
             # Not a registered Function tool - nothing to tune.
             continue
@@ -338,6 +354,11 @@ class TurnContext:
     """
 
     turn: Turn
+
+    # Whose turn this is - from the verified token, via main.py. Set again as
+    # the request user (core/request_user.py) on the far side of a client-tool
+    # hop, and checked against the caller there (see resume()).
+    user_id: UUID | str | None = None
 
     location_ctx: str | None = None
 
@@ -607,16 +628,25 @@ class NeedMoreResult(BaseModel):
 
 _PENDING_SESSIONS: dict[str, dict[str, Any]] = {}
 
+# A paused turn the phone never came back to (app killed, network gone) would
+# otherwise sit in memory until the instance restarts.
+_PENDING_SESSION_TTL = timedelta(minutes=10)
+
+
+def _prune_pending_sessions(now: datetime) -> None:
+    for session_id in [k for k, v in _PENDING_SESSIONS.items() if v["expires_at"] < now]:
+        _PENDING_SESSIONS.pop(session_id, None)
+
 # Carries the *actual* message thread (not a recap of it) across one voice
 # turn when the previous turn ended by asking the user a question. Without
 # this, the only trace of "what did I ask" a later turn gets is its own
 # spoken outcome text sitting in recent_episodes - which is why a bare "yes"
 # could take two tries to land: the model had to reparse its own prior
 # sentence instead of just seeing the question as a live turn in context.
-# Single global slot because this is a single-user ambient device with one
-# voice conversation in flight at a time - same assumption _PENDING_SESSIONS
-# already makes.
-_PENDING_CONFIRMATION: dict[str, Any] | None = None
+# One slot per user. It used to be a single
+# global, from when there was one user: with accounts, A's "yes" would have
+# continued B's thread - B's calendar and all - in A's reply.
+_PENDING_CONFIRMATION: dict[str, dict[str, Any]] = {}
 
 # How long a dangling question stays answerable. Long enough for a real
 # "yes" a few seconds later, short enough that a stale question from minutes
@@ -629,24 +659,28 @@ _PENDING_CONFIRMATION_TTL = timedelta(minutes=3)
 _PENDING_CONFIRMATION_MAX_MESSAGES = 12
 
 
-def _stash_pending_confirmation(messages: list[dict[str, Any]]) -> None:
+def _stash_pending_confirmation(user_id: UUID | str | None, messages: list[dict[str, Any]]) -> None:
     """Called when a voice turn ends on a question - keeps the live thread
-    so the next voice turn can continue it instead of starting over."""
-    global _PENDING_CONFIRMATION
+    so this user's next voice turn can continue it instead of starting over."""
+    key = str(user_id)
     if len(messages) > _PENDING_CONFIRMATION_MAX_MESSAGES:
-        _PENDING_CONFIRMATION = None
+        _PENDING_CONFIRMATION.pop(key, None)
         return
-    _PENDING_CONFIRMATION = {
+    now = datetime.now(timezone.utc)
+    # Drop other users' stale threads while here, so the dict can't grow
+    # with everyone who ever left a question hanging.
+    for stale in [k for k, v in _PENDING_CONFIRMATION.items() if v["expires_at"] < now]:
+        _PENDING_CONFIRMATION.pop(stale, None)
+    _PENDING_CONFIRMATION[key] = {
         "messages": messages,
-        "expires_at": datetime.now(timezone.utc) + _PENDING_CONFIRMATION_TTL,
+        "expires_at": now + _PENDING_CONFIRMATION_TTL,
     }
 
 
-def _pop_pending_confirmation() -> list[dict[str, Any]] | None:
-    """Consumes the pending thread, if any and still fresh. Popped rather
-    than peeked so a resolved or abandoned turn can't be answered twice."""
-    global _PENDING_CONFIRMATION
-    pending, _PENDING_CONFIRMATION = _PENDING_CONFIRMATION, None
+def _pop_pending_confirmation(user_id: UUID | str | None) -> list[dict[str, Any]] | None:
+    """Consumes this user's pending thread, if any and still fresh. Popped
+    rather than peeked so a resolved or abandoned turn can't be answered twice."""
+    pending = _PENDING_CONFIRMATION.pop(str(user_id), None)
     if pending is None:
         return None
     if datetime.now(timezone.utc) > pending["expires_at"]:
@@ -654,11 +688,10 @@ def _pop_pending_confirmation() -> list[dict[str, Any]] | None:
     return pending["messages"]
 
 
-def _clear_pending_confirmation() -> None:
+def _clear_pending_confirmation(user_id: UUID | str | None) -> None:
     """Called when a voice turn resolves without leaving a question open -
     any earlier dangling question is now moot."""
-    global _PENDING_CONFIRMATION
-    _PENDING_CONFIRMATION = None
+    _PENDING_CONFIRMATION.pop(str(user_id), None)
 
 
 _YES_NO_LEAD_IN = re.compile(
@@ -696,9 +729,9 @@ def _classify_confirmation(speech: str) -> Literal["yes_no", "open"] | None:
 
 # --- the loop ---------------------------------------------------------------
 
-def _recent_episodes(event: Event) -> list[dict[str, Any]]:
+def _recent_episodes(user_id: UUID | str, event: Event) -> list[dict[str, Any]]:
     """
-    The last RECENT_EPISODES Episodes of this event's type, oldest first, as
+    This user's last RECENT_EPISODES Episodes of this event's type, oldest first, as
     short-term context for the model.
 
     Asks for one more than it needs: main.py opens this turn's Episode before
@@ -711,7 +744,7 @@ def _recent_episodes(event: Event) -> list[dict[str, Any]]:
     not see now it must not see in history either.
     """
     try:
-        rows = memory.recent(event.type, RECENT_EPISODES + 1)
+        rows = memory.recent(user_id, event.type, RECENT_EPISODES + 1)
     except Exception as e:
         print(f"[memory] read skipped: {e}")
         return []
@@ -756,9 +789,9 @@ def _redact_control_trace(action_column: Any) -> Any:
     }
 
 
-def _relevant_persona(event: Event) -> list[dict[str, Any]]:
+def _relevant_persona(user_id: UUID | str, event: Event) -> list[dict[str, Any]]:
     """
-    Long-term facts about the user, retrieved by meaning for this event.
+    Long-term facts about this user, retrieved by meaning for this event.
 
     The other half of what recent_episodes does. recent_episodes is the last
     few raw episodes OF THIS EVENT TYPE - short-term, narrow, and it scrolls:
@@ -779,7 +812,7 @@ def _relevant_persona(event: Event) -> list[dict[str, Any]]:
         return []
 
     try:
-        matches = persona.search(persona.PersonaQuery(
+        matches = persona.search(user_id, persona.PersonaQuery(
             text=query,
             limit=PERSONA_HITS,
             min_similarity=PERSONA_MIN_SIMILARITY,
@@ -829,7 +862,18 @@ def _persona_query(event: Event) -> str:
 
 
 def run(
-    user_state: UserState, event: Event, episode_id: str | None = None
+    user_id: UUID | str, user_state: UserState, event: Event, episode_id: str | None = None
+) -> IntentResult | NeedMoreResult:
+    """One turn, for one user: their history, Persona, dials and pending
+    question, and nobody else's. Tools that need the user read it from
+    core/request_user.py, which this sets for the turn's duration - so a caller
+    outside a request (a test, a script) gets the same scoping."""
+    with as_user(user_id):
+        return _run(user_id, user_state, event, episode_id)
+
+
+def _run(
+    user_id: UUID | str, user_state: UserState, event: Event, episode_id: str | None
 ) -> IntentResult | NeedMoreResult:
     if MOCK_LLM:
         text = getattr(event, "text", None)
@@ -841,26 +885,34 @@ def run(
             episode_id=episode_id,
         )
 
-    facts = _relevant_persona(event)
+    facts = _relevant_persona(user_id, event)
+
+    # event.timestamp is always UTC; local_time is that same instant converted
+    # to the user's own clock.
+    local_time = event.timestamp + timedelta(minutes=user_state.utc_offset_minutes)
+
+    # The user's onboarding answers (store/profile.py), as this moment's
+    # estimator inputs. None before onboarding, which the Observer reads as
+    # "behave as before".
+    saved_profile = profile.for_turn(user_id)
+    priors = saved_profile.answers.to_features(local_time) if saved_profile else None
 
     # --- the control loop, before the model runs -----------------------------
     # In this order, and all of it deterministic. By the time Claude is called,
     # what may happen this turn is already settled; the model's job is to choose
     # parameters and words.
-    observation = observe(event, user_state, trends=trends_from_facts(facts))
+    observation = observe(event, user_state, trends=trends_from_facts(facts), priors=priors)
     # The batcher used to keep its own copy of calendar_ctx/dnd to derive this -
     # now it just gets told, same source of truth as everything else this turn.
-    set_batcher_mode(observation.mode.value)
+    set_batcher_mode(user_id, observation.mode.value)
     command = classify(event)
-    turn = _CONTROLLER.open_turn(observation, command)
+    gains, _ = _gains_for(user_id)
+    turn = ProportionalController(gains).open_turn(observation, command)
     authorised = turn.authorised()
     print(f"[control] predicted={observation.predicted.value} "
           f"confidence={observation.prediction_confidence:.2f} "
           f"command={command is not None} authorised={authorised!r}")
 
-    # event.timestamp is always UTC; local_time is that same instant converted
-
-    local_time = event.timestamp + timedelta(minutes=user_state.utc_offset_minutes)
     user_state_dump = user_state.model_dump(mode="json")
     _localize_calendar_events(user_state_dump.get("current_events", []), user_state.utc_offset_minutes)
     _localize_calendar_events(user_state_dump.get("upcoming_events", []), user_state.utc_offset_minutes)
@@ -869,19 +921,23 @@ def run(
         "event": _strip_utc_fields(event.model_dump(mode="json")),
         "user_state": _strip_utc_fields(user_state_dump),
         "local_time": local_time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "recent_episodes": _recent_episodes(event),
+        "recent_episodes": _recent_episodes(user_id, event),
         # Short-term above, long-term here: the detail of the last few similar
         # events, plus the durable facts consolidation has distilled out of all
         # of them. "Parked on level 3" only ever appears in the first.
         "persona": _for_model(facts),
     }
+    # What they asked to be called in onboarding. Left out rather than null when
+    # unset, so a turn without it reads exactly as before.
+    if saved_profile and saved_profile.display_name:
+        payload["user_name"] = saved_profile.display_name
 
     is_voice = event.type == "voice"
     # Only voice turns can be "yes"/"no" answers to a prior spoken question,
     # so only voice turns consume the pending thread - an ambient event
     # arriving in between (location update, notification, ...) must not
     # steal or clear it.
-    carried = _pop_pending_confirmation() if is_voice else None
+    carried = _pop_pending_confirmation(user_id) if is_voice else None
     new_turn: dict[str, Any] = {"role": "user", "content": json.dumps(payload)}
     messages: list[dict[str, Any]] = [*carried, new_turn] if carried else [new_turn]
     if carried:
@@ -889,22 +945,34 @@ def run(
 
     ctx = TurnContext(
         turn=turn,
+        user_id=user_id,
         location_ctx=user_state.location_ctx,
-        preferred_travel_mode=user_state.preferred_travel_mode,
+        # The phone's Settings value, else the onboarding answer.
+        preferred_travel_mode=user_state.preferred_travel_mode
+        or (saved_profile.answers.travel_mode if saved_profile else None),
         utc_offset_minutes=user_state.utc_offset_minutes,
         episode_id=episode_id,
     )
     return _run_loop(messages, MAX_ITERATIONS, event.id, ctx, is_voice=is_voice)
 
 
-def resume(session_id: str, tool_result: Any) -> IntentResult | NeedMoreResult:
+def resume(user_id: UUID | str, session_id: str, tool_result: Any) -> IntentResult | NeedMoreResult:
     """Resumes a conversation paused on a CLIENT_TOOLS call, feeding the
     client-supplied result back in as that tool's result. Raises KeyError if
-    session_id is unknown (already resumed, or the process restarted)."""
-    pending = _PENDING_SESSIONS.pop(session_id, None)
-    if pending is None:
+    session_id is unknown (already resumed, expired, or the process restarted)
+    - or isn't this user's: someone else's session looks exactly like
+    one that doesn't exist, and stays parked for its owner."""
+    pending = _PENDING_SESSIONS.get(session_id)
+    if (pending is None
+            or str(pending["user_id"]) != str(user_id)
+            or pending["expires_at"] < datetime.now(timezone.utc)):
         raise KeyError(f"unknown or expired session_id: {session_id!r}")
+    del _PENDING_SESSIONS[session_id]
+    with as_user(user_id):
+        return _resume(pending, tool_result)
 
+
+def _resume(pending: dict[str, Any], tool_result: Any) -> IntentResult | NeedMoreResult:
     utc_offset_minutes = pending.get("utc_offset_minutes", 0)
     if isinstance(tool_result, dict) and isinstance(tool_result.get("events"), list):
         _localize_calendar_events(tool_result["events"], utc_offset_minutes)
@@ -991,10 +1059,11 @@ def _run_loop(
             if is_voice:
                 if confirmation is not None:
                     _stash_pending_confirmation(
-                        [*messages, {"role": "assistant", "content": response.content}]
+                        ctx.user_id,
+                        [*messages, {"role": "assistant", "content": response.content}],
                     )
                 else:
-                    _clear_pending_confirmation()
+                    _clear_pending_confirmation(ctx.user_id)
             return IntentResult(
                 event_id=event_id, speech=speech, actions=ctx.for_wire(),
                 episode_id=ctx.episode_id, confirmation=confirmation,
@@ -1059,7 +1128,12 @@ def _run_loop(
             if client_authorised:
                 _record_action(client_call.name, client_call.input, ctx, ran=True)
                 session_id = str(uuid.uuid4())
+                now = datetime.now(timezone.utc)
+                _prune_pending_sessions(now)
                 _PENDING_SESSIONS[session_id] = {
+                    # resume() hands this back only to the same user.
+                    "user_id": ctx.user_id,
+                    "expires_at": now + _PENDING_SESSION_TTL,
                     "messages": messages,
                     "tool_use_id": client_call.id,
                     # Any other tool_use block from this same turn already ran

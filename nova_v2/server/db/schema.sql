@@ -2,8 +2,8 @@
 --
 -- Run this once in the Supabase SQL editor (Dashboard -> SQL Editor -> New query)
 -- against a fresh V2 Supabase project, to create the tables the backend
--- reads/writes. Ported from nova_v1/backend/db/schema.sql - deliberately a
--- separate database from V1's, not a shared one (see nova_v2/server/README.md).
+-- reads/writes. Ported from nova_v1/backend/db/schema.sql. V2 has its own
+-- Supabase project (bnxjyliakmtfzgwknrdh); V1 keeps ieezniwxisrjtwovqnhi.
 --
 --   1. episodic_memory - the append-only Memory store (app/store/memory.py).
 --   2. tool_gain        - per-tool Controller Gain (app/control/gain/). User-set
@@ -12,6 +12,12 @@
 --                         (app/store/persona/), plus match_persona() for
 --                         semantic search.
 --   4. persona_forgotten - deletions that have to stick (see section 4 below).
+--   6. row-level security on every table (anon key gets nothing).
+--   8. profiles        - display name and onboarding answers (app/store/profile.py).
+--
+-- Every table is per-account: a user_id referencing Supabase Auth's auth.users
+-- with on delete cascade, and an owner RLS policy as a backstop to the server's
+-- own filtering.
 --
 -- Re-running this file is safe: every object uses "if not exists" /
 -- "create or replace".
@@ -34,6 +40,7 @@
 
 create table if not exists public.episodic_memory (
     id          uuid        primary key default gen_random_uuid(),
+    user_id     uuid        not null references auth.users (id) on delete cascade,
     created_at  timestamptz not null    default now(),
 
     event_type  text        not null,   -- discriminator, e.g. 'notification', 'location', 'voice'
@@ -52,6 +59,12 @@ create index if not exists episodic_memory_event_type_idx
 create index if not exists episodic_memory_created_at_idx
     on public.episodic_memory (created_at);
 
+-- every read is one user's: recent(event_type) and recent_all()/all().
+create index if not exists episodic_memory_user_type_created_idx
+    on public.episodic_memory (user_id, event_type, created_at desc);
+create index if not exists episodic_memory_user_created_idx
+    on public.episodic_memory (user_id, created_at desc);
+
 
 -- ---------------------------------------------------------------------------
 -- 2. Controller Gain per tool
@@ -63,10 +76,12 @@ create index if not exists episodic_memory_created_at_idx
 -- reactive vs proactive firing.
 
 create table if not exists public.tool_gain (
-    tool_name   text        primary key,                       -- unique tool name (ToolSchema.name)
+    user_id     uuid        not null references auth.users (id) on delete cascade,
+    tool_name   text        not null,                          -- tool name (ToolSchema.name)
     value       real        not null default 0.2 check (value    between 0 and 1),
     override    real                          check (override between 0 and 1),
-    updated_at  timestamptz not null default now()
+    updated_at  timestamptz not null default now(),
+    primary key (user_id, tool_name)                           -- one set of dials per user
 );
 
 
@@ -100,6 +115,7 @@ create extension if not exists "vector";
 
 create table if not exists public.persona (
     id          uuid        primary key default gen_random_uuid(),
+    user_id     uuid        not null references auth.users (id) on delete cascade,
     created_at  timestamptz not null default now(),
     updated_at  timestamptz not null default now(),
 
@@ -123,6 +139,12 @@ create index if not exists persona_embedding_idx
 create index if not exists persona_category_idx
     on public.persona using gin (category);
 
+-- Every read is one user's (all_facts, vectors, match_persona's filter_user).
+-- The HNSW index filters by user after the vector search, so a search can
+-- return fewer than match_count rows once there are many users; fine at this
+-- scale (pgvector 0.8's hnsw.iterative_scan fixes it if it ever isn't).
+create index if not exists persona_user_idx on public.persona (user_id);
+
 comment on table public.persona is
     'NOVA V2 durable Persona. Vector-searchable beliefs and promoted notes; no raw sensor data.';
 
@@ -130,10 +152,15 @@ comment on table public.persona is
 -- in [0,1] (higher = closer). `filter_category` restricts to an ontology
 -- subtree, e.g. {notes} for only what the user dictated; null searches
 -- everything.
+-- One user's facts only. The pre-accounts signature (no filter_user) is
+-- dropped so PostgREST can't pick an overload that searches everyone.
+drop function if exists public.match_persona(vector, integer, double precision, text[]);
+
 create or replace function public.match_persona(
+    filter_user     uuid,
     query_embedding vector(1024),
-    match_count int default 5,
-    min_similarity float default 0.0,
+    match_count     int default 5,
+    min_similarity  float default 0.0,
     filter_category text[] default null
 )
 returns table (
@@ -153,7 +180,8 @@ as $$
         p.confidence, p.metadata,
         1 - (p.embedding <=> query_embedding) as similarity
     from public.persona p
-    where (filter_category is null
+    where p.user_id = filter_user
+      and (filter_category is null
            or p.category[1:array_length(filter_category, 1)] = filter_category)
       and 1 - (p.embedding <=> query_embedding) >= min_similarity
     order by p.embedding <=> query_embedding
@@ -180,9 +208,65 @@ $$;
 -- only the instruction to stop believing it remains.
 
 create table if not exists public.persona_forgotten (
-    key         text        primary key,
-    created_at  timestamptz not null default now()
+    user_id     uuid        not null references auth.users (id) on delete cascade,
+    key         text        not null,
+    created_at  timestamptz not null default now(),
+    primary key (user_id, key)
 );
 
 comment on table public.persona_forgotten is
     'Patterns the user deleted from the Knowledge Map. Consolidation must not re-derive these.';
+
+
+-- ---------------------------------------------------------------------------
+-- 6. Row-level security
+-- ---------------------------------------------------------------------------
+-- RLS on everywhere, so the anon key gets nothing through PostgREST, plus an
+-- owner policy so a signed-in user's own token could only ever reach their own
+-- rows. The backend uses the service-role key, which bypasses RLS, and filters
+-- by user itself (app/store/*): these are the backstop, not the boundary.
+
+alter table public.episodic_memory   enable row level security;
+alter table public.tool_gain         enable row level security;
+alter table public.persona           enable row level security;
+alter table public.persona_forgotten enable row level security;
+
+drop policy if exists episodic_memory_owner on public.episodic_memory;
+create policy episodic_memory_owner on public.episodic_memory for all to authenticated
+    using (user_id = auth.uid()) with check (user_id = auth.uid());
+drop policy if exists tool_gain_owner on public.tool_gain;
+create policy tool_gain_owner on public.tool_gain for all to authenticated
+    using (user_id = auth.uid()) with check (user_id = auth.uid());
+drop policy if exists persona_owner on public.persona;
+create policy persona_owner on public.persona for all to authenticated
+    using (user_id = auth.uid()) with check (user_id = auth.uid());
+drop policy if exists persona_forgotten_owner on public.persona_forgotten;
+create policy persona_forgotten_owner on public.persona_forgotten for all to authenticated
+    using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+
+-- ---------------------------------------------------------------------------
+-- 8. Profiles  (app/store/profile.py)
+-- ---------------------------------------------------------------------------
+-- One row per account: display name and onboarding answers. `answers` is
+-- app/schemas/profile.py's OnboardingAnswers - typed and versioned in code, so
+-- a new question needs no migration. Not GoTrue's user_metadata: users can
+-- write that directly, and it rides along in every token.
+
+create table if not exists public.profiles (
+    user_id                 uuid        primary key references auth.users (id) on delete cascade,
+    display_name            text        check (char_length(display_name) <= 60),
+    onboarding_version      int         not null default 0,   -- 0 = never finished
+    onboarding_completed_at timestamptz,
+    answers                 jsonb       not null default '{}'::jsonb,
+    created_at              timestamptz not null default now(),
+    updated_at              timestamptz not null default now()
+);
+
+alter table public.profiles enable row level security;
+drop policy if exists profiles_owner on public.profiles;
+create policy profiles_owner on public.profiles for all to authenticated
+    using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+comment on table public.profiles is
+    'One per account: display name and onboarding answers (app/schemas/profile.py).';

@@ -58,17 +58,51 @@ def tombstone_key(metadata: dict[str, Any]) -> Optional[str]:
     forgets what it believed while remembering that it was told to stop.
 
     A derived fact is identified by the repetition it was counted from
-    (signal, value); a stated one by the utterance it was extracted from. Facts
-    with neither - anything the user typed straight into the Knowledge Map -
-    have nothing that would regenerate them, so they need no tombstone.
+    (signal, value); a stated one by the utterance it was extracted from, or
+    the note it was promoted from. Facts with none of those - anything the user
+    typed straight into the Knowledge Map - have nothing that would regenerate
+    them, so they need no tombstone.
+
+    The primary key only; see tombstone_keys() for everything a delete records.
     """
+    keys = tombstone_keys(metadata)
+    return keys[0] if keys else None
+
+
+def tombstone_keys(metadata: dict[str, Any]) -> list[str]:
+    """Every pattern a Fact could be regenerated from, most specific first.
+
+    A fact promoted from a note can carry both an `episode_id` (the turn the
+    user asked in) and a `note_id` (the note it was saved as), and either one
+    reaching consolidation again would bring it back - so a delete has to
+    remember both. That was the old bug: a promoted fact carried only
+    `note_id`, which nothing recognised, so no tombstone was ever written.
+    """
+    keys: list[str] = []
     signal, value = metadata.get("signal"), metadata.get("value")
     if signal and value:
-        return f"trend:{signal}:{value}"
+        keys.append(f"trend:{signal}:{value}")
     episode_id = metadata.get("episode_id")
     if episode_id:
-        return f"episode:{episode_id}"
-    return None
+        keys.append(f"episode:{episode_id}")
+    note_id = metadata.get("note_id")
+    if note_id:
+        keys.append(note_key(str(note_id)))
+    question_id = metadata.get("question_id")
+    if metadata.get("origin") == "onboarding" and question_id:
+        keys.append(onboarding_key(str(question_id)))
+    return keys
+
+
+def note_key(note_id: str) -> str:
+    """The tombstone key for a note - see store/notes."""
+    return f"note:{note_id}"
+
+
+def onboarding_key(question_id: str) -> str:
+    """The tombstone key for an onboarding answer's fact - see store/profile.
+    Deleting one stops the same answer re-seeding it; changing the answer does."""
+    return f"onboarding:{question_id}"
 
 
 class Match(BaseModel):

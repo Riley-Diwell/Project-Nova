@@ -28,18 +28,18 @@ USAGE
     from app.persona import Fact, PersonaQuery
 
     # store a grounded preference (indexicals already dereferenced)
-    fact_id = upsert(Fact(
+    fact_id = upsert(user_id, Fact(
         text="likes bagels",
         category=["opinions", "likes", "food"],
     ))
 
     # semantic recall
-    for m in search(PersonaQuery(text="what food does the user like", limit=5)):
+    for m in search(user_id, PersonaQuery(text="what food does the user like", limit=5)):
         print(m.similarity, m.fact.text)
 
     # correction loop (Section 5.5 done-when (b)): a contradicting episode
     # finds the belief and updates it in place by re-upserting its id.
-    upsert(Fact(id=fact_id, text="dislikes bagels",
+    upsert(user_id, Fact(id=fact_id, text="dislikes bagels",
                 category=["opinions", "likes", "food"]))
 
 By default this talks to Supabase and embeds locally with fastembed. Tests (or
@@ -52,6 +52,8 @@ WHO USES THIS
 """
 from __future__ import annotations
 
+import hashlib
+import threading
 from typing import Optional
 
 from app.store.persona.embeddings import Embedder, FakeEmbedder, LocalEmbedder
@@ -63,12 +65,21 @@ from app.store.persona.graph import (
     KnowledgeGraph,
     build_graph,
 )
-from app.store.persona.models import Fact, Match, PersonaQuery, tombstone_key
+from app.store.persona.models import (
+    Fact,
+    Match,
+    PersonaQuery,
+    note_key,
+    onboarding_key,
+    tombstone_key,
+    tombstone_keys,
+)
 from app.store.persona.store import (
     FactNotFound,
     InMemoryPersonaStore,
     PersonaStore,
     SupabasePersonaStore,
+    UserId,
 )
 
 __all__ = [
@@ -91,6 +102,12 @@ __all__ = [
     "all_facts",
     "forgotten",
     "tombstone_key",
+    "tombstone_keys",
+    "note_key",
+    "onboarding_key",
+    "forget",
+    "get_embedder",
+    "set_embedder",
     "vectors",
     "knowledge_graph",
     "KnowledgeGraph",
@@ -102,6 +119,32 @@ __all__ = [
 ]
 
 _store: Optional[PersonaStore] = None
+_embedder: Optional[Embedder] = None
+# main.py warms these up on a background thread while requests are already being
+# served, so construction must happen exactly once: two LocalEmbedders would load
+# ~1.2 GB twice. Reentrant because get_store() calls get_embedder().
+_init_lock = threading.RLock()
+
+
+def get_embedder() -> Embedder:
+    """The one embedding model for the process.
+
+    Shared with store/notes on purpose: bge-large is ~1.2 GB resident, and a
+    second LocalEmbedder would load it twice on a Cloud Run instance that only
+    just fits one. Lazy for the same reason get_store() is.
+    """
+    global _embedder
+    if _embedder is None:
+        with _init_lock:
+            if _embedder is None:
+                _embedder = LocalEmbedder()
+    return _embedder
+
+
+def set_embedder(embedder: Embedder) -> None:
+    """Swap the embedder (tests)."""
+    global _embedder
+    _embedder = embedder
 
 
 def get_store() -> PersonaStore:
@@ -112,9 +155,11 @@ def get_store() -> PersonaStore:
     """
     global _store
     if _store is None:
-        from app.core.db import get_client
+        with _init_lock:
+            if _store is None:
+                from app.core.db import get_client
 
-        _store = SupabasePersonaStore(get_client(), LocalEmbedder())
+                _store = SupabasePersonaStore(get_client(), get_embedder())
     return _store
 
 
@@ -124,56 +169,73 @@ def set_store(store: PersonaStore) -> None:
     _store = store
 
 
-def upsert(fact: Fact) -> str:
-    """Store or update a durable belief. Returns the fact id."""
-    return get_store().upsert(fact)
+# Every function below is one user's: `user_id`
+# comes from the verified token (core/auth.py, or core/request_user.py inside a
+# tool), never from a request body. It is the first argument so forgetting it is
+# a TypeError rather than a read of someone else's Persona.
 
 
-def search(query: PersonaQuery) -> list[Match]:
-    """Semantic search over the Persona, most-similar first."""
-    return get_store().search(query)
+def upsert(user_id: UserId, fact: Fact) -> str:
+    """Store a new belief, or update one of this user's by id (FactNotFound if
+    the id isn't theirs). Returns the fact id."""
+    return get_store().upsert(user_id, fact)
 
 
-def delete(fact_id: str) -> None:
+def search(user_id: UserId, query: PersonaQuery) -> list[Match]:
+    """Semantic search over this user's Persona, most-similar first."""
+    return get_store().search(user_id, query)
+
+
+def delete(user_id: UserId, fact_id: str) -> None:
     """Forget one belief, permanently (user data-agency / Privacy pillar).
 
     The text and embedding go; a tombstone naming the pattern stays, so
-    consolidation cannot quietly re-derive what the user deleted.
+    consolidation cannot quietly re-derive what the user deleted. An id that
+    isn't this user's is left alone.
     """
-    get_store().delete(fact_id)
+    get_store().delete(user_id, fact_id)
 
 
-def forgotten() -> set[str]:
-    """Every tombstoned pattern - consolidation checks this before it writes."""
-    return get_store().forgotten()
+def forget(user_id: UserId, key: str) -> None:
+    """Record a tombstone without deleting a fact - for when the thing that
+    could regenerate a belief goes away before any belief does (a deleted
+    note, say). See models.tombstone_keys."""
+    get_store().forget(user_id, key)
 
 
-def get(fact_id: str) -> Fact:
-    """Fetch one belief by id."""
-    return get_store().get(fact_id)
+def forgotten(user_id: UserId) -> set[str]:
+    """Every pattern this user tombstoned - consolidation checks this before it writes."""
+    return get_store().forgotten(user_id)
 
 
-def all_facts() -> list[Fact]:
-    """Every belief, newest first - enumeration rather than ranked search.
+def get(user_id: UserId, fact_id: str) -> Fact:
+    """Fetch one of this user's beliefs by id (FactNotFound otherwise)."""
+    return get_store().get(user_id, fact_id)
+
+
+def all_facts(user_id: UserId) -> list[Fact]:
+    """Every one of this user's beliefs, newest first - enumeration rather than
+    ranked search.
 
     What the Knowledge Map (Section 5.6) renders, and what consolidation reads
     to know which episodes it has already extracted.
     """
-    return get_store().all_facts()
+    return get_store().all_facts(user_id)
 
 
-def vectors() -> dict[str, list[float]]:
-    """Every stored embedding, by fact id - for fact-to-fact comparison."""
-    return get_store().vectors()
+def vectors(user_id: UserId) -> dict[str, list[float]]:
+    """Every one of this user's embeddings, by fact id - for fact-to-fact comparison."""
+    return get_store().vectors(user_id)
 
 
 def knowledge_graph(
+    user_id: UserId,
     min_similarity: float = DEFAULT_MIN_SIMILARITY,
     max_links: int = DEFAULT_MAX_LINKS,
 ) -> KnowledgeGraph:
-    """Persona as a navigable graph for the Knowledge Map (Section 5.6)."""
+    """This user's Persona as a navigable graph for the Knowledge Map (Section 5.6)."""
     store = get_store()
     return build_graph(
-        store.all_facts(), store.vectors(),
+        store.all_facts(user_id), store.vectors(user_id),
         min_similarity=min_similarity, max_links=max_links,
     )
