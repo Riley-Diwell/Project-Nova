@@ -14,6 +14,7 @@ import androidx.lifecycle.lifecycleScope
 import com.example.novav2.auth.AuthRepository
 import com.example.novav2.auth.SessionState
 import com.example.novav2.ble.NovaDevicePairing
+import com.example.novav2.notes.NotesRepository
 import com.example.novav2.service.NovaDeviceService
 import com.example.novav2.service.SignalMonitorService
 import com.example.novav2.state.ReminderScheduler
@@ -39,6 +40,9 @@ class MainActivity : ComponentActivity() {
 
     // Set when a reminder notification opened the app (ReminderNotifier's content intent).
     private val remindersRequested = mutableStateOf(false)
+
+    // Set when a notes notification opened the app (NoteNotifier) - a note id, or "" for the tab.
+    private val noteRequested = mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,6 +74,9 @@ class MainActivity : ComponentActivity() {
         // its alarms - re-derive the reminder alarm from the table on every start.
         ReminderScheduler.reconcileAsync(this)
         remindersRequested.value = intent?.action == ACTION_OPEN_REMINDERS
+        noteRequested.value = noteFrom(intent)
+        // Anything captured offline since the app last ran goes up as soon as there's a network.
+        NotesRepository.scheduleOutboxDrain(this)
 
         setContent {
             NovaTheme {
@@ -77,6 +84,7 @@ class MainActivity : ComponentActivity() {
                     assistRequested = assistRequested,
                     autoListenRequested = autoListenRequested,
                     remindersRequested = remindersRequested,
+                    noteRequested = noteRequested,
                 )
             }
         }
@@ -86,6 +94,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (intent.action == ACTION_OPEN_REMINDERS) remindersRequested.value = true
+        noteFrom(intent)?.let { noteRequested.value = it }
         if (intent.action == Intent.ACTION_ASSIST) {
             assistRequested.value = true
             if (intent.getBooleanExtra(AssistTrampolineActivity.EXTRA_AUTO_LISTEN, false)) {
@@ -93,8 +102,16 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun noteFrom(intent: Intent?): String? =
+        if (intent?.action == ACTION_OPEN_NOTE) intent.getStringExtra(EXTRA_NOTE_ID).orEmpty() else null
+
     companion object {
         /** A reminder notification's tap - opens the Reminders tab. */
         const val ACTION_OPEN_REMINDERS = "com.example.novav2.action.OPEN_REMINDERS"
+
+        /** A notes notification's tap - opens [EXTRA_NOTE_ID], or the Notes tab without one. */
+        const val ACTION_OPEN_NOTE = "com.example.novav2.action.OPEN_NOTE"
+        const val EXTRA_NOTE_ID = "note_id"
     }
 }

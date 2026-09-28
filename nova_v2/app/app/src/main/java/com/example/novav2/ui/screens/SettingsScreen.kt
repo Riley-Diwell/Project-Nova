@@ -58,6 +58,8 @@ private val TRAVEL_MODES = listOf("transit", "walking", "driving")
  * Voice/Map/Audit are. Routes themselves are unchanged, still registered in NovaApp's NavHost. */
 private val SETTINGS_SUBSCREENS = listOf(
     NovaDestination.Profile to "Your week, sleep and how Nova should behave",
+    NovaDestination.NotesSettings to "Export or delete your notes, and whether recordings are kept",
+    NovaDestination.Audit to "Every automated action Nova has taken, and why",
     NovaDestination.Device to "Pair and manage your Nova companion device",
     NovaDestination.Gain to "Tune how proactively each tool fires on its own",
     NovaDestination.State to "Raw signal snapshot Nova fuses into its state read",
@@ -157,18 +159,72 @@ fun SettingsScreen(navController: NavController) {
                 }
             }
 
-        Column {
-            SETTINGS_SUBSCREENS.forEach { (destination, description) ->
-                ListItem(
-                    headlineContent = { Text(destination.label) },
-                    supportingContent = { Text(description) },
-                    leadingContent = { Icon(destination.icon, contentDescription = null) },
-                    trailingContent = {
-                        Icon(Icons.Default.ChevronRight, contentDescription = null)
-                    },
-                    modifier = Modifier.clickable { navController.navigate(destination.route) }
-                )
+            SectionLabel("More", Modifier.padding(start = 4.dp, top = 16.dp))
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                SETTINGS_SUBSCREENS.forEachIndexed { index, (destination, description) ->
+                    if (index > 0) HorizontalDivider(
+                        Modifier.padding(start = 56.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
+                    ListItem(
+                        headlineContent = { Text(destination.settingsTitle) },
+                        supportingContent = { Text(description) },
+                        leadingContent = {
+                            Icon(destination.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        },
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        },
+                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                        modifier = Modifier.clickable { navController.navigate(destination.route) },
+                    )
+                }
             }
         }
     }
+}
+
+/** The name a settings sub-screen goes by in this list and in its own top bar - "Notes" alone
+ * reads like the Notes tab rather than its storage settings. */
+val NovaDestination.settingsTitle: String
+    get() = when (this) {
+        NovaDestination.NotesSettings -> "Notes & recordings"
+        NovaDestination.Profile -> "Your profile"
+        else -> label
+    }
+
+@Composable
+private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), content = content)
+    }
+}
+
+@Composable
+private fun SettingTitle(title: String, detail: String) {
+    Text(title, style = MaterialTheme.typography.bodyLarge)
+    Text(
+        detail,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 2.dp),
+    )
+}
+
+@Composable
+private fun SettingDivider() {
+    HorizontalDivider(
+        Modifier.padding(vertical = 16.dp),
+        color = MaterialTheme.colorScheme.outlineVariant,
+    )
 }

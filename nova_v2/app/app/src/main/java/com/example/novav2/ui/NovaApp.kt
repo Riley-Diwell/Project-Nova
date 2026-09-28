@@ -34,16 +34,23 @@ import com.example.novav2.auth.AuthRepository
 import com.example.novav2.auth.SessionState
 import com.example.novav2.model.UserProfile
 import com.example.novav2.profile.ProfileRepository
+import com.example.novav2.navigation.NOTE_DETAIL_ROUTE
 import com.example.novav2.navigation.NovaDestination
+import com.example.novav2.navigation.noteDetailRoute
 import com.example.novav2.navigation.bottomNavDestinations
 import com.example.novav2.ui.screens.AuditLogScreen
 import com.example.novav2.ui.screens.DashboardScreen
 import com.example.novav2.ui.screens.DeviceScreen
 import com.example.novav2.ui.screens.GainScreen
 import com.example.novav2.ui.screens.KnowledgeMapScreen
+import com.example.novav2.ui.screens.NoteDetailScreen
+import com.example.novav2.ui.screens.NotesScreen
+import com.example.novav2.ui.screens.NotesSettingsScreen
 import com.example.novav2.ui.screens.ProfileScreen
 import com.example.novav2.ui.screens.RemindersScreen
+import com.example.novav2.ui.screens.SETTINGS_SUBSCREEN_ROUTES
 import com.example.novav2.ui.screens.SettingsScreen
+import com.example.novav2.ui.screens.settingsTitle
 import com.example.novav2.ui.screens.StateScreen
 import com.example.novav2.ui.screens.VoiceScreen
 import com.example.novav2.ui.screens.auth.AuthFlow
@@ -56,6 +63,8 @@ fun NovaApp(
     assistRequested: MutableState<Boolean> = mutableStateOf(false),
     autoListenRequested: MutableState<Boolean> = mutableStateOf(false),
     remindersRequested: MutableState<Boolean> = mutableStateOf(false),
+    /** A note to open - set when a notes notification opened the app ("" = just the tab). */
+    noteRequested: MutableState<String?> = mutableStateOf(null),
 ) {
     // Signed out: Welcome and sign-in instead of the app.
     val session by AuthRepository.state.collectAsState()
@@ -85,6 +94,14 @@ fun NovaApp(
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
+    // Pushed screens keep the tab they were opened from lit, instead of leaving no tab selected.
+    val selectedTabRoute = when (currentRoute) {
+        NOTE_DETAIL_ROUTE -> navController.previousBackStackEntry?.destination?.route
+            ?.takeIf { route -> bottomNavDestinations.any { it.route == route } }
+            ?: NovaDestination.Notes.route
+        in SETTINGS_SUBSCREEN_ROUTES -> NovaDestination.Settings.route
+        else -> currentRoute
+    }
 
     LaunchedEffect(assistRequested.value) {
         if (assistRequested.value) {
@@ -107,13 +124,24 @@ fun NovaApp(
         }
     }
 
+    // Tapping a notes notification lands on the note (or the Notes tab).
+    LaunchedEffect(noteRequested.value) {
+        val noteId = noteRequested.value ?: return@LaunchedEffect
+        navController.navigate(NovaDestination.Notes.route) {
+            popUpTo(navController.graph.findStartDestination().id)
+            launchSingleTop = true
+        }
+        if (noteId.isNotEmpty()) navController.navigate(noteDetailRoute(noteId))
+        noteRequested.value = null
+    }
+
     Scaffold(
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
         bottomBar = {
             NavigationBar {
                 bottomNavDestinations.forEach { destination ->
                     NavigationBarItem(
-                        selected = currentRoute == destination.route,
+                        selected = selectedTabRoute == destination.route,
                         onClick = {
                             navController.navigate(destination.route) {
                                 // No saveState/restoreState: those would let a settings
@@ -143,6 +171,7 @@ fun NovaApp(
                 VoiceScreen(
                     bottomBarHeight = innerPadding.calculateBottomPadding(),
                     autoListenRequested = autoListenRequested,
+                    onOpenNote = { navController.navigate(noteDetailRoute(it)) },
                 )
             }
             composable(NovaDestination.Reminders.route) {
@@ -154,11 +183,23 @@ fun NovaApp(
             composable(NovaDestination.Gain.route) {
                 SettingsSubScreen(NovaDestination.Gain, navController) { GainScreen() }
             }
+            composable(NovaDestination.Notes.route) {
+                NotesScreen(onOpenNote = { navController.navigate(noteDetailRoute(it)) })
+            }
+            composable(NOTE_DETAIL_ROUTE) { entry ->
+                val noteId = entry.arguments?.getString("noteId").orEmpty()
+                SettingsSubScreen(NovaDestination.Notes, navController) {
+                    NoteDetailScreen(noteId, onClosed = { navController.popBackStack() })
+                }
+            }
+            composable(NovaDestination.NotesSettings.route) {
+                SettingsSubScreen(NovaDestination.NotesSettings, navController) { NotesSettingsScreen() }
+            }
             composable(NovaDestination.Knowledge.route) {
                 KnowledgeMapScreen()
             }
             composable(NovaDestination.Audit.route) {
-                AuditLogScreen()
+                SettingsSubScreen(NovaDestination.Audit, navController) { AuditLogScreen() }
             }
             composable(NovaDestination.Device.route) {
                 SettingsSubScreen(NovaDestination.Device, navController) { DeviceScreen() }
@@ -187,7 +228,7 @@ private fun SettingsSubScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(destination.label) },
+                title = { Text(destination.settingsTitle) },
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")

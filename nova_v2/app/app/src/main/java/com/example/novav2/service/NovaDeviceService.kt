@@ -16,6 +16,8 @@ import com.example.novav2.ble.NovaDeviceConnectionState
 import com.example.novav2.ble.NovaDevicePairing
 import com.example.novav2.ble.NovaDeviceRepository
 import com.example.novav2.ble.NovaGattClient
+import com.example.novav2.notes.capture.DeviceRecordingRouter
+import com.example.novav2.stt.StreamingTranscriber
 import com.example.novav2.stt.VoskTranscriber
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -74,10 +76,14 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
         client.connect(address, autoConnect = true)
         // The same client instance is reused across autoConnect's own reconnects
         // (see NovaGattClient's class doc comment), so this one subscription
-        // covers every utterance for the lifetime of this pairing, not just the
-        // current connection.
+        // covers every recording for the lifetime of this pairing, not just the
+        // current connection. The router sends each recording where its START
+        // frame says - the assistant, or the notes store.
         scope.launch {
-            client.completedUtterances.collect { pcm -> onUtteranceRecorded(pcm) }
+            DeviceRecordingRouter(
+                applicationContext, scope, StreamingTranscriber(applicationContext),
+                onCommand = ::onUtteranceRecorded,
+            ).run(client.audioFrames)
         }
         scope.launch { runKeepalive(client) }
     }
@@ -115,16 +121,13 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
     }
 
     /**
-     * Transcribes one BLE utterance on-device (VoskTranscriber) and, if anything
-     * intelligible came out, hands it to AssistVoiceService to process exactly like
-     * the power-button gesture's own transcript: written to the chat thread,
-     * POSTed through the same /event pipeline, spoken back via TTS. Best-effort -
-     * a failed/empty transcription is dropped silently, same stance as every other
-     * device/network touch in this codebase.
+     * A held-button utterance that wasn't a note (DeviceRecordingRouter has already
+     * transcribed it, streaming, on-device) goes to AssistVoiceService to process
+     * exactly like the power-button gesture's own transcript: written to the chat
+     * thread, POSTed through the same /event pipeline, spoken back via TTS.
      */
-    private fun onUtteranceRecorded(pcm: ByteArray) {
+    private fun onUtteranceRecorded(transcript: String) {
         scope.launch {
-            val transcript = VoskTranscriber.transcribe(pcm) ?: return@launch
             // AssistVoiceService's manifest foregroundServiceType includes
             // "microphone", which Android 14+ refuses to start without RECORD_AUDIO
             // already granted - true here even though this particular turn never

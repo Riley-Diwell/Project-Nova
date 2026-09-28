@@ -249,6 +249,7 @@ private fun PendingStatusBubble(text: String, fromUser: Boolean = false) {
 fun VoiceScreen(
     bottomBarHeight: Dp = 0.dp,
     autoListenRequested: MutableState<Boolean> = mutableStateOf(false),
+    onOpenNote: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
@@ -287,6 +288,9 @@ fun VoiceScreen(
     // Set only while waiting on WRITE_CALENDAR after the user has ALREADY said yes to a specific
     // deletion - holds just that one id so the launcher's callback has something to act on.
     var deleteAwaitingPermission by remember { mutableStateOf<Long?>(null) }
+    // The notes the last reply's memory recall answered from - chips that open them.
+    // Cleared when the next turn starts.
+    var recallChips by remember { mutableStateOf<List<com.example.novav2.network.NotesApiClient.NoteRow>>(emptyList()) }
 
     LaunchedEffect(messages.size, voiceState) {
         if (messages.isNotEmpty()) {
@@ -462,6 +466,7 @@ fun VoiceScreen(
         if (text.isBlank()) return
         chatViewModel.addMessage(text, fromUser = true)
         pendingConfirmation = null
+        recallChips = emptyList()
         voiceState = VoiceState.THINKING
         statusText = "Sending to Nova…"
         coroutineScope.launch {
@@ -500,6 +505,8 @@ fun VoiceScreen(
                 // Timers, alarms, reminders and the departure alarm - fire-and-forget like the
                 // calendar writes above, no prompt needed. Shared with AssistVoiceService.
                 finalResult?.let { TurnActionApplier.applyHeadless(context, it) }
+                finalResult?.recallActions?.lastOrNull()?.let { recall ->
+                    coroutineScope.launch { recallChips = com.example.novav2.notes.RecallChips.find(recall) }
                 }
                 val reply = finalResult?.speech ?: "Sorry, I couldn't finish that."
                 statusText = ""
@@ -709,6 +716,25 @@ fun VoiceScreen(
                     Icon(Icons.Default.Stop, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Stop")
+                }
+            }
+        }
+
+        if (recallChips.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                recallChips.forEach { row ->
+                    AssistChip(
+                        onClick = { onOpenNote(row.id) },
+                        label = {
+                            Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 200.dp))
+                        },
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.StickyNote2, null, Modifier.size(16.dp)) },
+                    )
                 }
             }
         }

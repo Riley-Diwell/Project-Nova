@@ -169,6 +169,18 @@
             android:name=".service.AssistVoiceService"
             android:exported="false"
             android:foregroundServiceType="microphone|dataSync" />
+
+        <!-- Settings -> Notes -> Export: hands the exported file to the share sheet without
+             making it world-readable (NotesSettingsScreen). Only cache/exports/ is exposed. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.notes-export"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/notes_export_paths" />
+        </provider>
     </application>
 
 </manifest>

@@ -86,6 +86,9 @@ object NovaApiClient {
             /** update_reminder Actions this turn (complete / snooze / edit / delete) - applied
              * immediately; a delete is a soft delete with an Undo notice. */
             val updateReminderActions: List<UpdateReminderAction> = emptyList(),
+            /** memory-tool recalls this turn - the Voice tab shows the notes they found as
+             * chips (see NoteRecallActions.kt). */
+            val recallActions: List<RecallAction> = emptyList(),
         ) : EventResult()
         data class NeedMore(
             val sessionId: String,
@@ -344,6 +347,8 @@ object NovaApiClient {
         val category: List<String> = emptyList(),
         val support: Int? = null,
         val detail: String? = null,
+        /** The note this belief was promoted from, if any. */
+        val noteId: String? = null,
     ) {
         val isFact: Boolean get() = kind == "fact"
         val isDerived: Boolean get() = source == "derived"
@@ -514,6 +519,7 @@ object NovaApiClient {
         },
         support = if (isNull("support")) null else optInt("support"),
         detail = if (isNull("detail")) null else optString("detail"),
+        noteId = if (isNull("note_id")) null else optString("note_id").takeIf { it.isNotEmpty() },
     )
 
     private fun JSONObject.toGraphEdge(): GraphEdge = GraphEdge(
@@ -577,6 +583,7 @@ object NovaApiClient {
                 },
                 reminderActions = parseReminderActions(json.optJSONArray("actions")),
                 updateReminderActions = parseUpdateReminderActions(json.optJSONArray("actions")),
+                recallActions = parseRecallActions(json.optJSONArray("actions")),
             )
         }
     }

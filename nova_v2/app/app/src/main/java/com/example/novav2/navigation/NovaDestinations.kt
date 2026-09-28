@@ -8,6 +8,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.automirrored.filled.StickyNote2
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Tune
@@ -19,6 +20,8 @@ sealed class NovaDestination(val route: String, val label: String, val icon: Ima
     data object Dashboard : NovaDestination("dashboard", "Dashboard", Icons.Default.Home)
     data object Voice : NovaDestination("voice", "Voice", Icons.Default.Mic)
     data object Reminders : NovaDestination("reminders", "Reminders", Icons.Default.Checklist)
+    data object Notes : NovaDestination("notes", "Notes", Icons.AutoMirrored.Filled.StickyNote2)
+    data object NotesSettings : NovaDestination("notes_settings", "Notes", Icons.AutoMirrored.Filled.StickyNote2)
     data object State : NovaDestination("state", "State", Icons.Default.Sensors)
     data object Gain : NovaDestination("gain", "Gain", Icons.Default.Tune)
     data object Knowledge : NovaDestination("knowledge", "Map", Icons.Default.Hub)
@@ -39,7 +42,14 @@ val bottomNavDestinations = listOf(
     NovaDestination.Voice,
     // An everyday destination, unlike Gain/State - reminders are something you check.
     NovaDestination.Reminders,
+    // The Notes tab. The bar holds five at most, so Audit moved
+    // into Settings next to Gain/State/Device - reviewing past actions is occasional, notes
+    // and reminders are daily.
+    NovaDestination.Notes,
     NovaDestination.Knowledge,
-    NovaDestination.Audit,
     NovaDestination.Settings
 )
+
+/** A note's detail view, pushed on top of the Notes tab. */
+const val NOTE_DETAIL_ROUTE = "notes/{noteId}"
+fun noteDetailRoute(noteId: String) = "notes/$noteId"
