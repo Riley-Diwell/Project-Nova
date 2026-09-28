@@ -5,10 +5,10 @@ Decode raw ADPCM bytes captured from the ESP32 into a playable WAV.
 Paste bytes as hex on stdin (whitespace / commas / 0x prefixes are all fine),
 or point at a file, or pass --base64 if your BLE logger dumps base64.
 
-  python adpcm_decode.py                    # paste hex, saves out.wav
-  python adpcm_decode.py -i capture.hex     # read from file
-  python adpcm_decode.py --base64           # paste base64 instead
-  python adpcm_decode.py --play             # also play back (needs sounddevice)
+  python audio_playback_test.py                   # paste hex, saves out.wav
+  python audio_playback_test.py -i capture.hex    # read from file
+  python audio_playback_test.py --base64          # paste base64 instead
+  python audio_playback_test.py --play            # also play back (needs sounddevice)
 """
 
 import argparse
