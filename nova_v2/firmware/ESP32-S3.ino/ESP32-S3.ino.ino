@@ -46,8 +46,18 @@ enum NovaCommandType : uint8_t {
 // docs/ble-protocol.md. Byte 0 of every notification is a wrapping sequence
 // number, byte 1 is these flags, bytes 2+ are the existing ADPCM block
 // (empty for the dedicated end-of-utterance notification below).
-const uint8_t AUDIO_FLAG_START = 0x01;
-const uint8_t AUDIO_FLAG_END   = 0x02;
+const uint8_t AUDIO_FLAG_START     = 0x01;
+const uint8_t AUDIO_FLAG_END       = 0x02;
+
+// Every audio block was hex-dumped to Serial inside the ~32 ms capture loop,
+// for copy-pasting into firmware/audio_playback_test.py. That is ~520 chars
+// per block at 115200 baud - enough to stall the loop and drop audio.
+// Set to 1 only for that bench test.
+#define AUDIO_DEBUG_HEX 0
+
+// How long setupBLE() waits for a USB serial monitor before carrying on. It
+// used to wait forever, which blocks boot on battery with no USB host.
+const uint32_t SERIAL_WAIT_MS = 2000;
 
 const uint32_t HEARTBEAT_INTERVAL_MS = 5000; // keeps the phone able to tell
                                               // "connected, quiet" from "gone"
@@ -138,7 +148,18 @@ struct PulseState {
   bool active = false;
 };
 PulseState led2Pulse;
-PulseState hapticPulse;
+
+// Haptic patterns: alternating on/off durations in ms, starting with on. A
+// phone-commanded COMMAND_HAPTIC_PULSE is a one-step pattern through this
+// player, so pulses can't fight over the pin.
+struct HapticPattern {
+  uint16_t steps[6];
+  uint8_t count = 0;
+  uint8_t index = 0;
+  uint32_t stepStartedAt = 0;
+  bool active = false;
+};
+HapticPattern haptic;
 
 // --- battery
 # define battPin A0
@@ -178,10 +199,7 @@ void checkButton() {
   // button stopped being pressed
   else if (debouncedButtonStatus == LOW && prevDebouncedButtonStatus == HIGH) {
     if (isRecording == 1){
-      isRecording = 0;
-      Serial.println("Stop recording audio");
-      digitalWrite(led1, LOW);
-      startPulse(led2, led2Pulse, 500); // quick pulse
+      stopRecording();
       clickCount = 0; // if we were recording audio, we don't want this to influence future single or double clicks
     } else {
       if (clickCount == 0) {
@@ -195,9 +213,7 @@ void checkButton() {
   else if (debouncedButtonStatus == HIGH) {
     if ((millis() - pressedAt) > audioStartTime) {
       if (isRecording == 0) { // if not recording already
-      isRecording = 1;
-      Serial.println("Begin audio recording!");
-      digitalWrite(led1, HIGH);
+        startRecording();
       }
     }
   }
@@ -222,6 +238,20 @@ void checkButton() {
   }
   clickCount = 0; // reset
 }
+}
+
+void startRecording() {
+  isRecording = 1;
+  digitalWrite(led1, HIGH);
+  Serial.println("Begin audio recording!");
+}
+
+void stopRecording() {
+  if (!isRecording) return;
+  isRecording = 0;
+  Serial.println("Stop recording audio");
+  digitalWrite(led1, LOW);
+  startPulse(led2, led2Pulse, 500); // quick pulse
 }
 
 // --- microphone
@@ -343,7 +373,8 @@ class NovaCommandsCallbacks : public NimBLECharacteristicCallbacks {
       case COMMAND_HAPTIC_PULSE: {
         uint32_t durationMs = (value.size() > 1) ? (uint8_t)value[1] * 10 : 100;
         Serial.printf("[BLE] command: haptic pulse (%lums)\n", durationMs);
-        startPulse(HAPTIC, hapticPulse, durationMs);
+        uint16_t step[] = {(uint16_t)durationMs};
+        playHaptic(step, 1);
         break;
       }
       case COMMAND_LED_PULSE: {
@@ -363,7 +394,10 @@ class NovaCommandsCallbacks : public NimBLECharacteristicCallbacks {
 };
 
 void setupBLE() {
-  while (!Serial) { /* wait for USB serial */ }
+  // Wait for a USB serial monitor, but not forever: on battery there is no
+  // USB host and `Serial` never becomes true.
+  uint32_t serialWaitStart = millis();
+  while (!Serial && (millis() - serialWaitStart) < SERIAL_WAIT_MS) { /* wait for USB serial */ }
 
   NimBLEDevice::init("NovaDevice"); // was "georgias_esp32" - a real,
                                      // filterable product name so the phone
@@ -486,6 +520,29 @@ void updatePulse(int pinNum, PulseState& state) {
   }
 }
 
+// Starts `pattern` (see HapticPattern), replacing whatever was playing.
+void playHaptic(const uint16_t* pattern, uint8_t count) {
+  haptic.count = min((int)count, (int)(sizeof(haptic.steps) / sizeof(haptic.steps[0])));
+  for (uint8_t i = 0; i < haptic.count; i++) haptic.steps[i] = pattern[i];
+  haptic.index = 0;
+  haptic.stepStartedAt = millis();
+  haptic.active = haptic.count > 0;
+  digitalWrite(HAPTIC, haptic.active ? HIGH : LOW);
+}
+
+void updateHaptic() {
+  if (!haptic.active) return;
+  if (millis() - haptic.stepStartedAt < haptic.steps[haptic.index]) return;
+  haptic.index++;
+  if (haptic.index >= haptic.count) {
+    haptic.active = false;
+    digitalWrite(HAPTIC, LOW);
+    return;
+  }
+  haptic.stepStartedAt = millis();
+  digitalWrite(HAPTIC, haptic.index % 2 == 0 ? HIGH : LOW); // even steps buzz, odd steps rest
+}
+
 // --- battery
 
 void checkBatteryLevel(){
@@ -529,7 +586,7 @@ void loop() {
   checkButton();
 
   // --- BLE feedback stuff (RX is callback-driven now, not polled here)
-  updatePulse(HAPTIC, hapticPulse);
+  updateHaptic();
   if (bleConnected && (millis() - lastHeartbeatSent) > HEARTBEAT_INTERVAL_MS) {
     sendHeartbeat();
   }
@@ -545,11 +602,18 @@ void loop() {
 
   // --- microphone stuff
   static bool wasRecording = false;
+  // START used to be "audioSeq == 0", but audioSeq is a uint8_t that
+  // wraps every 256 blocks (~8.2 s), so every long recording sent a false
+  // START and the phone threw away everything before it. The first chunk of
+  // a recording is now tracked explicitly.
+  static bool firstChunk = false;
+  static uint8_t startFlags = 0;
 
   if (!isRecording) {
     if (wasRecording) {
       wasRecording = false;
-      sendAudioChunk(AUDIO_FLAG_END, nullptr, 0); // explicit end-of-utterance marker
+      // explicit end-of-utterance marker
+      sendAudioChunk(AUDIO_FLAG_END, nullptr, 0);
     }
     // Non-blocking drain so the DMA ring doesn't hand us stale data next time.
     size_t bytesIn = 0;
@@ -563,6 +627,8 @@ void loop() {
     resetADPCM();
     audioSeq = 0;
     wasRecording = true;
+    firstChunk = true;
+    startFlags = AUDIO_FLAG_START;
   }
 
   // Blocks up to ~32 ms while the DMA fills — fine, button poll resumes after.
@@ -584,13 +650,17 @@ void loop() {
   }
 
   size_t outBytes = encodeADPCMBlock(pcmBuffer, samplesRead, adpcmOut, adpcmState);
-  uint8_t flags = (audioSeq == 0) ? AUDIO_FLAG_START : 0x00;
+  uint8_t flags = firstChunk ? startFlags : 0x00;
+  firstChunk = false;
   sendAudioChunk(flags, adpcmOut, outBytes);
-  // Also dump the block as hex to Serial so you can copy-paste into the decoder.
+#if AUDIO_DEBUG_HEX
+  // Dump the block as hex to Serial so you can copy-paste into
+  // audio_playback_test.py. Bench use only - see AUDIO_DEBUG_HEX.
   for (size_t i = 0; i < outBytes; i++) {
     Serial.printf("%02X", adpcmOut[i]);
   }
   Serial.println();
+#endif
 }
 
 // ------------- references -------------
