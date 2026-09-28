@@ -8,11 +8,11 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import android.os.Handler
+import android.os.Looper
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.receiveAsFlow
 
 /**
  * Owns one GATT connection to a paired Nova device, following
@@ -42,29 +42,37 @@ class NovaGattClient(
     private var audioCharacteristic: BluetoothGattCharacteristic? = null
     private var commandsCharacteristic: BluetoothGattCharacteristic? = null
 
-    private val audioDecoder = AdpcmDecoder()
-    private var expectedAudioSeq: Int? = null
+    // One ordered stream of recordings: Start, Pcm..., End (see AudioFrame). A Channel rather
+    // than a SharedFlow because nothing may be dropped - a 60-minute capture is ~115k frames,
+    // and a SharedFlow's tryEmit silently discards once its buffer is full. One consumer
+    // (NovaDeviceService), unbounded: the transcriber normally runs well ahead of real time,
+    // and a transient backlog costs memory rather than a gap in the transcript.
+    private val _audioFrames = Channel<AudioFrame>(Channel.UNLIMITED)
+    val audioFrames: Flow<AudioFrame> = _audioFrames.receiveAsFlow()
 
-    private val _audioChunks = MutableSharedFlow<ShortArray>(extraBufferCapacity = 64)
-    val audioChunks: SharedFlow<ShortArray> = _audioChunks.asSharedFlow()
+    private val assemblerLock = Any()
+    private val assembler = AudioFrameAssembler(
+        emit = { _audioFrames.trySend(it) },
+        onSequenceGap = { expected, got ->
+            // A notification was dropped somewhere between firmware and here - this is
+            // exactly what the sequence number exists to catch (see docs/ble-protocol.md).
+            // Nothing to recover mid-utterance; keep decoding what does arrive.
+            android.util.Log.w("NovaGattClient", "audio seq gap: expected $expected got $got")
+        },
+    )
 
-    private val _utteranceActive = MutableStateFlow(false)
-    val utteranceActive: StateFlow<Boolean> = _utteranceActive
-
-    // Reassembles one whole utterance's PCM16 little-endian samples across every
-    // block between the BLE start/end flags, for completedUtterances below.
-    // Buffered here rather than by a collector re-joining audioChunks/utteranceActive
-    // on the app side - both of those are separate Flows with no ordering guarantee
-    // between them, whereas handleAudioFrame already sees every block for one
-    // utterance serially on the same BLE callback thread.
-    private val utteranceBuffer = java.io.ByteArrayOutputStream()
-
-    private val _completedUtterances = MutableSharedFlow<ByteArray>(extraBufferCapacity = 4)
-    /** One full utterance's PCM16 little-endian mono samples at 16kHz, emitted once
-     * the end-of-utterance flag arrives - for callers (VoskTranscriber via
-     * NovaDeviceService) that need the whole recording rather than [audioChunks]'s
-     * live per-block feed. */
-    val completedUtterances: SharedFlow<ByteArray> = _completedUtterances.asSharedFlow()
+    // Drives the assembler's inactivity finaliser: a recording with no frame for 1.5 s is
+    // closed (marked truncated), so a lost END frame never leaves one open forever.
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val inactivityCheck = object : Runnable {
+        override fun run() {
+            val stillOpen = synchronized(assemblerLock) {
+                assembler.checkInactivity()
+                assembler.active
+            }
+            if (stillOpen) mainHandler.postDelayed(this, INACTIVITY_POLL_MS)
+        }
+    }
 
     // --- tiny sequential operation queue (see class doc comment) ---
     private val pendingOperations = ArrayDeque<() -> Unit>()
@@ -127,6 +135,7 @@ class NovaGattClient(
     }
 
     fun disconnect() {
+        endOpenRecording()
         gatt?.disconnect()
         gatt?.close()
         gatt = null
@@ -192,6 +201,9 @@ class NovaGattClient(
                     // instance for the next connection attempt, so anything left
                     // in-flight from this one must not block it.
                     resetQueue()
+                    // A capture cut off by the link dropping is still saved - whatever
+                    // arrived becomes the recording, marked truncated.
+                    endOpenRecording()
                     listener.onConnectionStateChanged(NovaDeviceConnectionState.DISCONNECTED)
                 }
             }
@@ -288,47 +300,24 @@ class NovaGattClient(
     }
 
     private fun handleAudioFrame(frame: ByteArray) {
-        if (frame.size < 2) return
-        val seq = frame[0].toInt() and 0xFF
-        val flags = frame[1].toInt() and 0xFF
-        val block = frame.copyOfRange(2, frame.size)
-
-        if (flags and NovaBleProtocol.AUDIO_FLAG_START != 0) {
-            audioDecoder.reset()
-            expectedAudioSeq = seq
-            _utteranceActive.value = true
-            utteranceBuffer.reset()
+        val opened = synchronized(assemblerLock) {
+            val wasActive = assembler.active
+            assembler.onFrame(frame)
+            !wasActive && assembler.active
         }
-
-        val expected = expectedAudioSeq
-        if (expected != null && expected != seq) {
-            // A notification was dropped somewhere between firmware and here -
-            // this is exactly what the sequence number exists to catch (see
-            // docs/ble-protocol.md). Nothing to recover mid-utterance; just log
-            // and keep decoding what does arrive rather than dropping the rest
-            // of the recording too.
-            android.util.Log.w("NovaGattClient", "audio seq gap: expected $expected got $seq")
+        if (opened) {
+            mainHandler.removeCallbacks(inactivityCheck)
+            mainHandler.postDelayed(inactivityCheck, INACTIVITY_POLL_MS)
         }
-        expectedAudioSeq = (seq + 1) and 0xFF
+    }
 
-        if (block.isNotEmpty()) {
-            val pcm = audioDecoder.decodeBlock(block)
-            if (pcm.isNotEmpty()) {
-                _audioChunks.tryEmit(pcm)
-                for (sample in pcm) {
-                    utteranceBuffer.write(sample.toInt() and 0xFF)
-                    utteranceBuffer.write((sample.toInt() shr 8) and 0xFF)
-                }
-            }
-        }
+    private fun endOpenRecording() {
+        synchronized(assemblerLock) { assembler.forceEnd() }
+        mainHandler.removeCallbacks(inactivityCheck)
+    }
 
-        if (flags and NovaBleProtocol.AUDIO_FLAG_END != 0) {
-            _utteranceActive.value = false
-            expectedAudioSeq = null
-            if (utteranceBuffer.size() > 0) {
-                _completedUtterances.tryEmit(utteranceBuffer.toByteArray())
-            }
-            utteranceBuffer.reset()
-        }
+    private companion object {
+        // How often the inactivity finaliser looks; the timeout itself is the assembler's.
+        const val INACTIVITY_POLL_MS = 500L
     }
 }
