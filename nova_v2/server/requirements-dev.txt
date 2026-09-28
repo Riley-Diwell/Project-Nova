@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Tests only - kept out of requirements.txt so the Docker image stays lean.
+pytest>=8.0

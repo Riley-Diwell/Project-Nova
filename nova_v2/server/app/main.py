@@ -22,6 +22,7 @@ WHO USES THIS
 """
 
 # import necessary libraries
+import hmac
 import os
 import time
 from contextlib import asynccontextmanager
@@ -109,15 +110,31 @@ app = FastAPI(title="NOVA V1", lifespan=_lifespan)
 
 _API_KEY = os.environ.get("NOVA_API_KEY", "").strip()
 if not _API_KEY:
+    # K_SERVICE is set by Cloud Run - a deployed server must never run open.
+    if os.environ.get("K_SERVICE"):
+        raise RuntimeError("NOVA_API_KEY is not set - refusing to start on Cloud Run without it.")
     print("[auth] NOVA_API_KEY not set - /event and friends are UNAUTHENTICATED. "
           "Fine for local dev; do not deploy publicly like this.")
 
+# Reachable without the client key, for uptime checks.
+_OPEN_PATHS = {"/health"}  # not /healthz: Cloud Run reserves paths ending in z
 
+
+# The client key identifies a build, not a person (it ships in the APK), so a
+# mismatch is 403. 401 is kept for bearer-token problems.
+# compare_digest keeps the check constant-time.
 @app.middleware("http")
 async def _require_api_key(request: Request, call_next):
-    if _API_KEY and request.headers.get("x-nova-api-key") != _API_KEY:
-        return JSONResponse(status_code=401, content={"detail": "missing or invalid X-Nova-Api-Key"})
+    if _API_KEY and request.url.path not in _OPEN_PATHS:
+        supplied = request.headers.get("x-nova-api-key", "")
+        if not hmac.compare_digest(supplied.encode(), _API_KEY.encode()):
+            return JSONResponse(status_code=403, content={"detail": "missing or invalid X-Nova-Api-Key"})
     return await call_next(request)
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 # combine event and user_state into one wrapper - matches what Android posts
 class InputWrapper(BaseModel):
