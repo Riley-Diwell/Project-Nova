@@ -179,8 +179,9 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
 
     companion object {
         private const val CHANNEL_ID = "nova_device_connection"
-        // 42 = SignalMonitorService, 43 = AmbientNotifier, 44 = AssistVoiceService -
-        // each foreground/posted notification in the app needs its own id or one
+        // 42 = SignalMonitorService, 43 = AmbientNotifier, 44 = AssistVoiceService,
+        // 46-48 = ReminderNotifier, 49 = ReminderSpeechService - each
+        // foreground/posted notification in the app needs its own id or one
         // can silently replace/cancel another's.
         private const val NOTIFICATION_ID = 45
 

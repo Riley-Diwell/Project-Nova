@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.example.novav2.navigation.NovaDestination
 import com.example.novav2.profile.ProfileRepository
+import com.example.novav2.state.ReminderPreferences
 import com.example.novav2.state.TravelModePreference
 import com.example.novav2.ui.components.ScreenGutter
 import com.example.novav2.ui.components.ScreenHeader
@@ -70,36 +71,91 @@ val SETTINGS_SUBSCREEN_ROUTES: Set<String> = SETTINGS_SUBSCREENS.map { it.first.
 fun SettingsScreen(navController: NavController) {
     val context = LocalContext.current
     var travelMode by remember { mutableStateOf(TravelModePreference.get(context) ?: "transit") }
+    var snoozeMinutes by remember { mutableStateOf(ReminderPreferences.snoozeMinutes(context)) }
+    var speakReminders by remember { mutableStateOf(ReminderPreferences.speakWithHeadphones(context)) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
     ) {
-        Column {
-            Text(
-                text = "How do you usually get to uni?",
-                style = MaterialTheme.typography.bodyLarge
-            )
-            Text(
-                text = "Nova uses this when you ask when to leave, if you haven't said " +
-                    "how you're travelling.",
-                style = MaterialTheme.typography.bodySmall
-            )
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                TRAVEL_MODES.forEachIndexed { index, mode ->
-                    SegmentedButton(
-                        selected = travelMode == mode,
-                        onClick = {
-                            travelMode = mode
-                            TravelModePreference.set(context, mode)
+        ScreenHeader(title = "Settings")
+
+        Column(
+            modifier = Modifier.padding(start = ScreenGutter, end = ScreenGutter, top = 8.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            SectionLabel("Account", Modifier.padding(start = 4.dp))
+            SettingsCard { AccountSection() }
+
+            SectionLabel("Preferences", Modifier.padding(start = 4.dp, top = 16.dp))
+            SettingsCard {
+                SettingTitle(
+                    "How do you usually get to uni?",
+                    "Nova uses this when you ask when to leave, if you haven't said how you're travelling.",
+                )
+                Spacer(Modifier.height(12.dp))
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    TRAVEL_MODES.forEachIndexed { index, mode ->
+                        SegmentedButton(
+                            selected = travelMode == mode,
+                            onClick = {
+                                travelMode = mode
+                                TravelModePreference.set(context, mode)
+                                // The account's copy too, so it survives a reinstall.
+                                ProfileRepository.updateTravelMode(mode)
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(index, TRAVEL_MODES.size),
+                            label = { Text(mode.replaceFirstChar { it.uppercase() }, maxLines = 1) },
+                        )
+                    }
+                }
+
+                SettingDivider()
+
+                SettingTitle(
+                    "Snooze reminders for",
+                    "Used by the notification's Snooze and when you say “snooze it”.",
+                )
+                Spacer(Modifier.height(12.dp))
+                val choices = ReminderPreferences.SNOOZE_CHOICES
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    choices.forEachIndexed { index, minutes ->
+                        SegmentedButton(
+                            selected = snoozeMinutes == minutes,
+                            onClick = {
+                                snoozeMinutes = minutes
+                                ReminderPreferences.setSnoozeMinutes(context, minutes)
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(index, choices.size),
+                            // Four segments leave no room for the selected tick beside "15 min" -
+                            // with it the label wrapped onto two lines.
+                            icon = {},
+                            label = { Text("$minutes min", maxLines = 1, overflow = TextOverflow.Clip) },
+                        )
+                    }
+                }
+
+                SettingDivider()
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        SettingTitle(
+                            "Read reminders aloud in headphones",
+                            "Only when headphones are connected - never through the phone speaker.",
+                        )
+                    }
+                    Spacer(Modifier.width(16.dp))
+                    Switch(
+                        checked = speakReminders,
+                        onCheckedChange = {
+                            speakReminders = it
+                            ReminderPreferences.setSpeakWithHeadphones(context, it)
                         },
-                        shape = SegmentedButtonDefaults.itemShape(index, TRAVEL_MODES.size),
-                        label = { Text(mode.replaceFirstChar { it.uppercase() }) }
+                        colors = novaSwitchColors(),
                     )
                 }
             }
-        }
 
         Column {
             SETTINGS_SUBSCREENS.forEach { (destination, description) ->

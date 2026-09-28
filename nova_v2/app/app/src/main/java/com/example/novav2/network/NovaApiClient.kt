@@ -1,6 +1,7 @@
 package com.example.novav2.network
 
 import com.example.novav2.model.CalendarEventInfo
+import com.example.novav2.model.ReminderSummary
 import com.example.novav2.model.UserState
 import org.json.JSONArray
 import kotlinx.coroutines.Dispatchers
@@ -79,12 +80,20 @@ object NovaApiClient {
              * present even when [speech] is empty (an ambient check that isn't urgent yet, but now
              * knows exactly when it will be). See [com.example.novav2.state.DepartureAlarmScheduler]. */
             val scheduledDeparture: ScheduledDeparture?,
+            /** set_reminder Actions this turn - stored and scheduled via
+             * [com.example.novav2.state.TurnActionApplier], no confirmation needed. */
+            val reminderActions: List<ReminderAction> = emptyList(),
+            /** update_reminder Actions this turn (complete / snooze / edit / delete) - applied
+             * immediately; a delete is a soft delete with an Undo notice. */
+            val updateReminderActions: List<UpdateReminderAction> = emptyList(),
         ) : EventResult()
         data class NeedMore(
             val sessionId: String,
             val requestType: String,
             val fromIso: String,
             val toIso: String,
+            /** get_reminders only - whether to include completed reminders. */
+            val includeDone: Boolean = false,
         ) : EventResult()
     }
 
@@ -214,12 +223,20 @@ object NovaApiClient {
      * range). May itself return another [EventResult.NeedMore] if the model needs a further hop.
      */
     suspend fun postContinueEvent(sessionId: String, events: List<CalendarEventInfo>): EventResult =
+        postContinueResult(sessionId, JSONObject().apply { put("events", events.toJsonArray()) })
+
+    /** The get_reminders side of [postContinueEvent]: {"reminders": [...]} in the same
+     * ReminderInfo shape the voice window uses. */
+    suspend fun postContinueReminders(sessionId: String, reminders: List<ReminderSummary>): EventResult =
+        postContinueResult(sessionId, JSONObject().apply { put("reminders", reminders.toReminderJsonArray()) })
+
+    /** /event/continue with whatever [result] shape the paused client tool calls for - the
+     * backend feeds it straight back to the model as that tool's result. */
+    suspend fun postContinueResult(sessionId: String, result: JSONObject): EventResult =
         withContext(Dispatchers.IO) {
             val body = JSONObject().apply {
                 put("session_id", sessionId)
-                put("result", JSONObject().apply {
-                    put("events", events.toJsonArray())
-                })
+                put("result", result)
             }
 
             val request = Request.Builder()
@@ -534,6 +551,7 @@ object NovaApiClient {
                     requestType = req.optString("type"),
                     fromIso = req.optString("from"),
                     toIso = req.optString("to"),
+                    includeDone = req.optBoolean("include_done", false),
                 )
             }
             else -> EventResult.Final(
@@ -557,6 +575,8 @@ object NovaApiClient {
                         eventTitle = it.optString("event_title").takeIf { t -> t.isNotBlank() },
                     )
                 },
+                reminderActions = parseReminderActions(json.optJSONArray("actions")),
+                updateReminderActions = parseUpdateReminderActions(json.optJSONArray("actions")),
             )
         }
     }
@@ -711,6 +731,12 @@ object NovaApiClient {
         put("current_events", currentEvents.toJsonArray())
         put("upcoming_events", upcomingEvents.toJsonArray())
         put("preferred_travel_mode", preferredTravelMode)
+        // Voice turns only (ReminderRepository.attachWindow) - an ambient snapshot has no
+        // total and so sends no reminder text at all.
+        if (remindersPendingTotal != null) {
+            put("reminders", reminders.toReminderJsonArray())
+            put("reminders_pending_total", remindersPendingTotal)
+        }
     }
 
     private fun List<CalendarEventInfo>.toJsonArray(): JSONArray =

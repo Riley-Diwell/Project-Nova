@@ -42,6 +42,7 @@ import com.example.novav2.ui.screens.DeviceScreen
 import com.example.novav2.ui.screens.GainScreen
 import com.example.novav2.ui.screens.KnowledgeMapScreen
 import com.example.novav2.ui.screens.ProfileScreen
+import com.example.novav2.ui.screens.RemindersScreen
 import com.example.novav2.ui.screens.SettingsScreen
 import com.example.novav2.ui.screens.StateScreen
 import com.example.novav2.ui.screens.VoiceScreen
@@ -54,6 +55,7 @@ import com.example.novav2.ui.screens.onboarding.ProfileUnavailable
 fun NovaApp(
     assistRequested: MutableState<Boolean> = mutableStateOf(false),
     autoListenRequested: MutableState<Boolean> = mutableStateOf(false),
+    remindersRequested: MutableState<Boolean> = mutableStateOf(false),
 ) {
     // Signed out: Welcome and sign-in instead of the app.
     val session by AuthRepository.state.collectAsState()
@@ -94,6 +96,17 @@ fun NovaApp(
         }
     }
 
+    // Tapping a reminder notification lands on the Reminders tab.
+    LaunchedEffect(remindersRequested.value) {
+        if (remindersRequested.value) {
+            navController.navigate(NovaDestination.Reminders.route) {
+                popUpTo(navController.graph.findStartDestination().id)
+                launchSingleTop = true
+            }
+            remindersRequested.value = false
+        }
+    }
+
     Scaffold(
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
         bottomBar = {
@@ -131,6 +144,9 @@ fun NovaApp(
                     bottomBarHeight = innerPadding.calculateBottomPadding(),
                     autoListenRequested = autoListenRequested,
                 )
+            }
+            composable(NovaDestination.Reminders.route) {
+                RemindersScreen()
             }
             composable(NovaDestination.State.route) {
                 SettingsSubScreen(NovaDestination.State, navController) { StateScreen() }

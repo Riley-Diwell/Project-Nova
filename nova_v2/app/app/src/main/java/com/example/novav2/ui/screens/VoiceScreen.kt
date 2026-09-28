@@ -90,10 +90,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.novav2.model.ChatMessage
 import com.example.novav2.network.NovaApiClient
-import com.example.novav2.state.AlarmIntents
-import com.example.novav2.state.CalendarSignal
 import com.example.novav2.state.CalendarWriter
-import com.example.novav2.state.DepartureAlarmScheduler
+import com.example.novav2.state.ReminderRepository
+import com.example.novav2.state.TurnActionApplier
 import com.example.novav2.state.UserStateCollector
 import com.example.novav2.state.parseIsoToEpochMillis
 import com.example.novav2.viewmodel.ChatViewModel
@@ -466,27 +465,16 @@ fun VoiceScreen(
         voiceState = VoiceState.THINKING
         statusText = "Sending to Nova…"
         coroutineScope.launch {
-            val userState = UserStateCollector.snapshot(context)
+            val userState = ReminderRepository.attachWindow(context, UserStateCollector.snapshot(context))
             try {
-                var result: NovaApiClient.EventResult = NovaApiClient.postVoiceEvent(text, userState)
-                // The Intent Surface can pause on a client-executed tool (e.g.
-                // get_calendar_range) it needs on-device data for; resolve it
-                // locally and hand the result back until we get a final answer.
-                // Capped so a misbehaving backend can't loop forever.
-                var hops = 0
-                while (result is NovaApiClient.EventResult.NeedMore && hops < 3) {
-                    val need = result as NovaApiClient.EventResult.NeedMore
-                    statusText = "Checking your calendar…"
-                    val events = when (need.requestType) {
-                        "get_calendar_range" -> {
-                            val from = parseIsoToEpochMillis(need.fromIso)
-                            val to = parseIsoToEpochMillis(need.toIso)
-                            CalendarSignal.rangeSnapshot(context, from, to).orEmpty()
-                        }
-                        else -> emptyList()
-                    }
-                    result = NovaApiClient.postContinueEvent(need.sessionId, events)
-                    hops++
+                // The Intent Surface can pause on a client-executed tool (get_calendar_range,
+                // get_reminders) it needs on-device data for; TurnActionApplier resolves it
+                // locally and hands the result back until there's a final answer.
+                val result = TurnActionApplier.resolveNeedMore(
+                    context, NovaApiClient.postVoiceEvent(text, userState),
+                ) { need ->
+                    statusText = if (need.requestType == "get_reminders") "Checking your reminders…"
+                    else "Checking your calendar…"
                 }
                 val finalResult = result as? NovaApiClient.EventResult.Final
                 val calendarActions = finalResult?.actions.orEmpty()
@@ -509,18 +497,9 @@ fun VoiceScreen(
                     // must not be dropped by a new one arriving.
                     pendingDeleteConfirmations = pendingDeleteConfirmations + deleteActions
                 }
-                // set_timer/set_alarm actions - fire-and-forget like the calendar writes above,
-                // no permission prompt needed (see AlarmIntents.kt).
-                finalResult?.timerActions.orEmpty().forEach {
-                    AlarmIntents.setTimer(context, it.durationSeconds, it.label)
-                }
-                finalResult?.alarmActions.orEmpty().forEach {
-                    AlarmIntents.setAlarm(context, it.hour, it.minute, it.label)
-                }
-                // Asking once sets up the reminder for later, too - not just an answer read out
-                // now. Same mechanism SignalMonitorService's ambient checks use.
-                finalResult?.scheduledDeparture?.let {
-                    DepartureAlarmScheduler.schedule(context, it)
+                // Timers, alarms, reminders and the departure alarm - fire-and-forget like the
+                // calendar writes above, no prompt needed. Shared with AssistVoiceService.
+                finalResult?.let { TurnActionApplier.applyHeadless(context, it) }
                 }
                 val reply = finalResult?.speech ?: "Sorry, I couldn't finish that."
                 statusText = ""

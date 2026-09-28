@@ -26,6 +26,18 @@
          AlarmClock's EXTRA_SKIP_UI to actually skip the Clock app's confirmation screen when
          AlarmIntents.kt fires set_timer/set_alarm - without it the OS shows the screen anyway. -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <!-- Reminders fire on an exact alarm (state/ReminderScheduler.kt). USE_EXACT_ALARM (API 33+)
+         is granted at install and can't be revoked; Google Play limits it to alarm/calendar-type
+         apps, which is fine for a sideloaded capstone (a Play release would need to
+         revisit it). SCHEDULE_EXACT_ALARM covers API 31-32, where the user can
+         revoke it - ReminderScheduler then falls back to an inexact alarm and the Reminders
+         screen says so. -->
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission
+        android:name="android.permission.SCHEDULE_EXACT_ALARM"
+        android:maxSdkVersion="32" />
+    <!-- ReminderSpeechService on API 34+ (headphone TTS for a reminder). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SHORT_SERVICE" />
 
     <!-- Nova device BLE connection (see ble/ package, docs/ble-protocol.md).
          Legacy pair for API <=30; BLUETOOTH_SCAN/CONNECT replace them from 31.
@@ -109,6 +121,28 @@
             android:exported="false" />
 
         <receiver
+            android:name=".service.ReminderAlarmReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".service.ReminderActionReceiver"
+            android:exported="false" />
+
+        <!-- Separate from BootCompletedReceiver, which returns early with no wearable paired -
+             reminders must come back after a reboot either way. -->
+        <receiver
+            android:name=".service.ReminderRescheduleReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
             android:name=".service.BootCompletedReceiver"
             android:exported="false">
             <intent-filter>
@@ -125,6 +159,11 @@
             android:name=".service.NovaDeviceService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <service
+            android:name=".service.ReminderSpeechService"
+            android:exported="false"
+            android:foregroundServiceType="shortService|dataSync" />
 
         <service
             android:name=".service.AssistVoiceService"

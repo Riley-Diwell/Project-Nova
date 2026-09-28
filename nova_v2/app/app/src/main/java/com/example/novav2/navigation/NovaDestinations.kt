@@ -3,6 +3,7 @@ package com.example.novav2.navigation
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Home
@@ -17,6 +18,7 @@ const val ONBOARDING_ROUTE = "onboarding"
 sealed class NovaDestination(val route: String, val label: String, val icon: ImageVector) {
     data object Dashboard : NovaDestination("dashboard", "Dashboard", Icons.Default.Home)
     data object Voice : NovaDestination("voice", "Voice", Icons.Default.Mic)
+    data object Reminders : NovaDestination("reminders", "Reminders", Icons.Default.Checklist)
     data object State : NovaDestination("state", "State", Icons.Default.Sensors)
     data object Gain : NovaDestination("gain", "Gain", Icons.Default.Tune)
     data object Knowledge : NovaDestination("knowledge", "Map", Icons.Default.Hub)
@@ -35,6 +37,8 @@ sealed class NovaDestination(val route: String, val label: String, val icon: Ima
 val bottomNavDestinations = listOf(
 //    NovaDestination.Dashboard
     NovaDestination.Voice,
+    // An everyday destination, unlike Gain/State - reminders are something you check.
+    NovaDestination.Reminders,
     NovaDestination.Knowledge,
     NovaDestination.Audit,
     NovaDestination.Settings

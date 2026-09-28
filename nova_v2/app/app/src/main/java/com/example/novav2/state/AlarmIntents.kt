@@ -1,8 +1,10 @@
 package com.example.novav2.state
 
+import android.companion.CompanionDeviceManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.provider.AlarmClock
 
 /**
@@ -38,6 +40,25 @@ object AlarmIntents {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         return launch(context, intent)
+    }
+
+    /**
+     * Whether a startActivity from here would actually reach the Clock app. Since Android 10 a
+     * background app's activity starts are blocked - silently, with no exception - unless it is
+     * exempt; the exemption Nova relies on is a CompanionDeviceManager association with the
+     * wearable (NovaDevicePairing). A wearable turn with no association and no Nova screen up
+     * would otherwise report a timer that never started.
+     */
+    fun canOpenClockNow(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
+        if (AppForegroundState.isInForeground()) return true
+        val manager = context.getSystemService(CompanionDeviceManager::class.java) ?: return false
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) manager.myAssociations.isNotEmpty()
+            else @Suppress("DEPRECATION") manager.associations.isNotEmpty()
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /** True on success. False (rather than a crash) when no app on the device handles the

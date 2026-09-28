@@ -16,6 +16,7 @@ import com.example.novav2.auth.SessionState
 import com.example.novav2.ble.NovaDevicePairing
 import com.example.novav2.service.NovaDeviceService
 import com.example.novav2.service.SignalMonitorService
+import com.example.novav2.state.ReminderScheduler
 import com.example.novav2.ui.NovaApp
 import com.example.novav2.ui.theme.NovaTheme
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -35,6 +36,9 @@ class MainActivity : ComponentActivity() {
     // the foreground (see EXTRA_AUTO_LISTEN there) - tells VoiceScreen to trigger its mic button
     // itself rather than just landing on the Voice tab and waiting for a manual tap.
     private val autoListenRequested = mutableStateOf(false)
+
+    // Set when a reminder notification opened the app (ReminderNotifier's content intent).
+    private val remindersRequested = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,10 +66,18 @@ class MainActivity : ComponentActivity() {
         if (NovaDevicePairing.isPaired(this)) {
             ContextCompat.startForegroundService(this, Intent(this, NovaDeviceService::class.java))
         }
+        // Every Run from Android Studio force-stops the app, and a force-stop cancels all of
+        // its alarms - re-derive the reminder alarm from the table on every start.
+        ReminderScheduler.reconcileAsync(this)
+        remindersRequested.value = intent?.action == ACTION_OPEN_REMINDERS
 
         setContent {
             NovaTheme {
-                NovaApp(assistRequested = assistRequested, autoListenRequested = autoListenRequested)
+                NovaApp(
+                    assistRequested = assistRequested,
+                    autoListenRequested = autoListenRequested,
+                    remindersRequested = remindersRequested,
+                )
             }
         }
     }
@@ -73,11 +85,16 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent.action == ACTION_OPEN_REMINDERS) remindersRequested.value = true
         if (intent.action == Intent.ACTION_ASSIST) {
             assistRequested.value = true
             if (intent.getBooleanExtra(AssistTrampolineActivity.EXTRA_AUTO_LISTEN, false)) {
                 autoListenRequested.value = true
             }
         }
+    }
+    companion object {
+        /** A reminder notification's tap - opens the Reminders tab. */
+        const val ACTION_OPEN_REMINDERS = "com.example.novav2.action.OPEN_REMINDERS"
     }
 }
