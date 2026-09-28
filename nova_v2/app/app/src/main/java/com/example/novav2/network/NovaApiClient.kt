@@ -1,6 +1,5 @@
 package com.example.novav2.network
 
-import com.example.novav2.BuildConfig
 import com.example.novav2.model.CalendarEventInfo
 import com.example.novav2.model.UserState
 import org.json.JSONArray
@@ -8,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
+import com.example.novav2.network.NovaHttp.withNovaAuth
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -27,25 +27,21 @@ import java.util.concurrent.TimeUnit
  * {event, user_state} -> {speech, actions[]}). [BASE_URL] points at the deployed
  * `nova-v2` Cloud Run service (nova_v2/server, region australia-southeast1) -
  * swap back to "http://10.0.2.2:8000" (emulator host-loopback) or a LAN IP for
- * local dev against `uvicorn --reload` instead. [API_KEY] must match that
+ * local dev against `uvicorn --reload` instead. The client key ([NovaHttp]) must match that
  * service's NOVA_API_KEY secret (main.py's _require_api_key) - set via
  * local.properties' NOVA_API_KEY (gitignored, machine-local; blank there means
  * no header is sent, fine only for a backend with no key configured, i.e. bare
  * local dev).
  */
 object NovaApiClient {
-    private const val BASE_URL = "https://nova-v2-1021689546881.australia-southeast1.run.app"
-    private val API_KEY = BuildConfig.NOVA_API_KEY
+    // Not private: NotesApiClient talks to the same server.
+    const val BASE_URL = "https://nova-v2-1021689546881.australia-southeast1.run.app"
     private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
-        .addInterceptor { chain ->
-            val request = if (API_KEY.isEmpty()) chain.request()
-                else chain.request().newBuilder().addHeader("X-Nova-Api-Key", API_KEY).build()
-            chain.proceed(request)
-        }
+        .withNovaAuth()
         .build()
 
     /**

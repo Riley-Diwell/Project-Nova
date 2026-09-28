@@ -1,6 +1,7 @@
 package com.example.novav2.navigation
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Hub
@@ -22,6 +23,8 @@ sealed class NovaDestination(val route: String, val label: String, val icon: Ima
     data object Audit : NovaDestination("audit", "Audit", Icons.Default.History)
     data object Device : NovaDestination("device", "Device", Icons.Default.Bluetooth)
     data object Settings : NovaDestination("settings", "Settings", Icons.Default.Person)
+    /** Settings -> Your profile: the onboarding answers, editable. */
+    data object Profile : NovaDestination("profile", "Profile", Icons.Default.AccountCircle)
 }
 
 // Dashboard is still hidden from the bottom nav - the screen/route exists, just not linked here

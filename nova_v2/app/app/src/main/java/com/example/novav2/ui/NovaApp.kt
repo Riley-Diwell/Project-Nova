@@ -19,11 +19,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavController
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -31,7 +29,11 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.example.novav2.BuildConfig
+import com.example.novav2.auth.AuthRepository
+import com.example.novav2.auth.SessionState
 import com.example.novav2.model.UserProfile
+import com.example.novav2.profile.ProfileRepository
 import com.example.novav2.navigation.NovaDestination
 import com.example.novav2.navigation.bottomNavDestinations
 import com.example.novav2.ui.screens.AuditLogScreen
@@ -39,32 +41,44 @@ import com.example.novav2.ui.screens.DashboardScreen
 import com.example.novav2.ui.screens.DeviceScreen
 import com.example.novav2.ui.screens.GainScreen
 import com.example.novav2.ui.screens.KnowledgeMapScreen
-import com.example.novav2.ui.screens.OnboardingScreen
+import com.example.novav2.ui.screens.ProfileScreen
 import com.example.novav2.ui.screens.SettingsScreen
 import com.example.novav2.ui.screens.StateScreen
 import com.example.novav2.ui.screens.VoiceScreen
+import com.example.novav2.ui.screens.auth.AuthFlow
+import com.example.novav2.ui.screens.onboarding.OnboardingFlow
+import com.example.novav2.ui.screens.onboarding.ProfileLoading
+import com.example.novav2.ui.screens.onboarding.ProfileUnavailable
 
 @Composable
 fun NovaApp(
     assistRequested: MutableState<Boolean> = mutableStateOf(false),
     autoListenRequested: MutableState<Boolean> = mutableStateOf(false),
 ) {
-    // TODO: re-enable onboarding gate - skipped for now to speed up dev iteration.
-    var onboardingComplete by rememberSaveable { mutableStateOf(true) }
-    var userName by rememberSaveable { mutableStateOf("") }
-    var dailyGoalMinutes by rememberSaveable { mutableIntStateOf(120) }
-
-    val profile = UserProfile(name = userName, dailyGoalMinutes = dailyGoalMinutes)
-
-    if (!onboardingComplete) {
-        OnboardingScreen(
-            profile = profile,
-            onNameChange = { userName = it },
-            onGoalChange = { dailyGoalMinutes = it },
-            onFinish = { onboardingComplete = true }
-        )
+    // Signed out: Welcome and sign-in instead of the app.
+    val session by AuthRepository.state.collectAsState()
+    if (session is SessionState.SignedOut) {
+        AuthFlow()
         return
     }
+
+    // Signed in but not onboarded: onboarding first. The
+    // profile is cached, so an offline start of an onboarded account goes straight in. A debug
+    // build can skip it with SKIP_ONBOARDING=true in local.properties.
+    val profileState by ProfileRepository.state.collectAsState()
+    val skippedProfile by ProfileRepository.skippedThisRun.collectAsState()
+    if (!BuildConfig.SKIP_ONBOARDING && !skippedProfile) {
+        when (val p = profileState) {
+            ProfileRepository.ProfileState.Loading -> { ProfileLoading(); return }
+            is ProfileRepository.ProfileState.Unavailable -> { ProfileUnavailable(p.message); return }
+            is ProfileRepository.ProfileState.Ready -> if (p.profile?.needsOnboarding != false) {
+                OnboardingFlow()
+                return
+            }
+        }
+    }
+    val accountProfile = (profileState as? ProfileRepository.ProfileState.Ready)?.profile
+    val profile = UserProfile(name = accountProfile?.displayName.orEmpty())
 
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -135,6 +149,9 @@ fun NovaApp(
             }
             composable(NovaDestination.Settings.route) {
                 SettingsScreen(navController)
+            }
+            composable(NovaDestination.Profile.route) {
+                SettingsSubScreen(NovaDestination.Profile, navController) { ProfileScreen() }
             }
         }
     }

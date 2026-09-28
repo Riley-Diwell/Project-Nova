@@ -1,5 +1,6 @@
 package com.example.novav2.service
 
+import com.example.novav2.auth.AuthRepository
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
@@ -73,6 +74,15 @@ class AssistVoiceService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!AuthRepository.isSignedIn) {
+            // Started with startForegroundService, so it must still go foreground before it stops.
+            startForegroundWithType(
+                buildStatusNotification("Sign in to use Nova", alerting = false),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+            finishTurn("Open Nova and sign in first, then I can help.", episodeId = null)
+            return START_NOT_STICKY
+        }
         val transcript = intent?.getStringExtra(EXTRA_TRANSCRIPT)
         if (transcript != null) {
             // Skips the "listening" wording entirely - a BLE transcript arrives already

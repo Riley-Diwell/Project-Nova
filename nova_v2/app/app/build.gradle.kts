@@ -13,6 +13,9 @@ val localProperties = Properties().apply {
     if (file.exists()) file.inputStream().use { load(it) }
 }
 val novaApiKey: String = localProperties.getProperty("NOVA_API_KEY", "")
+// Dev shortcut past onboarding: SKIP_ONBOARDING=true in
+// local.properties. Debug builds only - a release build always asks.
+val skipOnboarding: Boolean = localProperties.getProperty("SKIP_ONBOARDING", "false").toBoolean()
 
 // --- Vosk offline STT model (see stt/VoskTranscriber.kt) --------------------
 // Downloaded and unzipped at build time rather than committed to git - the
@@ -97,6 +100,7 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "NOVA_API_KEY", "\"$novaApiKey\"")
+        buildConfigField("boolean", "SKIP_ONBOARDING", "false")
 
         // vosk-android ships prebuilt native libs per ABI via JNA's .aar - restrict to
         // real-device ABIs rather than also packaging x86/x86_64 emulator variants.
@@ -104,6 +108,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField("boolean", "SKIP_ONBOARDING", skipOnboarding.toString())
+        }
         release {
             optimization {
                 enable = false
