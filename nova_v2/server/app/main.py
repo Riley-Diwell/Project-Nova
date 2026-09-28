@@ -336,19 +336,41 @@ class FactEdit(BaseModel):
 
 
 @app.get("/persona/graph")
-async def get_persona_graph(
+def get_persona_graph(
+    response: Response,
     min_similarity: float = persona.DEFAULT_MIN_SIMILARITY,
     max_links: int = persona.DEFAULT_MAX_LINKS,
-) -> dict[str, Any]:
+    if_none_match: str | None = Header(default=None),
+    user: AuthUser = Depends(current_user),
+) -> Any:
     """Persona as nodes and edges, for the Knowledge Map tab.
 
     min_similarity is a query parameter because the right density is a taste
     question and will drift as the store grows - see persona/graph.py for the
     measurements behind the default.
+
+    Carries an ETag. The phone keeps the last graph and sends its tag back as
+    If-None-Match; if nothing has changed it gets a bodyless 304, and the server
+    never loads the embeddings or links a single pair (persona.graph_etag).
     """
-    graph = persona.knowledge_graph(min_similarity=min_similarity, max_links=max_links)
+    etag = persona.graph_etag(user.id, min_similarity=min_similarity, max_links=max_links)
+    # private: one person's beliefs, never for a shared cache. no-cache: always ask first.
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+    if _etag_matches(if_none_match, etag):
+        return Response(status_code=304, headers=headers)
+
+    graph = persona.knowledge_graph(user.id, min_similarity=min_similarity, max_links=max_links)
     print(f"[persona] graph {graph.stats()}")
+    response.headers.update(headers)
     return {**graph.model_dump(mode="json"), "stats": graph.stats()}
+
+
+def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+    """RFC 9110 If-None-Match: a list of tags, compared weakly, or "*"."""
+    if not if_none_match:
+        return False
+    tags = [t.strip().removeprefix("W/") for t in if_none_match.split(",")]
+    return "*" in tags or etag in tags
 
 
 @app.get("/persona")

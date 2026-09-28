@@ -193,6 +193,18 @@ class SupabasePersonaStore:
         }
 
 
+    def versions(self, user_id: UserId) -> dict[str, str]:
+        """Every one of this user's fact ids with when it last changed - and nothing else.
+
+        What the Knowledge Map's ETag is made from (persona.graph_etag): every
+        write goes through upsert(), which stamps updated_at, and a delete
+        removes the row, so this changes whenever the graph could. Two short
+        columns a row, where the graph itself needs every embedding.
+        """
+        res = self._db.table(TABLE).select("id,updated_at").eq("user_id", str(user_id)).execute()
+        return {r["id"]: str(r.get("updated_at")) for r in res.data}
+
+
 def _as_vector(value: Any) -> list[float]:
     """pgvector comes back over PostgREST as a JSON string ('[0.1,0.2,...]')
     rather than an array, so accept either."""

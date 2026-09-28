@@ -2,29 +2,44 @@ package com.example.novav2.ui.screens
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -34,15 +49,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.example.novav2.knowledge.KnowledgeRepository
 import com.example.novav2.network.NovaApiClient
+import com.example.novav2.ui.components.ScreenGutter
+import com.example.novav2.ui.components.ScreenHeader
+import com.example.novav2.ui.theme.NovaAccentLight
+import com.example.novav2.ui.theme.NovaBlue
+import com.example.novav2.ui.theme.NovaDerived
 import kotlinx.coroutines.launch
 import org.json.JSONException
 import java.io.IOException
@@ -77,6 +101,9 @@ private const val DAMPING = 0.85f
 private const val CATEGORY_REST_LENGTH = 90f
 private const val SIMILAR_REST_LENGTH = 170f
 
+private val STATED_COLOUR = NovaBlue
+private val SIMILAR_COLOUR = NovaAccentLight
+
 private data class LaidOutNode(
     val node: NovaApiClient.GraphNode,
     var x: Float,
@@ -86,171 +113,238 @@ private data class LaidOutNode(
 )
 
 @Composable
-fun KnowledgeMapScreen() {
+fun KnowledgeMapScreen(onOpenNote: (String) -> Unit = {}) {
     val scope = rememberCoroutineScope()
 
-    var graph by remember { mutableStateOf<NovaApiClient.KnowledgeGraph?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var loading by remember { mutableStateOf(true) }
+    // Held by the repository across visits: the last map shows at once and is revalidated behind it.
+    val knowledge by KnowledgeRepository.state.collectAsState()
+    val graph = knowledge.graph
+    // An edit, forget or consolidate that failed. A failed refresh is knowledge.error.
+    var actionError by remember { mutableStateOf<String?>(null) }
+    val error = actionError ?: knowledge.error
+    val loading = graph == null && knowledge.refreshing
     var consolidating by remember { mutableStateOf(false) }
     var consolidateNote by remember { mutableStateOf<String?>(null) }
-    var minSimilarity by remember { mutableFloatStateOf(0.65f) }
-    var selected by remember { mutableStateOf<NovaApiClient.GraphNode?>(null) }
+    // By id, so an edited belief shows its new text and a forgotten one closes its card.
+    var selectedId by remember { mutableStateOf<String?>(null) }
+    val selected = graph?.nodes?.firstOrNull { it.id == selectedId }
+    var editing by remember { mutableStateOf<NovaApiClient.GraphNode?>(null) }
+    var forgetting by remember { mutableStateOf<NovaApiClient.GraphNode?>(null) }
 
     var scale by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
 
     fun reload() {
-        loading = true
-        error = null
-        scope.launch {
-            try {
-                graph = NovaApiClient.getKnowledgeGraph(minSimilarity)
-            } catch (e: IOException) {
-                error = e.message ?: "Couldn't load the knowledge map."
-            } catch (e: JSONException) {
-                error = e.message ?: "Couldn't load the knowledge map."
-            } finally {
-                loading = false
-            }
-        }
+        actionError = null
+        scope.launch { KnowledgeRepository.refresh() }
     }
 
     LaunchedEffect(Unit) { reload() }
 
     // Recomputed only when the graph itself changes - panning and zooming are
-    // view transforms, not a reason to re-run the simulation.
-    val layout = remember(graph) { graph?.let { layoutOf(it) } ?: emptyList() }
+    // view transforms, not a reason to re-run the simulation. Each run starts
+    // from the last one's positions, so forgetting a fact doesn't reshuffle the map.
+    val lastLayout = remember { arrayOfNulls<List<LaidOutNode>>(1) }
+    val layout = remember(graph) {
+        (graph?.let { layoutOf(it, lastLayout[0]) } ?: emptyList()).also { lastLayout[0] = it }
+    }
 
-    Column(Modifier.fillMaxSize().padding(12.dp)) {
-        Text("Knowledge Map", style = MaterialTheme.typography.headlineSmall)
-        Text(
-            "What NOVA believes about you. Dashed links are connections it found " +
-                "on its own.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+    Column(Modifier.fillMaxSize()) {
+        ScreenHeader(
+            title = "Knowledge Map",
+            subtitle = "What NOVA believes about you. Tap a dot to see where it came from.",
         )
-        Spacer(Modifier.height(8.dp))
 
-        // Consolidation is driven from here rather than from a timer, because
-        // this is where the user can see the result: episodes they have lived
-        // through turning into beliefs NOVA will act on. Doing it invisibly in
-        // the background would work just as well and show nothing.
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedButton(
+        Column(
+            Modifier.fillMaxWidth().weight(1f).padding(start = ScreenGutter, end = ScreenGutter, bottom = 16.dp),
+        ) {
+            // Consolidation is driven from here rather than from a timer, because
+            // this is where the user can see the result: episodes they have lived
+            // through turning into beliefs NOVA will act on. Doing it invisibly in
+            // the background would work just as well and show nothing.
+            FilledTonalButton(
                 onClick = {
                     consolidating = true
-                    error = null
+                    actionError = null
                     scope.launch {
                         try {
-                            val (derived, stated) = NovaApiClient.consolidate()
+                            val (derived, stated) = KnowledgeRepository.consolidate()
                             consolidateNote = when (derived + stated) {
                                 0 -> "Nothing new to learn yet."
                                 else -> "Learned $derived habit(s) and $stated thing(s) you said."
                             }
-                            reload()
                         } catch (e: IOException) {
-                            error = e.message ?: "Couldn't consolidate."
+                            actionError = e.message ?: "Couldn't consolidate."
                         } catch (e: JSONException) {
-                            error = e.message ?: "Couldn't consolidate."
+                            actionError = e.message ?: "Couldn't consolidate."
                         } finally {
                             consolidating = false
                         }
                     }
                 },
                 enabled = !consolidating && !loading,
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (consolidating) "Learning…" else "Learn from my history")
+                if (consolidating) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Learning…")
+                } else {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Learn from my history")
+                }
             }
             consolidateNote?.let {
-                Spacer(Modifier.width(8.dp))
                 Text(
                     it,
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
                 )
             }
-        }
-        Spacer(Modifier.height(8.dp))
+            if (error != null && layout.isNotEmpty()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { reload() }) { Text("Try again") }
+                }
+            }
 
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Link density", style = MaterialTheme.typography.labelMedium)
-            Slider(
-                value = minSimilarity,
-                onValueChange = { minSimilarity = it },
-                onValueChangeFinished = { reload() },
-                valueRange = 0.45f..0.9f,
-                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-            )
-            Text(String.format("%.2f", minSimilarity),
-                style = MaterialTheme.typography.labelMedium)
-        }
-
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .background(MaterialTheme.colorScheme.surfaceVariant,
-                    RoundedCornerShape(12.dp)),
-        ) {
-            when {
-                loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
-                error != null -> Text(
-                    error!!,
-                    Modifier.align(Alignment.Center).padding(24.dp),
-                    color = MaterialTheme.colorScheme.error,
-                )
-                layout.isEmpty() -> Text(
-                    "Nothing stored yet. Tell NOVA something about yourself, or " +
-                        "run consolidation to build facts from your history.",
-                    Modifier.align(Alignment.Center).padding(24.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                else -> GraphCanvas(
-                    layout = layout,
-                    edges = graph?.edges.orEmpty(),
-                    scale = scale,
-                    pan = pan,
-                    selectedId = selected?.id,
-                    onTransform = { zoom, offset -> scale *= zoom; pan += offset },
-                    onTapNode = { selected = it },
+            // The selected belief sits up here, under the button, so the map below keeps its
+            // full height rather than being pushed down by a card at the bottom.
+            selected?.let { node ->
+                Spacer(Modifier.height(12.dp))
+                FactDetail(
+                    node = node,
+                    onDismiss = { selectedId = null },
+                    onOpenNote = onOpenNote,
+                    onEdit = { editing = node },
+                    onForget = { forgetting = node },
                 )
             }
-        }
 
-        selected?.let { node ->
+            Spacer(Modifier.height(12.dp))
+            Legend()
             Spacer(Modifier.height(8.dp))
-            FactDetail(
-                node = node,
-                onDismiss = { selected = null },
-                onDelete = {
-                    scope.launch {
-                        try {
-                            NovaApiClient.deleteFact(node.id)
-                            selected = null
-                            reload()
-                        } catch (e: IOException) {
-                            error = e.message ?: "Couldn't delete that."
-                        } catch (e: JSONException) {
-                            error = e.message ?: "Couldn't delete that."
-                        }
+
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow, MaterialTheme.shapes.medium)
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium),
+            ) {
+                when {
+                    loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+                    // With a map to show, an error sits above it instead of replacing it.
+                    error != null && layout.isEmpty() -> Column(
+                        Modifier.align(Alignment.Center).padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            error,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(onClick = { reload() }) { Text("Try again") }
                     }
-                },
-                onSave = { newText ->
-                    scope.launch {
-                        try {
-                            NovaApiClient.editFact(node.id, newText, null)
-                            selected = null
-                            reload()
-                        } catch (e: IOException) {
-                            error = e.message ?: "Couldn't save that."
-                        } catch (e: JSONException) {
-                            error = e.message ?: "Couldn't save that."
-                        }
-                    }
-                },
-            )
+                    layout.isEmpty() -> Text(
+                        "Nothing stored yet. Tell NOVA something about yourself, or " +
+                            "tap Learn from my history to build facts from what you've done.",
+                        Modifier.align(Alignment.Center).padding(24.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    else -> GraphCanvas(
+                        layout = layout,
+                        edges = graph?.edges.orEmpty(),
+                        scale = scale,
+                        pan = pan,
+                        selectedId = selected?.id,
+                        onTransform = { zoom, offset -> scale *= zoom; pan += offset },
+                        onTapNode = { selectedId = it?.id },
+                    )
+                }
+            }
         }
+    }
+
+    editing?.let { node ->
+        EditFactDialog(
+            node = node,
+            onDismiss = { editing = null },
+            onSave = { newText ->
+                editing = null
+                actionError = null
+                scope.launch {
+                    try {
+                        KnowledgeRepository.edit(node.id, newText)
+                    } catch (e: IOException) {
+                        actionError = e.message ?: "Couldn't save that."
+                    } catch (e: JSONException) {
+                        actionError = e.message ?: "Couldn't save that."
+                    }
+                }
+            },
+        )
+    }
+
+    forgetting?.let { node ->
+        AlertDialog(
+            onDismissRequest = { forgetting = null },
+            title = { Text("Forget this?") },
+            text = { Text("NOVA will stop believing “${node.label}” and won't use it again.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    forgetting = null
+                    actionError = null
+                    scope.launch {
+                        try {
+                            KnowledgeRepository.forget(node.id)
+                        } catch (e: IOException) {
+                            actionError = e.message ?: "Couldn't delete that."
+                        } catch (e: JSONException) {
+                            actionError = e.message ?: "Couldn't delete that."
+                        }
+                    }
+                }) { Text("Forget", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { forgetting = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** What the dots and lines mean, so the map reads without the explainer text. */
+@Composable
+private fun Legend() {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        LegendItem("You told NOVA") { drawCircle(STATED_COLOUR) }
+        LegendItem("NOVA worked out") { drawCircle(NovaDerived) }
+        LegendItem("Found a link") {
+            drawLine(SIMILAR_COLOUR, Offset(0f, center.y), Offset(size.width * 0.4f, center.y), 2.dp.toPx())
+            drawLine(SIMILAR_COLOUR, Offset(size.width * 0.6f, center.y), Offset(size.width, center.y), 2.dp.toPx())
+        }
+    }
+}
+
+@Composable
+private fun LegendItem(label: String, swatch: DrawScope.() -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Canvas(Modifier.size(10.dp), onDraw = swatch)
+        Spacer(Modifier.width(6.dp))
+        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -265,6 +359,9 @@ private fun GraphCanvas(
     onTapNode: (NovaApiClient.GraphNode?) -> Unit,
 ) {
     val positions = remember(layout) { layout.associateBy { it.node.id } }
+    val selectionRing = MaterialTheme.colorScheme.onBackground
+    val categoryColour = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+    val ontologyColour = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.18f)
 
     Canvas(
         Modifier
@@ -304,7 +401,7 @@ private fun GraphCanvas(
                 drawSimilarityLink(place(a), place(b), edge.weight)
             } else {
                 drawLine(
-                    color = Color(0x33607D8B),
+                    color = ontologyColour,
                     start = place(a), end = place(b), strokeWidth = 1.5f * scale,
                 )
             }
@@ -313,13 +410,13 @@ private fun GraphCanvas(
         layout.forEach { n ->
             val at = place(n)
             if (!n.node.isFact) {
-                drawCircle(Color(0x66455A64), radius = 7f * scale, center = at)
+                drawCircle(categoryColour, radius = 7f * scale, center = at)
                 return@forEach
             }
-            val fill = if (n.node.isDerived) Color(0xFF7E57C2) else Color(0xFF26A69A)
+            val fill = if (n.node.isDerived) NovaDerived else STATED_COLOUR
             val radius = (14f + 6f * (n.node.confidence ?: 1f)) * scale
             if (n.node.id == selectedId) {
-                drawCircle(Color(0xFFFFC107), radius = radius + 6f * scale,
+                drawCircle(selectionRing, radius = radius + 6f * scale,
                     center = at, style = Stroke(width = 3f * scale))
             }
             drawCircle(fill, radius = radius, center = at)
@@ -331,7 +428,7 @@ private fun GraphCanvas(
  *  should look different from a declared one at a glance. */
 private fun DrawScope.drawSimilarityLink(a: Offset, b: Offset, weight: Float) {
     val alpha = (0.25f + (weight - 0.5f)).coerceIn(0.2f, 0.9f)
-    val colour = Color(0xFF7E57C2).copy(alpha = alpha)
+    val colour = SIMILAR_COLOUR.copy(alpha = alpha)
     val delta = b - a
     val length = hypot(delta.x, delta.y)
     if (length <= 0f) return
@@ -350,89 +447,140 @@ private fun DrawScope.drawSimilarityLink(a: Offset, b: Offset, weight: Float) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FactDetail(
     node: NovaApiClient.GraphNode,
     onDismiss: () -> Unit,
-    onDelete: () -> Unit,
-    onSave: (String) -> Unit,
+    onEdit: () -> Unit,
+    onForget: () -> Unit,
+    onOpenNote: (String) -> Unit = {},
 ) {
-    var editing by remember(node.id) { mutableStateOf(false) }
-    var draft by remember(node.id) { mutableStateOf(node.label) }
-
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(14.dp)) {
-            if (editing) {
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = { draft = it },
-                    label = { Text("What NOVA believes") },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            } else {
-                Text(node.label, style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold)
+    Card(
+        Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+    ) {
+        Column(Modifier.padding(start = 16.dp, top = 4.dp, end = 4.dp, bottom = 12.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
+                Column(Modifier.weight(1f).padding(top = 12.dp, end = 4.dp)) {
+                    Text(node.label, style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (node.isDerived) {
+                            "NOVA worked this out from your history" +
+                                (node.support?.let { " - seen $it times" } ?: "")
+                        } else {
+                            "You told NOVA this"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (node.isDerived) NovaDerived else MaterialTheme.colorScheme.tertiary,
+                    )
+                }
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Default.Close, contentDescription = "Close")
+                }
             }
+            Column(Modifier.padding(end = 12.dp)) {
+                node.detail?.takeIf { it.isNotBlank() }?.let {
+                    Text("“$it”", style = MaterialTheme.typography.bodySmall,
+                        fontStyle = FontStyle.Italic,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp))
+                }
+                if (node.category.isNotEmpty()) {
+                    Text(node.category.joinToString(" › ") { it.replaceFirstChar(Char::uppercase) },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp))
+                }
 
-            Spacer(Modifier.height(6.dp))
-            Text(
-                if (node.isDerived) {
-                    "NOVA worked this out from your history" +
-                        (node.support?.let { " - seen $it times" } ?: "")
-                } else {
-                    "You told NOVA this"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            node.detail?.takeIf { it.isNotBlank() }?.let {
-                Text("“$it”", style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            if (node.category.isNotEmpty()) {
-                Text(node.category.joinToString(" › "),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (editing) {
-                    Button(onClick = { onSave(draft) }) { Text("Save") }
-                    OutlinedButton(onClick = { editing = false; draft = node.label }) {
-                        Text("Cancel")
+                // Only beliefs can be edited or forgotten. A category node is
+                // the ontology skeleton - its id is a path ("cat:routines/places"),
+                // not a fact id, so offering Forget here sent Postgres something
+                // that is not a UUID and came back a 500. Categories exist as long
+                // as a fact is filed under them and vanish when the last one goes.
+                if (node.isFact) {
+                    Spacer(Modifier.height(10.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        OutlinedButton(onClick = onEdit) {
+                            Icon(Icons.Default.Edit, contentDescription = null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Edit")
+                        }
+                        OutlinedButton(
+                            onClick = onForget,
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Forget")
+                        }
+                        // A belief promoted from a note links back to it. Forget removes the
+                        // belief and keeps the note; deleting the note removes both.
+                        node.noteId?.let { noteId ->
+                            TextButton(onClick = { onOpenNote(noteId) }) { Text("Open note") }
+                        }
                     }
-                } else {
-                    // Only beliefs can be edited or forgotten. A category node is
-                    // the ontology skeleton - its id is a path ("cat:routines/places"),
-                    // not a fact id, so offering Forget here sent Postgres something
-                    // that is not a UUID and came back a 500. Categories exist as long
-                    // as a fact is filed under them and vanish when the last one goes.
-                    if (node.isFact) {
-                        OutlinedButton(onClick = { editing = true }) { Text("Edit") }
-                        OutlinedButton(onClick = onDelete) { Text("Forget") }
-                        Spacer(Modifier.width(4.dp))
-                    }
-                    OutlinedButton(onClick = onDismiss) { Text("Close") }
                 }
             }
         }
     }
 }
 
+@Composable
+private fun EditFactDialog(
+    node: NovaApiClient.GraphNode,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    var draft by remember(node.id) { mutableStateOf(node.label) }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit what NOVA believes") },
+        text = {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                label = { Text("Belief") },
+                minLines = 2,
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(draft.trim()) },
+                enabled = draft.isNotBlank() && draft.trim() != node.label,
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
 /**
  * Force-directed layout: every node repels every other, edges pull like springs.
  * Run to a fixed step count rather than animated - the graph is small and does
- * not change until it is reloaded.
+ * not change until it is reloaded. Nodes already in [previous] start where they
+ * settled last time, so an edit or a forget nudges the map rather than redrawing it.
  */
-private fun layoutOf(graph: NovaApiClient.KnowledgeGraph): List<LaidOutNode> {
+private fun layoutOf(graph: NovaApiClient.KnowledgeGraph, previous: List<LaidOutNode>? = null): List<LaidOutNode> {
     if (graph.nodes.isEmpty()) return emptyList()
 
     // Seeded so the same graph lays out the same way every time the tab is
     // opened; a map that rearranges itself on each visit is unreadable.
     val random = Random(graph.nodes.size * 31 + graph.edges.size)
+    val settled = previous?.associateBy { it.node.id }.orEmpty()
     val nodes = graph.nodes.map {
-        LaidOutNode(it, random.nextFloat() * 400f - 200f, random.nextFloat() * 400f - 200f)
+        val x = random.nextFloat() * 400f - 200f
+        val y = random.nextFloat() * 400f - 200f
+        settled[it.id]?.let { was -> LaidOutNode(it, was.x, was.y) } ?: LaidOutNode(it, x, y)
     }
     val byId = nodes.associateBy { it.node.id }
 

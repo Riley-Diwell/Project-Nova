@@ -196,7 +196,7 @@ fun NovaApp(
                 SettingsSubScreen(NovaDestination.NotesSettings, navController) { NotesSettingsScreen() }
             }
             composable(NovaDestination.Knowledge.route) {
-                KnowledgeMapScreen()
+                KnowledgeMapScreen(onOpenNote = { navController.navigate(noteDetailRoute(it)) })
             }
             composable(NovaDestination.Audit.route) {
                 SettingsSubScreen(NovaDestination.Audit, navController) { AuditLogScreen() }

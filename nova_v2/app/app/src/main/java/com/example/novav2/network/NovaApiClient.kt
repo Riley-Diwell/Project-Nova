@@ -370,24 +370,29 @@ object NovaApiClient {
         val edges: List<GraphEdge> = emptyList(),
     )
 
+    /** A graph and the server's ETag for it, to send back as If-None-Match next time. */
+    data class TaggedGraph(val graph: KnowledgeGraph, val etag: String?)
+
     /**
      * The whole Persona as a graph. [minSimilarity] controls how densely facts
      * are linked - the backend's default sits in the gap measured between
-     * related and unrelated pairs (backend/app/persona/graph.py), and the slider
-     * on the map lets the user trade recall for legibility.
+     * related and unrelated pairs (backend/app/persona/graph.py).
+     *
+     * Pass the [TaggedGraph.etag] of the graph already held as [ifNoneMatch]: null comes back
+     * (a 304, no body) when it is still current.
      */
-    suspend fun getKnowledgeGraph(minSimilarity: Float? = null): KnowledgeGraph =
+    suspend fun getKnowledgeGraph(minSimilarity: Float? = null, ifNoneMatch: String? = null): TaggedGraph? =
         withContext(Dispatchers.IO) {
             val url = StringBuilder("$BASE_URL/persona/graph")
             if (minSimilarity != null) url.append("?min_similarity=$minSimilarity")
 
-            val request = Request.Builder().url(url.toString()).get().build()
+            val request = Request.Builder().url(url.toString()).get()
+                .apply { if (ifNoneMatch != null) header("If-None-Match", ifNoneMatch) }
+                .build()
             client.newCall(request).execute().use { response ->
+                if (response.code == 304) return@withContext null
                 val json = JSONObject(response.requireBody())
-                KnowledgeGraph(
-                    nodes = json.optJSONArray("nodes").mapObjects { it.toGraphNode() },
-                    edges = json.optJSONArray("edges").mapObjects { it.toGraphEdge() },
-                )
+                TaggedGraph(graph = parseKnowledgeGraph(json), etag = response.header("ETag"))
             }
         }
 
@@ -507,6 +512,37 @@ object NovaApiClient {
     private inline fun <T> JSONArray?.mapObjects(transform: (JSONObject) -> T): List<T> =
         if (this == null) emptyList()
         else (0 until length()).map { transform(getJSONObject(it)) }
+
+    /** GET /persona/graph's body. Also how the phone's saved copy is read back (KnowledgeRepository). */
+    internal fun parseKnowledgeGraph(json: JSONObject): KnowledgeGraph = KnowledgeGraph(
+        nodes = json.optJSONArray("nodes").mapObjects { it.toGraphNode() },
+        edges = json.optJSONArray("edges").mapObjects { it.toGraphEdge() },
+    )
+
+    /** The inverse of [parseKnowledgeGraph]: the server's own shape, so one parser reads both. */
+    internal fun KnowledgeGraph.toJson(): JSONObject = JSONObject().apply {
+        put("nodes", JSONArray(nodes.map { n ->
+            JSONObject().apply {
+                put("id", n.id)
+                put("label", n.label)
+                put("kind", n.kind)
+                put("source", n.source ?: JSONObject.NULL)
+                put("confidence", n.confidence?.toDouble() ?: JSONObject.NULL)
+                put("category", JSONArray(n.category))
+                put("support", n.support ?: JSONObject.NULL)
+                put("detail", n.detail ?: JSONObject.NULL)
+                put("note_id", n.noteId ?: JSONObject.NULL)
+            }
+        }))
+        put("edges", JSONArray(edges.map { e ->
+            JSONObject().apply {
+                put("source", e.source)
+                put("target", e.target)
+                put("kind", e.kind)
+                put("weight", e.weight.toDouble())
+            }
+        }))
+    }
 
     private fun JSONObject.toGraphNode(): GraphNode = GraphNode(
         id = getString("id"),

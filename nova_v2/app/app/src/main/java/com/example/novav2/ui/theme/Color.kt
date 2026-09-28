@@ -31,6 +31,10 @@ val NovaErrorContainer = Color(0xFF4A1F22)
 val NovaOk = Color(0xFF6FCF8E)
 val NovaWarn = Color(0xFFE0B44C)
 
+// Knowledge Map: a belief NOVA worked out for itself, set apart from the brand blue used for
+// things the user said directly.
+val NovaDerived = Color(0xFF4FC3B0)
+
 // M3 tokens the base darkColorScheme() otherwise fills in from its own baseline
 // palette (which leans purple) - set explicitly so nothing purple leaks through
 // on components we don't style directly (nav bar, cards, menus, snackbars, etc).

@@ -110,6 +110,7 @@ __all__ = [
     "set_embedder",
     "vectors",
     "knowledge_graph",
+    "graph_etag",
     "KnowledgeGraph",
     "GraphNode",
     "GraphEdge",
@@ -239,3 +240,30 @@ def knowledge_graph(
         store.all_facts(user_id), store.vectors(user_id),
         min_similarity=min_similarity, max_links=max_links,
     )
+
+
+# Bump when build_graph's output changes for the same facts (a new node field, a
+# different edge rule), so phones holding a graph from the old code fetch again.
+GRAPH_FORMAT = 1
+
+
+def graph_etag(
+    user_id: UserId,
+    min_similarity: float = DEFAULT_MIN_SIMILARITY,
+    max_links: int = DEFAULT_MAX_LINKS,
+) -> str:
+    """An ETag for knowledge_graph() with these arguments, without building it.
+
+    A hash of every fact id and when it last changed (store.versions), plus the
+    arguments and GRAPH_FORMAT - so it moves exactly when the graph could, and
+    answering "has it changed?" skips the embeddings and the all-pairs pass.
+
+    Compute it *before* building the graph it goes out with: a write landing in
+    between then leaves the tag older than the body, which only costs the phone
+    one needless refetch - the other way round, it would keep a stale graph.
+    """
+    versions = get_store().versions(user_id)
+    digest = hashlib.sha256(f"{GRAPH_FORMAT}|{user_id}|{min_similarity!r}|{max_links}".encode())
+    for fact_id in sorted(versions):
+        digest.update(f"|{fact_id}@{versions[fact_id]}".encode())
+    return f'"{digest.hexdigest()[:32]}"'
