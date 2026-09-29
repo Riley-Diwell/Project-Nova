@@ -223,8 +223,9 @@ SYSTEM_PROMPT = (
     "habits, usuals and preferences - established background rather than "
     "anything just said, true in general rather than necessarily true right "
     "now. The ones marked source 'derived' NOVA worked out by counting repeated "
-    "behaviour and carry how many times it was seen; where a derived fact and "
-    "something the user actually stated disagree, the stated one wins."
+    "behaviour and carry how many times it was seen. Conflicting facts are "
+    "resolved before you see them - whichever the user said or did most "
+    "recently is kept - so treat each one as current."
 )
 
 
@@ -910,8 +911,8 @@ def _relevant_persona(user_id: UUID | str, event: Event) -> list[dict[str, Any]]
             "text": m.fact.text,
             "category": m.fact.category,
             "confidence": m.fact.confidence,
-            # Stated vs worked-out. The prompt leans on this to decide which
-            # wins when a derived habit and something the user said disagree.
+            # Stated vs worked-out: how much to lean on it. Conflicts between
+            # them are already settled in the store (persona.remember).
             "source": (m.fact.metadata or {}).get("source", "stated"),
             "support": (m.fact.metadata or {}).get("support"),
             "similarity": round(m.similarity, 3),

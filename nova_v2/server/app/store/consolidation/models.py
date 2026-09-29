@@ -31,6 +31,7 @@ on twenty - see confidence_for().
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -41,9 +42,10 @@ CATEGORY_ROUTINE_TIMING = ["routines", "timing"]
 CATEGORY_ROUTINE_APPS = ["routines", "apps"]
 CATEGORY_PREFERENCES = ["preferences"]
 
-# Marks a fact as inferred rather than stated. The Intent Surface is told to
-# prefer what the user said over what NOVA worked out, and the Knowledge Map
-# needs to show the difference, so it has to survive into the store.
+# Marks a fact as inferred rather than stated. The Knowledge Map shows the
+# difference and the model is told how much a derived fact rests on, so it has
+# to survive into the store. It does not decide conflicts: persona.remember()
+# keeps whichever of a stated and a derived belief is more recent.
 SOURCE_DERIVED = "derived"
 
 # The other provenance, and the reason the two passes are separate. A stated
@@ -121,6 +123,10 @@ class DerivedFact(BaseModel):
     category: list[str]
     candidate: Candidate
 
+    # What persona.remember() did with it - added, updated, merged, replaced,
+    # rejected. None until it has been written (and in a preview).
+    outcome: Optional[str] = None
+
     @property
     def confidence(self) -> float:
         return confidence_for(self.candidate.support)
@@ -131,9 +137,11 @@ class StatedFact(BaseModel):
 
     Deliberately NOT a Candidate: there is nothing to count. "I like bagels"
     said once is a fact about the user; five navigation requests to a bagel
-    shop is an inference that happens to be about the same thing. Keeping the
-    two apart is what lets the Intent Surface prefer the first over the second
-    when they disagree.
+    shop is an inference that happens to be about the same thing.
+
+    `stated_at` is when the user said it - the episode's time, not when this
+    pass read it. It is what "most recent wins" compares, so an old statement
+    read today still loses to a newer one that contradicts it.
 
     `quote` is the user's original wording, kept so a belief can be traced back
     to the sentence that produced it - the stated-fact equivalent of
@@ -153,6 +161,9 @@ class StatedFact(BaseModel):
 
     # Said outright, so there is no evidence to weigh. Contrast confidence_for().
     confidence: float = 1.0
+
+    stated_at: Optional[datetime] = None
+    outcome: Optional[str] = None  # as DerivedFact.outcome
 
     def evidence(self) -> dict[str, Any]:
         """The provenance block written to persona.Fact.metadata."""

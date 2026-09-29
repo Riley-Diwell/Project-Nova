@@ -240,31 +240,41 @@ def _seed_persona(user_id: UserId, answers: OnboardingAnswers, previous: Optiona
     from app.store import persona
 
     try:
+        facts = persona.all_facts(user_id)
         held = {
             f.metadata["question_id"]: f
-            for f in persona.all_facts(user_id)
+            for f in facts
             if (f.metadata or {}).get("origin") == ORIGIN and f.metadata.get("question_id")
         }
-        forgotten = persona.forgotten(user_id)
+        # Answers merged into another belief as duplicates: still held, just
+        # not under their own row.
+        merged = {
+            key for f in facts for key in ((f.metadata or {}).get("also_keys") or [])
+        }
+        # Gone - deleted by the user, or overruled by something they said
+        # since. Either way, re-saving the same answer must not bring it back.
+        gone = persona.forgotten(user_id) | set(persona.superseded(user_id))
         wanted = statements(answers)
         before = statements(previous) if previous else {}
+        now = datetime.now(timezone.utc)
 
         for question_id, (text, category) in wanted.items():
             fact = held.get(question_id)
             if fact and fact.text == text:
                 continue
-            # Deleted from the Knowledge Map, and the answer hasn't changed since:
-            # the user already said they don't want this one.
-            if (persona.onboarding_key(question_id) in forgotten
-                    and before.get(question_id, (None,))[0] == text):
+            unchanged = before.get(question_id, (None,))[0] == text
+            key = persona.onboarding_key(question_id)
+            if unchanged and (key in gone or (fact is None and key in merged)):
                 continue
-            persona.upsert(user_id, persona.Fact(
+            # A changed answer is the user saying it now: it goes in through
+            # remember(), and wins over anything older it contradicts.
+            persona.remember(user_id, persona.Fact(
                 id=fact.id if fact else None,
                 text=text,
                 category=category,
                 confidence=1.0,
                 metadata={"source": "stated", "origin": ORIGIN, "question_id": question_id},
-            ))
+            ), stated_at=now)
         for question_id, fact in held.items():
             if question_id not in wanted:  # answer cleared
                 persona.delete(user_id, fact.id)

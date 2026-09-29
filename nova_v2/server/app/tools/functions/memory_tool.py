@@ -56,6 +56,7 @@ reach it falls back to a note rather than being lost, and a recall that cannot
 reach it still searches notes.
 """
 
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID
@@ -72,13 +73,6 @@ RECALL_LIMIT = 20
 # Floor for semantic Persona hits - a noise-drop, not a relevance test. See
 # intent_surface.py's PERSONA_MIN_SIMILARITY for the measurements.
 RECALL_MIN_SIMILARITY = 0.35
-
-# How close a new note's embedding has to be to an existing belief in the SAME
-# category before it is treated as an update to that belief rather than a new
-# one - "likes bagels" then "dislikes bagels" should leave one fact, not two
-# that both surface forever. Unmeasured against the real embedder; tune once
-# real saves give a distribution.
-CONTRADICTION_MIN_SIMILARITY = 0.8
 
 class MemoryTool(BaseTool):
     def __init__(self) -> None:
@@ -250,15 +244,9 @@ def _save(
         return {"success": False, "spoken": "I'm not sure what you'd like me to remember."}
 
     if category:
-        fact_id = _save_fact(user_id, text, tags, category, episode_id)
-        if fact_id is not None:
-            return {
-                "success": True,
-                "fact_id": fact_id,
-                "fact": text,
-                "indexed": True,
-                "spoken": "Got it, I'll remember that.",
-            }
+        result = _save_fact(user_id, text, tags, category, episode_id)
+        if result is not None:
+            return _saved_fact(text, result)
         # Persona unreachable: keep it as a note rather than lose something the
         # user asked for. They can still file it from the note later.
         print("[memory tool] persona unreachable - keeping the durable save as a note")
@@ -268,20 +256,19 @@ def _save(
 
 def _save_fact(
     user_id: UUID, text: str, tags: list[str], category: list[str], episode_id: Optional[str],
-) -> Optional[str]:
+) -> Optional[persona.RememberResult]:
     """File a durable statement straight into Persona (Section 5.4) as a belief
-    about the user. The id, or None if Persona couldn't be reached.
+    about the user. What happened to it, or None if Persona couldn't be reached.
 
-    Before writing, checks whether this updates a belief already in the same
-    category (e.g. "likes bagels" -> "dislikes bagels") and, if so, updates
-    that fact in place rather than adding a second one.
+    Through persona.remember(), so it can't sit next to a belief that says the
+    same thing (merged) or the opposite (said now, so it replaces it -
+    "likes bagels" -> "dislikes bagels" leaves one fact, in any category).
 
     Written as a stated fact carrying the turn's `episode_id` - the same shape
     the consolidation statement pass writes - so that pass treats the episode
     as already read instead of extracting the same belief a second time, and
     forgetting the fact tombstones `episode:<id>` so it stays forgotten.
     """
-    existing_id = _find_contradicted(user_id, text, category)
     metadata: dict[str, Any] = {
         "source": "stated",
         "origin": "assistant",
@@ -292,16 +279,62 @@ def _save_fact(
     if episode_id:
         metadata["episode_id"] = episode_id
     try:
-        fact_id = persona.upsert(user_id, persona.Fact(
-            id=existing_id, text=text, category=category, metadata=metadata,
-        ))
+        result = persona.remember(
+            user_id,
+            persona.Fact(text=text, category=category, metadata=metadata),
+            stated_at=datetime.now(timezone.utc),
+            # The user is waiting on this turn: a short judge call, a few
+            # neighbours, and on a timeout write it now and settle it after.
+            judge=persona.get_judge(voice=True),
+            candidate_limit=persona.VOICE_CANDIDATE_LIMIT,
+        )
     except Exception as e:
         print(f"[memory tool] persona save failed: {e}")
         return None
 
-    verb = f"updated persona fact {fact_id} (was {existing_id!r})" if existing_id else f"saved persona fact {fact_id}"
-    print(f"[memory tool] {verb}: {text!r}")
-    return fact_id
+    print(f"[memory tool] persona {result.action.value} {result.fact_id}: {text!r}")
+    if result.unreconciled:
+        _reconcile_later(user_id)
+    return result
+
+
+def _saved_fact(text: str, result: persona.RememberResult) -> dict[str, Any]:
+    """The tool result for a durable save, worded by what happened to it."""
+    was = [s.text for s in result.superseded]
+    if result.action == persona.RememberAction.MERGED:
+        spoken = "I already knew that - got it."
+    elif result.action == persona.RememberAction.REPLACED and was:
+        spoken = f"Updated - that replaces what I had before: {was[0]}."
+    else:
+        spoken = "Got it, I'll remember that."
+    out: dict[str, Any] = {
+        "success": True,
+        "fact_id": result.fact_id,
+        "fact": text,
+        "indexed": True,
+        "outcome": result.action.value,
+        "spoken": spoken,
+    }
+    if was:
+        # So the model can say what changed in its own words.
+        out["replaced"] = was
+    return out
+
+
+def _reconcile_later(user_id: UUID) -> None:
+    """The judge didn't answer in time, so the fact went in unreconciled.
+    Settle it off the request path with the patient batch judge, so any
+    duplicate or contradiction it made lasts seconds, not until the next
+    consolidation. Best-effort - consolidation sweeps whatever this misses."""
+    store, judge = persona.get_store(), persona.get_judge()
+
+    def run() -> None:
+        try:
+            persona.reconcile_all(user_id, only_unreconciled=True, judge=judge, store=store)
+        except Exception as e:
+            print(f"[memory tool] background reconcile failed: {e}")
+
+    threading.Thread(target=run, name="persona-reconcile", daemon=True).start()
 
 
 def _save_note(user_id: UUID, text: str, tags: list[str]) -> dict[str, Any]:
@@ -330,24 +363,6 @@ def _save_note(user_id: UUID, text: str, tags: list[str]) -> dict[str, Any]:
         "indexed": False,
         "spoken": "I've saved that as a note.",
     }
-
-
-def _find_contradicted(user_id: UUID, text: str, category: list[str]) -> Optional[str]:
-    """The id of an existing belief this statement supersedes, or None.
-
-    Scoped to the same category path so "likes bagels" is only compared
-    against other food opinions. Best-effort: a search failure is treated as
-    no match, and the statement lands as a new fact rather than being lost.
-    """
-    try:
-        matches = persona.search(user_id, persona.PersonaQuery(
-            text=text, category=category, limit=1,
-            min_similarity=CONTRADICTION_MIN_SIMILARITY,
-        ))
-    except Exception as e:
-        print(f"[memory tool] contradiction search skipped: {e}")
-        return None
-    return matches[0].fact.id if matches else None
 
 
 # --- recall ---------------------------------------------------------------------

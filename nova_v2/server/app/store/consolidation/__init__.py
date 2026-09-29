@@ -22,9 +22,16 @@ THREE STAGES, DELIBERATELY SEPARATE
                              chooses wording and category; it does not decide
                              what is or is not a trend, and it cannot invent a
                              fact that no episodes support.
-  3. upsert   (here)       - write into Persona, updating the existing belief
-                             in place when this trend has been seen before, so
-                             re-running is idempotent rather than duplicating.
+  3. upsert   (here)       - write through persona.remember(), updating the
+                             existing belief in place when this trend has been
+                             seen before (so re-running is idempotent), and
+                             otherwise merging it into a belief that says the
+                             same, or resolving a contradiction by recency -
+                             a trend's time is its last supporting episode.
+
+A trend already held is not re-phrased: its wording is kept (the user may have
+edited it) and only its evidence moves. A trend a newer belief superseded is
+not even counted back in unless an episode newer than that belief supports it.
 
 WHY THE SPLIT
 Confidence comes from `support` - how many episodes - not from the model's
@@ -56,6 +63,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional, Union
 from uuid import UUID
 
@@ -143,8 +151,8 @@ def consolidate_trends(user_id: UserId, min_support: int = MIN_SUPPORT,
                        phraser: Optional[Phraser] = None) -> list[DerivedFact]:
     """Count, phrase, and write derived facts into this user's Persona."""
     facts = _derive(user_id, min_support, phraser)
-    for fact in facts:
-        _upsert(user_id, fact)
+    for fact in sorted(facts, key=lambda f: _time(f.candidate.last_seen) or _EPOCH):
+        fact.outcome = _upsert(user_id, fact).action.value
     print(f"[consolidation] wrote {len(facts)} derived fact(s)")
     return facts
 
@@ -160,6 +168,16 @@ def _forgotten_keys(user_id: UserId) -> set[str]:
         return set()
 
 
+def _superseded_keys(user_id: UserId) -> dict[str, datetime]:
+    """Patterns a newer belief won over, and when. Empty if unreachable, as
+    _forgotten_keys."""
+    try:
+        return _persona().superseded(user_id)
+    except Exception as e:
+        print(f"[consolidation] superseded list unavailable: {e}")
+        return {}
+
+
 def _key_of(candidate: Candidate) -> str:
     """The tombstone key a fact derived from this candidate would carry."""
     key = _persona().tombstone_key(
@@ -169,25 +187,21 @@ def _key_of(candidate: Candidate) -> str:
 
 
 def _pending_statements(user_id: UserId, extractor: Optional[Any] = None) -> list[StatedFact]:
-    """Statements not yet held, deduplicated. Shared so `preview` shows exactly
-    what `run` would write rather than an optimistic version of it."""
+    """Statements not yet extracted, deduplicated. Shared so `preview` shows
+    exactly what `run` would write rather than an optimistic version of it."""
     held = _persona().all_facts(user_id)
     # A deleted statement is an episode that must never be re-read. Folding the
     # tombstones in with the already-extracted ids means one rule covers both:
     # "we have dealt with this utterance", whether the answer was kept or thrown
     # away. Without it, deleting a stated fact removes the only record that its
-    # episode was ever read, and the next run extracts it again.
+    # episode was ever read, and the next run extracts it again. A superseded
+    # statement is the same: something newer contradicted it, and an episode
+    # never gets newer, so it has nothing more to say.
+    dealt_with = set(_forgotten_keys(user_id)) | set(_superseded_keys(user_id))
     seen = _extracted_episode_ids(held) | {
-        key.removeprefix("episode:")
-        for key in _forgotten_keys(user_id)
-        if key.startswith("episode:")
+        key.removeprefix("episode:") for key in dealt_with if key.startswith("episode:")
     }
-    return find_statements(
-        _episodes(user_id),
-        seen_episode_ids=seen,
-        extractor=extractor,
-        existing_texts=[f.text for f in held],
-    )
+    return find_statements(_episodes(user_id), seen_episode_ids=seen, extractor=extractor)
 
 
 def preview_statements(user_id: UserId, extractor: Optional[Any] = None) -> list[StatedFact]:
@@ -202,8 +216,10 @@ def consolidate_statements(user_id: UserId, extractor: Optional[Any] = None) -> 
     needs no repetition to count, so this does not take min_support.
     """
     facts = _pending_statements(user_id, extractor)
-    for fact in facts:
-        _upsert_stated(user_id, fact)
+    # Oldest first, so within one run the later statement is the one standing
+    # at the end - the same outcome as if each had been saved as it was said.
+    for fact in sorted(facts, key=lambda f: f.stated_at or _EPOCH):
+        fact.outcome = _upsert_stated(user_id, fact).action.value
     print(f"[consolidation] wrote {len(facts)} stated fact(s)")
     return facts
 
@@ -212,11 +228,17 @@ def consolidate(user_id: UserId,
                 min_support: int = MIN_SUPPORT,
                 phraser: Optional[Phraser] = None,
                 extractor: Optional[Any] = None) -> dict[str, list[Any]]:
-    """Both passes, for one user. Returns {"derived": [...], "stated": [...]}."""
-    return {
-        "derived": consolidate_trends(user_id, min_support, phraser),
-        "stated": consolidate_statements(user_id, extractor),
-    }
+    """Both passes, for one user, then a sweep of anything written while the
+    judge was unavailable. Returns {"derived": [...], "stated": [...],
+    "reconciled": [...]}."""
+    derived = consolidate_trends(user_id, min_support, phraser)
+    stated = consolidate_statements(user_id, extractor)
+    try:
+        reconciled = _persona().reconcile_all(user_id, only_unreconciled=True)
+    except Exception as e:
+        print(f"[consolidation] reconcile sweep skipped: {e}")
+        reconciled = []
+    return {"derived": derived, "stated": stated, "reconciled": reconciled}
 
 
 def _derive(user_id: UserId, min_support: int, phraser: Optional[Phraser]) -> list[DerivedFact]:
@@ -243,12 +265,32 @@ def _derive(user_id: UserId, min_support: int, phraser: Optional[Phraser]) -> li
         print(f"[consolidation] {len(candidates) - len(kept_candidates)} candidate(s) "
               f"skipped - previously deleted by the user")
     candidates = kept_candidates
+
+    # A newer belief contradicted this pattern. It may come back, but only on
+    # evidence newer than that belief - otherwise it would lose again, and
+    # pay for the phrasing to do it.
+    superseded = _superseded_keys(user_id)
+    candidates = [c for c in candidates if not _still_superseded(c, superseded)]
     if not candidates:
         return []
 
-    counted = {(c.signal, c.value) for c in candidates}
-    kept: list[DerivedFact] = []
-    for fact in (phraser or _claude_phraser)(candidates):
+    # Already held: keep the belief's wording (the user may have edited it) and
+    # just carry the new evidence. Only patterns new to Persona get phrased.
+    held = _held_by_key(user_id)
+    known: list[DerivedFact] = []
+    fresh: list[Candidate] = []
+    for c in candidates:
+        holder = held.get(_key_of(c))
+        if holder is not None:
+            known.append(DerivedFact(text=holder.text, category=holder.category, candidate=c))
+        else:
+            fresh.append(c)
+    if not fresh:
+        return known
+
+    counted = {(c.signal, c.value) for c in fresh}
+    kept: list[DerivedFact] = list(known)
+    for fact in (phraser or _claude_phraser)(fresh):
         key = (fact.candidate.signal, fact.candidate.value)
         if key not in counted:
             print(f"[consolidation] dropped unsupported fact: {fact.text!r} {key}")
@@ -257,6 +299,46 @@ def _derive(user_id: UserId, min_support: int, phraser: Optional[Phraser]) -> li
             continue
         kept.append(fact)
     return kept
+
+
+def _still_superseded(candidate: Candidate, superseded: dict[str, datetime]) -> bool:
+    lost_at = superseded.get(_key_of(candidate))
+    if lost_at is None:
+        return False
+    last_seen = _time(candidate.last_seen)
+    return last_seen is None or last_seen <= lost_at
+
+
+def _held_by_key(user_id: UserId) -> dict[str, Any]:
+    """Each pattern key -> the belief standing for it. The belief written as
+    that pattern is preferred over one it was merged into."""
+    persona = _persona()
+    held: dict[str, Any] = {}
+    try:
+        facts = persona.all_facts(user_id)
+    except Exception as e:
+        print(f"[consolidation] persona read skipped: {e}")
+        return held
+    for fact in facts:
+        primary = persona.tombstone_key(fact.metadata or {})
+        for key in persona.source_keys(fact.metadata or {}):
+            if key == primary or key not in held:
+                held[key] = fact
+    return held
+
+
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _time(value: Any) -> Optional[datetime]:
+    """An ISO timestamp from the log as an aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 # --- stage 1: read -----------------------------------------------------------
@@ -368,78 +450,77 @@ def _extracted_episode_ids(held: list[Any]) -> set[str]:
     episode id is the only thing that makes this idempotent.
     """
     ids: set[str] = set()
+    # Every belief, not just stated ones: a statement merged into a derived
+    # belief as a duplicate leaves its episode in that belief's provenance.
     for fact in held:
-        meta = fact.metadata or {}
-        if meta.get("source") != SOURCE_STATED:
-            continue
-        if meta.get("episode_id"):
-            ids.add(str(meta["episode_id"]))
-        ids.update(str(i) for i in (meta.get("also_from") or []))
+        for key in _persona().source_keys(fact.metadata or {}):
+            if key.startswith("episode:"):
+                ids.add(key.removeprefix("episode:"))
     print(f"[statements] {len(ids)} episode(s) already extracted")
     return ids
 
 
-def _upsert_stated(user_id: UserId, fact: StatedFact) -> str:
-    """Write a stated fact into Persona.
+def _upsert_stated(user_id: UserId, fact: StatedFact) -> Any:
+    """Write a stated fact through persona.remember(), dated when it was said.
 
-    Always an insert. A statement is tied to the moment it was said, and two
-    statements weeks apart are two facts even when they contradict - resolving
-    that is the Persona correction loop's job (Section 5.5 done-when (b)), not
-    this pass's. Overwriting here would quietly destroy the earlier one.
+    A statement is tied to the moment it was said. If a held belief says the
+    same, they merge; if one contradicts it, whichever was said later stands -
+    so an old utterance read today loses to a newer one, rather than quietly
+    overwriting it the way an in-place upsert would.
     """
     persona = _persona()
-    fact_id = persona.upsert(user_id, persona.Fact(
+    result = persona.remember(user_id, persona.Fact(
         text=fact.text,
         category=fact.category,
         confidence=fact.confidence,
         metadata=fact.evidence(),
-    ))
-    print(f"[statements] added {fact_id}: {fact.text!r} <- {fact.quote[:50]!r}")
-    return fact_id
+    ), stated_at=fact.stated_at)
+    print(f"[statements] {result.action.value} {result.fact_id}: {fact.text!r} "
+          f"<- {fact.quote[:50]!r}")
+    return result
 
 
-def _upsert(user_id: UserId, fact: DerivedFact) -> str:
-    """Write into Persona, updating in place if this trend is already held.
+def _upsert(user_id: UserId, fact: DerivedFact) -> Any:
+    """Write a trend through persona.remember(), dated by its last episode.
 
     Idempotence matters more than it looks: this runs repeatedly over a growing
     log, so the same habit is re-derived every time with a higher `support`. It
-    should sharpen one belief, not accumulate near-duplicates of it.
+    should sharpen one belief, not accumulate near-duplicates of it - so the
+    belief already standing for this (signal, value) is updated in place, found
+    by its pattern key rather than by similarity to whatever the wording is.
     """
     persona = _persona()
-    existing = _existing_id(user_id, persona, fact)
-    fact_id = persona.upsert(user_id, persona.Fact(
-        id=existing,
-        text=fact.text,
-        category=fact.category,
-        confidence=fact.confidence,
-        metadata=fact.candidate.evidence(),
-    ))
-    verb = "updated" if existing else "added"
-    print(f"[consolidation] {verb} {fact_id}: {fact.text!r} "
+    key = _key_of(fact.candidate)
+    last_seen = _time(fact.candidate.last_seen)
+    holders = persona.find_by_source_key(user_id, key)
+    primary = next((h for h in holders if persona.tombstone_key(h.metadata or {}) == key), None)
+
+    if primary is not None:
+        # The belief this trend was written as. New evidence, same belief; an
+        # edit the user made keeps its wording and stays theirs.
+        meta = {**(primary.metadata or {}), **fact.candidate.evidence()}
+        if (primary.metadata or {}).get("edited"):
+            meta["source"] = SOURCE_STATED
+        written = primary.model_copy(update={
+            "confidence": fact.confidence, "metadata": meta, "stated_at": None,
+        })
+        when = max(filter(None, [last_seen, primary.stated_at]), default=None)
+    elif holders:
+        # Merged into another belief as a duplicate: that belief now also rests
+        # on this trend, so the trend's newest episode is its newest evidence.
+        holder = holders[0]
+        written = holder.model_copy(update={"stated_at": None})
+        when = max(filter(None, [last_seen, holder.stated_at]), default=None)
+    else:
+        written = persona.Fact(
+            text=fact.text,
+            category=fact.category,
+            confidence=fact.confidence,
+            metadata=fact.candidate.evidence(),
+        )
+        when = last_seen
+
+    result = persona.remember(user_id, written, stated_at=when)
+    print(f"[consolidation] {result.action.value} {result.fact_id}: {fact.text!r} "
           f"(support={fact.candidate.support}, confidence={fact.confidence})")
-    return fact_id
-
-
-def _existing_id(user_id: UserId, persona: Any, fact: DerivedFact) -> Optional[str]:
-    """The id of the belief already holding this trend, if there is one.
-
-    Matched on (signal, value) in metadata - the identity of the pattern, not
-    the wording, which the phrasing pass may render differently each run. The
-    lookup is similarity-first because that is what the store seam offers, so
-    it searches on both the phrasing and the raw value to give the right row
-    two chances to surface.
-    """
-    signal = fact.candidate.signal
-    value = fact.candidate.value
-
-    for query in (fact.text, value):
-        try:
-            matches = persona.search(user_id, persona.PersonaQuery(text=query, limit=20))
-        except Exception as e:
-            print(f"[consolidation] persona lookup skipped: {e}")
-            return None
-        for match in matches:
-            meta = match.fact.metadata or {}
-            if meta.get("signal") == signal and meta.get("value") == value:
-                return match.fact.id
-    return None
+    return result

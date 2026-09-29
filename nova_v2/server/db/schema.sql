@@ -11,6 +11,9 @@
 --   3. persona          - the durable, vector-searchable Persona
 --                         (app/store/persona/), plus match_persona() for
 --                         semantic search.
+--  3b. persona hybrid search and reconciliation - full-text, content hash,
+--                         stated_at, match_persona_hybrid(), persona_superseded
+--                         and the per-user write lease.
 --   4. persona_forgotten - deletions that have to stick (see section 4 below).
 --   5. notes / note_chunks - the user's notes (app/store/notes), plus
 --                         match_notes() for hybrid search.
@@ -110,7 +113,8 @@ create table if not exists public.tool_gain (
 --                 so a derived belief can always be traced back.
 -- Both are embedded the same way, so one search reaches both: "what do I like
 -- to eat" finds 'likes bagels', and the substring scan over episodic_memory
--- never could. Where they disagree, 'stated' wins.
+-- never could. Where two disagree, the more recent (stated_at) is kept and
+-- the other removed - see section 3b and app/store/persona/reconcile.py.
 --
 -- Embeddings: local BAAI/bge-large-en-v1.5 via fastembed, 1024-dim (see
 -- app/store/persona/embeddings.py EMBED_DIM). Change both together.
@@ -191,6 +195,177 @@ as $$
     order by p.embedding <=> query_embedding
     limit match_count
 $$;
+
+
+-- ---------------------------------------------------------------------------
+-- 3b. Persona: hybrid search, and no duplicates or contradictions
+-- ---------------------------------------------------------------------------
+-- Additive and re-runnable. Run it BEFORE deploying the server that uses it,
+-- then POST /persona/reconcile?preview=false per user to clean what is
+-- already stored, then create the unique index at the bottom of this section.
+--
+-- Hybrid search is era-memory's design (github.com/Era-Laboratories/
+-- era-memory): a vector search and a keyword search side by side, fused by
+-- rank in app/store/persona/ranking.py. `fts` is the keyword half. Postgres'
+-- english config drops "not"/"no" - fine, the keyword half only finds
+-- candidates; meaning is judged elsewhere.
+--
+-- stated_at is when a belief was last asserted - the utterance, the last
+-- episode behind a trend, the edit - not when the row was written. "Most
+-- recent wins" compares it.
+--
+-- content_hash is sha256 of the normalised text (lowercase, collapsed
+-- whitespace, no trailing full stop), computed in Python - exact duplicates
+-- are merged without a model call. source_keys are the patterns a belief
+-- stands for (the same keys a delete tombstones, section 4), so "the fact
+-- holding trend:X" is a lookup rather than a similarity search.
+
+alter table public.persona add column if not exists stated_at    timestamptz;
+alter table public.persona add column if not exists content_hash text;
+alter table public.persona add column if not exists source_keys  text[] not null default '{}';
+-- text only: array_to_string(category) is not immutable, so it can't go in a
+-- generated column.
+alter table public.persona add column if not exists fts tsvector
+    generated always as (to_tsvector('english', text)) stored;
+
+-- Backfill stated_at, best evidence first: a user edit, then the episode the
+-- statement came from, then a trend's last episode, then when it was written.
+update public.persona set stated_at = updated_at
+ where stated_at is null and metadata->>'edited' = 'true';
+update public.persona p set stated_at = e.created_at
+  from public.episodic_memory e
+ where p.stated_at is null and e.user_id = p.user_id
+   and e.id::text = p.metadata->>'episode_id';
+update public.persona set stated_at = (metadata->>'last_seen')::timestamptz
+ where stated_at is null and metadata->>'source' = 'derived'
+   and metadata->>'last_seen' ~ '^\d{4}-\d{2}-\d{2}';
+update public.persona set stated_at = created_at where stated_at is null;
+alter table public.persona alter column stated_at set default now();
+alter table public.persona alter column stated_at set not null;
+
+create index if not exists persona_fts_idx         on public.persona using gin (fts);
+create index if not exists persona_source_keys_idx on public.persona using gin (source_keys);
+create index if not exists persona_user_hash_idx   on public.persona (user_id, content_hash);
+
+-- Supersession watermarks: "a newer belief won over this pattern as of
+-- superseded_at". NOT a tombstone (section 4): consolidation may bring the
+-- pattern back on evidence newer than superseded_at - a habit the user took
+-- up again - while an old utterance, which never gets newer, stays down.
+create table if not exists public.persona_superseded (
+    user_id        uuid        not null references auth.users (id) on delete cascade,
+    key            text        not null,        -- same key space as persona_forgotten
+    superseded_at  timestamptz not null,        -- stated_at of the winning belief
+    by_fact_id     uuid,                        -- no FK: the winner may be deleted later
+    created_at     timestamptz not null default now(),
+    primary key (user_id, key)
+);
+
+comment on table public.persona_superseded is
+    'Persona patterns a newer belief overruled, and when. Consolidation re-offers one only with newer evidence.';
+
+-- Per-user write lease around persona.remember()'s read -> judge -> write.
+-- Several server instances can write one user's Persona at once (a voice save
+-- and a consolidation run), and PostgREST has no session to hold an advisory
+-- lock in, so the lease is a row: taken if free or expired, released by its
+-- holder, and expiring on its own if the holder dies.
+create table if not exists public.persona_write_lock (
+    user_id    uuid        primary key references auth.users (id) on delete cascade,
+    holder     text        not null,
+    expires_at timestamptz not null
+);
+
+create or replace function public.persona_lock(p_user uuid, p_holder text, p_ttl_ms int default 15000)
+returns boolean
+language sql volatile
+as $$
+    insert into public.persona_write_lock as l (user_id, holder, expires_at)
+    values (p_user, p_holder, now() + make_interval(secs => p_ttl_ms / 1000.0))
+    on conflict (user_id) do update
+        set holder = excluded.holder, expires_at = excluded.expires_at
+        where l.expires_at < now() or l.holder = excluded.holder
+    returning true
+$$;  -- null when not acquired
+
+create or replace function public.persona_unlock(p_user uuid, p_holder text)
+returns void
+language sql volatile
+as $$
+    delete from public.persona_write_lock where user_id = p_user and holder = p_holder
+$$;
+
+-- Hybrid candidates for app.store.persona search() and remember(): the union
+-- of the top match_count by vector and the top match_count by full-text, each
+-- row with both scores. Python fuses them (ranking.rank) - rank fusion needs
+-- the two lists separately, which is why this doesn't order its output.
+-- `lexical_any` ORs the query's terms (write-time candidate recall) instead of
+-- websearch AND semantics (a user's search). match_persona stays until every
+-- server is on this.
+create or replace function public.match_persona_hybrid(
+    filter_user     uuid,
+    query_embedding vector(1024),
+    query_text      text,
+    match_count     int     default 20,
+    min_similarity  float   default 0.0,
+    filter_category text[]  default null,
+    lexical_any     boolean default false,
+    exclude_ids     uuid[]  default '{}'
+)
+returns table (
+    id uuid,
+    created_at timestamptz,
+    updated_at timestamptz,
+    stated_at timestamptz,
+    text text,
+    category text[],
+    confidence real,
+    metadata jsonb,
+    similarity float,
+    lexical float
+)
+language sql stable
+as $$
+    with q as (
+        select case
+            when lexical_any then
+                nullif(replace(plainto_tsquery('english', coalesce(query_text, ''))::text, ' & ', ' | '), '')::tsquery
+            else websearch_to_tsquery('english', coalesce(query_text, ''))
+        end as tsq
+    ),
+    mine as (
+        select p.* from public.persona p
+        where p.user_id = filter_user
+          and not (p.id = any(coalesce(exclude_ids, '{}')))
+          and (filter_category is null
+               or p.category[1:array_length(filter_category, 1)] = filter_category)
+    ),
+    sem as (
+        select m.id from mine m
+        where 1 - (m.embedding <=> query_embedding) >= min_similarity
+        order by m.embedding <=> query_embedding
+        limit match_count
+    ),
+    lex as (
+        select m.id from mine m, q
+        where q.tsq is not null and m.fts @@ q.tsq
+        order by ts_rank(m.fts, q.tsq, 32) desc
+        limit match_count
+    )
+    select
+        m.id, m.created_at, m.updated_at, m.stated_at, m.text, m.category,
+        m.confidence, m.metadata,
+        1 - (m.embedding <=> query_embedding) as similarity,
+        coalesce(case when q.tsq is not null and m.fts @@ q.tsq
+                      then ts_rank(m.fts, q.tsq, 32) end, 0) as lexical
+    from mine m cross join q
+    where m.id in (select id from sem union select id from lex)
+$$;
+
+-- ONLY after the reconcile sweep has merged the exact duplicates already
+-- stored (it fails while any remain). The backstop against two instances
+-- writing the same belief at the same moment; the server turns a violation
+-- into a merge (store.DuplicateHash).
+-- create unique index if not exists persona_user_hash_uidx
+--     on public.persona (user_id, content_hash) where content_hash is not null;
 
 
 -- ---------------------------------------------------------------------------
@@ -408,6 +583,8 @@ alter table public.episodic_memory   enable row level security;
 alter table public.tool_gain         enable row level security;
 alter table public.persona           enable row level security;
 alter table public.persona_forgotten enable row level security;
+alter table public.persona_superseded enable row level security;
+alter table public.persona_write_lock enable row level security;
 alter table public.notes             enable row level security;
 alter table public.note_chunks       enable row level security;
 
@@ -423,6 +600,11 @@ create policy persona_owner on public.persona for all to authenticated
 drop policy if exists persona_forgotten_owner on public.persona_forgotten;
 create policy persona_forgotten_owner on public.persona_forgotten for all to authenticated
     using (user_id = auth.uid()) with check (user_id = auth.uid());
+-- Read-only for the owner: only the server records supersession. The write
+-- lease gets no policy at all - it is the server's bookkeeping, nobody else's.
+drop policy if exists persona_superseded_owner on public.persona_superseded;
+create policy persona_superseded_owner on public.persona_superseded for select to authenticated
+    using (user_id = auth.uid());
 
 
 -- ---------------------------------------------------------------------------

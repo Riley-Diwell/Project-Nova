@@ -32,6 +32,7 @@ WHO USES THIS
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional, Protocol, runtime_checkable
 
 from app.store.notes.models import (
@@ -180,7 +181,10 @@ def delete(user_id: UserId, note_id: str) -> None:
 
     In order:
       1. every Persona fact promoted from it is deleted - persona.delete()
-         tombstones each one, so consolidation cannot re-derive it;
+         tombstones each one, so consolidation cannot re-derive it. Only a
+         fact that is still this note's own: one the promotion was merged
+         into, or that a newer belief has since overwritten in place, stands
+         on something else too, and just loses this note from its provenance;
       2. `note:<id>` is tombstoned directly, which covers a fact that was
          already deleted from the Knowledge Map before the note was;
       3. the voice turn the note came from (if the assistant saved it) is
@@ -199,7 +203,7 @@ def delete(user_id: UserId, note_id: str) -> None:
 
     for fact_id in note.promoted_fact_ids:
         try:
-            persona.delete(user_id, fact_id)
+            _unpromote(user_id, note_id, fact_id)
         except Exception as e:
             print(f"[notes] promoted fact {fact_id} not deleted: {e}")
     try:
@@ -211,6 +215,25 @@ def delete(user_id: UserId, note_id: str) -> None:
 
     store.delete(user_id, note_id)
     print(f"[notes] deleted {note_id} ({len(note.promoted_fact_ids)} promoted fact(s))")
+
+
+def _unpromote(user_id: UserId, note_id: str, fact_id: str) -> None:
+    """Take a deleted note's contribution out of one Persona fact: the whole
+    fact if the note is what it is, otherwise just the note's key."""
+    from app.store import persona
+
+    try:
+        fact = persona.get(user_id, fact_id)
+    except persona.FactNotFound:
+        return
+    meta = fact.metadata or {}
+    if meta.get("note_id") == note_id:
+        persona.delete(user_id, fact_id)
+        return
+    key = persona.note_key(note_id)
+    if key in (meta.get("also_keys") or []):
+        kept = [k for k in meta["also_keys"] if k != key]
+        persona.upsert(user_id, fact.model_copy(update={"metadata": {**meta, "also_keys": kept}}))
 
 
 def delete_all(user_id: UserId) -> int:
@@ -240,7 +263,12 @@ def promote(
     note.
 
     `replaces_fact_id` updates an existing belief in place instead of adding a
-    second one - the memory tool's "likes bagels" -> "dislikes bagels" case.
+    second one.
+
+    Written through persona.remember(), dated now - promoting is the user
+    asserting it now, however old the note. So a promotion that says what
+    Nova already knows merges into that belief (whose id is returned), and
+    one that contradicts it replaces it.
 
     The fact goes into this user's Persona. `replaces_fact_id` must be one of
     their facts (FactNotFound otherwise). `user_id` is also kept in the
@@ -250,7 +278,7 @@ def promote(
     from app.store import persona
 
     note = get(user_id, note_id)
-    fact_id = persona.upsert(user_id, persona.Fact(
+    result = persona.remember(user_id, persona.Fact(
         id=replaces_fact_id,
         text=(text or note.text).strip(),
         category=category or ["notes"],
@@ -261,7 +289,8 @@ def promote(
             "user_id": str(user_id),
             "tags": note.tags,
         },
-    ))
-    if fact_id not in note.promoted_fact_ids:
+    ), stated_at=datetime.now(timezone.utc))
+    fact_id = result.fact_id
+    if fact_id and fact_id not in note.promoted_fact_ids:
         get_store().set_promoted(user_id, note_id, [*note.promoted_fact_ids, fact_id])
     return fact_id

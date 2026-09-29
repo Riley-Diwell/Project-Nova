@@ -18,11 +18,13 @@ Entries arrive two ways, told apart by `metadata["source"]`:
     `metadata` carries the evidence: support, span, and the episode ids.
 
 Both are searched by the same embedding, so one query reaches both. Where they
-disagree, "stated" wins - the Intent Surface is told as much, which is why the
-provenance has to be stored rather than inferred.
+disagree, neither source wins by rank: persona.remember() (reconcile.py) keeps
+whichever was said or seen most recently - `stated_at` - and removes the
+other, so two contradicting beliefs never sit in the store together.
 """
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from typing import Any, Optional
 
@@ -43,10 +45,29 @@ class Fact(BaseModel):
     confidence: float = 1.0
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    # When the belief was last asserted - the utterance it came from, the last
+    # episode behind a trend, the moment of an edit - NOT when it was written.
+    # "Most recent wins" compares this: consolidation reads old episodes, and
+    # an old "likes apples" processed today must still lose to a "doesn't like
+    # apples" said yesterday. Defaults to now on insert.
+    stated_at: Optional[datetime] = None
+
     # Set by the store; do not populate by hand.
     id: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+
+def normalise_text(text: str) -> str:
+    """Fact identity for exact deduplication - wording that differs only in
+    case, spacing or a trailing full stop is the same belief."""
+    return " ".join(str(text).lower().strip().rstrip(".").split())
+
+
+def content_hash(text: str) -> str:
+    """The exact-duplicate key persona stores alongside each fact (era-memory's
+    content_hash, over normalised text rather than raw)."""
+    return hashlib.sha256(normalise_text(text).encode()).hexdigest()
 
 
 def tombstone_key(metadata: dict[str, Any]) -> Optional[str]:
@@ -77,6 +98,10 @@ def tombstone_keys(metadata: dict[str, Any]) -> list[str]:
     reaching consolidation again would bring it back - so a delete has to
     remember both. That was the old bug: a promoted fact carried only
     `note_id`, which nothing recognised, so no tombstone was ever written.
+
+    A fact that duplicates were merged into also carries theirs (`also_from`
+    episodes, `also_keys` for everything else - see reconcile.merge_provenance):
+    any of them could bring the belief back just as well.
     """
     keys: list[str] = []
     signal, value = metadata.get("signal"), metadata.get("value")
@@ -91,7 +116,16 @@ def tombstone_keys(metadata: dict[str, Any]) -> list[str]:
     question_id = metadata.get("question_id")
     if metadata.get("origin") == "onboarding" and question_id:
         keys.append(onboarding_key(str(question_id)))
-    return keys
+    keys.extend(f"episode:{e}" for e in (metadata.get("also_from") or []) if e)
+    keys.extend(str(k) for k in (metadata.get("also_keys") or []) if k)
+    return list(dict.fromkeys(keys))
+
+
+def source_keys(metadata: dict[str, Any]) -> list[str]:
+    """Every pattern a fact stands for, stored in its own column so the store
+    can find "the fact holding trend:X" without a similarity search. The same
+    set a delete tombstones."""
+    return tombstone_keys(metadata)
 
 
 def note_key(note_id: str) -> str:
@@ -106,10 +140,18 @@ def onboarding_key(question_id: str) -> str:
 
 
 class Match(BaseModel):
-    """A Fact returned from semantic search, with its similarity score."""
+    """A Fact returned from search, with its scores.
+
+    `similarity` stays the embedding cosine, so every threshold written against
+    it (PERSONA_MIN_SIMILARITY and friends) keeps its meaning. Results are
+    ORDERED by `score` - the era-memory hybrid rank (ranking.py) - which is
+    tiny (~0.01) and only comparable within one result list; never threshold it.
+    """
 
     fact: Fact
     similarity: float  # cosine similarity in [0, 1]; higher is closer
+    lexical: float = 0.0  # full-text rank; 0 = no keyword match
+    score: float = 0.0  # fused rank used for ordering
 
 
 class PersonaQuery(BaseModel):

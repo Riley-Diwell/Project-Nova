@@ -27,6 +27,7 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Literal
 from uuid import UUID
 
@@ -385,7 +386,12 @@ def edit_persona_fact(
 ) -> dict[str, Any]:
     """Correct a belief in place. Re-embeds, so an edited fact is findable by
     what it now says rather than what it used to. Someone else's fact id is a
-    404, the same as one that doesn't exist."""
+    404, the same as one that doesn't exist.
+
+    Through persona.remember(), dated now: the edited belief keeps its id, any
+    other belief it now duplicates is merged into it, and any it contradicts
+    is removed. The response is the fact plus `action` and `superseded` (the
+    beliefs the edit overruled), so the map can drop their nodes."""
     if not _is_uuid(fact_id):
         raise HTTPException(status_code=404, detail=f"unknown fact: {fact_id!r}")
     try:
@@ -401,8 +407,12 @@ def edit_persona_fact(
         "metadata": {**(current.metadata or {}), "source": "stated", "edited": True},
     })
     try:
-        persona.upsert(user.id, updated)
-        return persona.get(user.id, fact_id).model_dump(mode="json")
+        result = persona.remember(user.id, updated, stated_at=datetime.now(timezone.utc))
+        return {
+            **persona.get(user.id, fact_id).model_dump(mode="json"),
+            "action": result.action.value,
+            "superseded": [s.model_dump(mode="json") for s in result.superseded],
+        }
     except persona.FactNotFound:  # deleted in between
         raise HTTPException(status_code=404, detail=f"unknown fact: {fact_id!r}")
 
@@ -452,6 +462,7 @@ def run_consolidation(preview: bool = False, user: AuthUser = Depends(current_us
     from app.store.consolidation import consolidate, preview_statements
     from app.store.consolidation import preview as preview_trends
 
+    reconciled: list[dict[str, Any]] = []
     if preview:
         derived = [f.model_dump(mode="json") for f in preview_trends(user.id)]
         stated = [f.model_dump(mode="json") for f in preview_statements(user.id)]
@@ -459,10 +470,26 @@ def run_consolidation(preview: bool = False, user: AuthUser = Depends(current_us
         result = consolidate(user.id)
         derived = [f.model_dump(mode="json") for f in result["derived"]]
         stated = [f.model_dump(mode="json") for f in result["stated"]]
+        reconciled = [r.model_dump(mode="json") for r in result["reconciled"]]
 
     print(f"[consolidation] {'preview' if preview else 'run'}: "
           f"{len(derived)} derived, {len(stated)} stated")
-    return {"preview": preview, "derived": derived, "stated": stated}
+    return {"preview": preview, "derived": derived, "stated": stated, "reconciled": reconciled}
+
+
+@app.post("/persona/reconcile")
+def run_reconcile(preview: bool = True, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    """Sweep this user's whole Persona for duplicates and contradictions and
+    resolve them the way persona.remember() does for each new belief - most
+    recent wins, duplicates merge. For beliefs written before that existed,
+    and anything a failed judge call left unreconciled.
+
+    Previews by default (the sweep runs over an in-memory copy); pass
+    preview=false to apply. Returns only the beliefs something happened to.
+    """
+    results = persona.reconcile_all(user.id, dry_run=preview)
+    print(f"[persona] reconcile {'preview' if preview else 'run'}: {len(results)} change(s)")
+    return {"preview": preview, "changes": [r.model_dump(mode="json") for r in results]}
 
 
 # --- Audit log (Autonomy pillar) ---------------------------------------------

@@ -14,8 +14,9 @@ it to MIN_SUPPORT would throw away exactly the thing the user told you.
 
 They also land differently. A stated fact carries confidence 1.0 and
 source "stated"; a derived one earns its confidence from support and carries
-source "derived". Where the two disagree, the Intent Surface prefers what was
-said - which only works because the provenance is stored, not guessed.
+source "derived". Where any two beliefs disagree, persona.remember() keeps the
+more recent - so every fact here carries when it was SAID (the episode's
+time), not when this pass happened to read it.
 
 WHAT COUNTS AS A STATEMENT
 Durable and about the user. The log mixes all of these together:
@@ -41,9 +42,11 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional
 
 from app.store.consolidation.models import StatedFact
+from app.store.persona.models import normalise_text
 from app.tools.core.action import Action
 
 # Episode kinds whose text is the user talking.
@@ -136,18 +139,16 @@ def find_statements(
     rows: list[dict[str, Any]],
     seen_episode_ids: Iterable[str] = (),
     extractor: Optional[Extractor] = None,
-    existing_texts: Iterable[str] = (),
 ) -> list[StatedFact]:
-    """Every durable self-statement in `rows` not already held.
+    """Every durable self-statement in `rows` not yet extracted, each carrying
+    when it was said (`stated_at`, the episode's time).
 
-    Two kinds of duplicate have to be removed, and skipping either one fills
-    Persona with near-identical beliefs that all surface on every search:
-
-      - within this run. One statement usually produces TWO episodes - the
-        voice event where the user said it, and the note the memory tool saved
-        in the same turn. Both extract to the same fact.
-      - against the store. A note promoted at save time is already in Persona,
-        so re-reading the utterance it came from would add it a second time.
+    Exact duplicates within this run are folded together here - one statement
+    usually produces TWO episodes, the voice event and the note saved in the
+    same turn - keeping the latest time. Duplicates of what is already held
+    are NOT skipped here any more: persona.remember() merges them, which also
+    moves the held belief's time forward. Skipping them would leave it dated
+    by its first mention, and an older contradiction could then win.
     """
     pending = utterances(rows, seen_episode_ids)
     print(f"[statements] {len(pending)} unextracted utterance(s)")
@@ -160,7 +161,7 @@ def find_statements(
         facts.extend(extract(pending[start:start + BATCH]))
 
     by_id = {u["id"]: u["text"] for u in pending}
-    held = {_norm_fact(t) for t in existing_texts}
+    said_at = {str(r.get("id")): _time(r.get("created_at")) for r in rows}
     merged: dict[str, StatedFact] = {}
 
     for fact in facts:
@@ -171,24 +172,33 @@ def find_statements(
         if not fact.text.strip():
             continue
 
-        key = _norm_fact(fact.text)
-        if key in held:
-            print(f"[statements] already held, skipping: {fact.text!r}")
-            continue
+        when = said_at.get(fact.episode_id)
+        key = normalise_text(fact.text)
         if key in merged:
-            merged[key].also_from.append(fact.episode_id)
+            held = merged[key]
+            held.also_from.append(fact.episode_id)
+            if when and (held.stated_at is None or when > held.stated_at):
+                held.stated_at = when
             continue
 
         fact.quote = fact.quote or by_id[fact.episode_id]
+        fact.stated_at = when
         merged[key] = fact
 
     return list(merged.values())
 
 
-def _norm_fact(text: str) -> str:
-    """Fact identity for deduplication - wording that differs only in case,
-    spacing or a trailing full stop is the same belief."""
-    return " ".join(str(text).lower().strip().rstrip(".").split())
+def _time(value: Any) -> Optional[datetime]:
+    """An episode's created_at as an aware datetime, or None if unusable."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _claude_extractor(batch: list[dict[str, Any]]) -> list[StatedFact]:
