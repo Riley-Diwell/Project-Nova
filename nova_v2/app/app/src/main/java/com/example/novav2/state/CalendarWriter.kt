@@ -18,9 +18,18 @@ object CalendarWriter {
 
     private data class WritableCalendar(val id: Long, val accountName: String, val accountType: String)
 
-    fun hasPermission(context: Context): Boolean =
-        ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_CALENDAR) ==
-            PackageManager.PERMISSION_GRANTED
+    /**
+     * Both, not just WRITE_CALENDAR: every write here first has to find a calendar to write into
+     * ([writableCalendar]) or read the row it is changing ([queryEvent]), and the Calendar
+     * Provider guards *reads* with READ_CALENDAR. With only WRITE granted, those queries come
+     * back empty and every insert silently does nothing - the app reported success while
+     * nothing reached the calendar.
+     */
+    val PERMISSIONS = arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR)
+
+    fun hasPermission(context: Context): Boolean = PERMISSIONS.all {
+        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+    }
 
     /**
      * Inserts an event into the first writable calendar found, then requests an expedited sync
@@ -44,7 +53,11 @@ object CalendarWriter {
         rrule: String? = null,
     ): Uri? {
         if (!hasPermission(context)) return null
-        val calendar = writableCalendar(context) ?: return null
+        val calendar = writableCalendar(context)
+        if (calendar == null) {
+            android.util.Log.w("CalendarWriter", "no writable calendar on this device - event not created")
+            return null
+        }
 
         val values = ContentValues().apply {
             put(CalendarContract.Events.CALENDAR_ID, calendar.id)

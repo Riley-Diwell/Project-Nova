@@ -53,8 +53,9 @@ fun WelcomeScreen(onContinue: () -> Unit) {
             )
             PrivacyPoint(
                 "Where it goes",
-                "Nova's server in Sydney (Google Cloud) and its database. Requests go to Anthropic " +
-                    "to understand them, and to Google Maps for travel times."
+                "Nova's own server, which runs the AI model and the database itself - " +
+                    "nothing goes to an AI company. Travel times come from Google Maps, and " +
+                    "web searches go out through the server's private search."
             )
             PrivacyPoint(
                 "Saved to your account",

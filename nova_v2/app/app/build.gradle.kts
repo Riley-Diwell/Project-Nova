@@ -13,6 +13,18 @@ val localProperties = Properties().apply {
     if (file.exists()) file.inputStream().use { load(it) }
 }
 val novaApiKey: String = localProperties.getProperty("NOVA_API_KEY", "")
+// Where the backend lives, and its tailnet address for when MagicDNS can't be
+// reached (see network/NovaHttp.kt). Both come from local.properties, which is
+// gitignored: this repo is public, and the server is a private tailnet machine,
+// so its name should not be published. A teammate sets these once, by hand:
+//     NOVA_BASE_URL=https://<host>.<tailnet>.ts.net
+//     NOVA_SERVER_IP=100.x.y.z
+// An unset NOVA_BASE_URL builds fine and fails loudly on the first request.
+val novaBaseUrl: String = localProperties.getProperty("NOVA_BASE_URL", "")
+val novaServerIp: String = localProperties.getProperty("NOVA_SERVER_IP", "")
+if (novaBaseUrl.isEmpty()) {
+    logger.warn("NOVA_BASE_URL is not set in local.properties - the app will have no server to call.")
+}
 // Dev shortcut past onboarding: SKIP_ONBOARDING=true in
 // local.properties. Debug builds only - a release build always asks.
 val skipOnboarding: Boolean = localProperties.getProperty("SKIP_ONBOARDING", "false").toBoolean()
@@ -100,6 +112,8 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "NOVA_API_KEY", "\"$novaApiKey\"")
+        buildConfigField("String", "NOVA_BASE_URL", "\"$novaBaseUrl\"")
+        buildConfigField("String", "NOVA_SERVER_IP", "\"$novaServerIp\"")
         buildConfigField("boolean", "SKIP_ONBOARDING", "false")
 
         // vosk-android ships prebuilt native libs per ABI via JNA's .aar - restrict to
@@ -110,6 +124,8 @@ android {
     buildTypes {
         debug {
             buildConfigField("boolean", "SKIP_ONBOARDING", skipOnboarding.toString())
+            // Debug builds also run on the x86_64 emulator; release stays ARM-only.
+            ndk.abiFilters.add("x86_64")
         }
         release {
             optimization {

@@ -271,7 +271,7 @@ fun VoiceScreen(
     val chatViewModel: ChatViewModel = viewModel()
     val messages = chatViewModel.messages
     // Holds a finished turn's calendar.create_event actions while we wait on the
-    // WRITE_CALENDAR permission prompt, so they can still be applied once granted.
+    // calendar permission prompt, so they can still be applied once granted.
     var pendingCalendarActions by remember { mutableStateOf<List<NovaApiClient.CalendarAction>>(emptyList()) }
     // Same, for edit_calendar_event actions - kept as a separate list from the adds above so
     // each can be routed to the right CalendarWriter call once permission is granted.
@@ -308,10 +308,11 @@ fun VoiceScreen(
         }
     }
 
+    // Both calendar permissions in one prompt - see CalendarWriter.PERMISSIONS.
     val calendarPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        if (results.values.all { it }) {
             if (pendingCalendarActions.isNotEmpty()) writeCalendarActions(context, pendingCalendarActions)
             if (pendingEditActions.isNotEmpty()) writeEditActions(context, pendingEditActions)
         }
@@ -320,11 +321,11 @@ fun VoiceScreen(
     }
 
     val deletePermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
         val eventId = deleteAwaitingPermission
         deleteAwaitingPermission = null
-        if (granted && eventId != null) {
+        if (results.values.all { it } && eventId != null) {
             coroutineScope.launch { CalendarWriter.deleteEvent(context, eventId) }
         }
     }
@@ -493,7 +494,7 @@ fun VoiceScreen(
                         // whichever of these two lists actually has something queued.
                         pendingCalendarActions = calendarActions
                         pendingEditActions = editActions
-                        calendarPermissionLauncher.launch(Manifest.permission.WRITE_CALENDAR)
+                        calendarPermissionLauncher.launch(CalendarWriter.PERMISSIONS)
                     }
                 }
                 val deleteActions = finalResult?.deleteActions.orEmpty()
@@ -635,7 +636,7 @@ fun VoiceScreen(
                         coroutineScope.launch { CalendarWriter.deleteEvent(context, action.eventId) }
                     } else {
                         deleteAwaitingPermission = action.eventId
-                        deletePermissionLauncher.launch(Manifest.permission.WRITE_CALENDAR)
+                        deletePermissionLauncher.launch(CalendarWriter.PERMISSIONS)
                     }
                 }) { Text("Delete") }
             },

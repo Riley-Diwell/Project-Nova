@@ -51,10 +51,17 @@ class AuthUser:
     email: str | None
 
 
+def deployed() -> bool:
+    """A real deployment, as opposed to a laptop: Cloud Run sets K_SERVICE,
+    and the self-hosted stack (deploy/compose.yml) sets NOVA_PRODUCTION."""
+    return bool(os.environ.get("K_SERVICE")) or os.environ.get(
+        "NOVA_PRODUCTION", "").strip().lower() in ("1", "true", "yes")
+
+
 def check_startup() -> None:
-    """Refuse to run with auth switched off on Cloud Run (which sets K_SERVICE)."""
-    if settings().auth_disabled and os.environ.get("K_SERVICE"):
-        raise RuntimeError("NOVA_AUTH_DISABLED is set - refusing to start on Cloud Run with it.")
+    """Refuse to run a deployed server with auth switched off."""
+    if settings().auth_disabled and deployed():
+        raise RuntimeError("NOVA_AUTH_DISABLED is set - refusing to start a deployed server with it.")
 
 
 @lru_cache(maxsize=1)

@@ -1,5 +1,7 @@
 package com.example.novav2.network
 
+import com.example.novav2.BuildConfig
+
 import com.example.novav2.knowledge.KnowledgeRepository
 import com.example.novav2.model.CalendarEventInfo
 import com.example.novav2.model.ReminderSummary
@@ -36,8 +38,15 @@ import java.util.concurrent.TimeUnit
  * local dev).
  */
 object NovaApiClient {
-    // Not private: NotesApiClient talks to the same server.
-    const val BASE_URL = "https://nova-v2-1021689546881.australia-southeast1.run.app"
+    /**
+     * The backend, from NOVA_BASE_URL in local.properties (gitignored - this repo is public and
+     * the server is a private tailnet machine). Self-hosted, see nova_v2/deploy: reachable only
+     * over the tailnet, so the phone needs the Tailscale app signed in. `tailscale serve` gives
+     * it a real certificate, so this is ordinary HTTPS.
+     *
+     * Not private: NotesApiClient and friends talk to the same server.
+     */
+    const val BASE_URL = BuildConfig.NOVA_BASE_URL
     private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 
     private val client = OkHttpClient.Builder()

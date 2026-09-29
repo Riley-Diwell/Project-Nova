@@ -4,7 +4,7 @@ WHAT THIS FILE IS
 The one list of registered Function tools, and which of them resolve on the
 phone. It used to be five register() calls at import time in
 intent_surface.py, which meant nothing could ask "what tools exist?" without
-importing the Anthropic client and reading an API key.
+importing the model client.
 
 registry.py stays generic: it is the container, and knows nothing about
 navigation or calendars. This module is the wiring.

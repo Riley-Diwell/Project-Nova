@@ -119,9 +119,10 @@ fun StateScreen() {
     }
 
     val writePermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        testEventStatus = if (granted) createTestEvent(context) else "Calendar write permission denied."
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        testEventStatus = if (results.values.all { it }) createTestEvent(context)
+            else "Calendar permission denied."
     }
 
     // Continuous collection (ActivitySignal/SensorSignal updates, and re-snapshotting every 10s)
@@ -297,7 +298,7 @@ fun StateScreen() {
                 if (CalendarWriter.hasPermission(context)) {
                     testEventStatus = createTestEvent(context)
                 } else {
-                    writePermissionLauncher.launch(Manifest.permission.WRITE_CALENDAR)
+                    writePermissionLauncher.launch(CalendarWriter.PERMISSIONS)
                 }
             },
         )

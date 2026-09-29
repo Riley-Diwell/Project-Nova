@@ -55,7 +55,7 @@ from app.api import me as me_api
 from app.api import notes as notes_api
 from app.api import notes_pipeline as notes_pipeline_api
 from app.api import reminders as reminders_api
-from app.core import auth
+from app.core import auth, llm
 from app.core.auth import AuthUser, current_user
 from app.core.request_user import bind_request_user
 from app.notes_pipeline import NotesPipelineProcessor
@@ -107,6 +107,15 @@ def _warm_up() -> None:
     except Exception as e:
         print(f"[warmup] persona warm-up skipped: {e}")
 
+    # One token from the model, so a stopped or unreachable model server shows
+    # up in the log at start-up rather than on the first voice turn.
+    start = time.perf_counter()
+    try:
+        llm.complete("Reply with OK.", "ping", max_tokens=4, timeout=120.0)
+        print(f"[warmup] model {llm.MODEL} ready ({(time.perf_counter() - start) * 1000:.0f}ms)")
+    except Exception as e:
+        print(f"[warmup] model warm-up failed ({llm.LLM_BASE_URL}): {e}")
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -142,9 +151,9 @@ app.include_router(reminders_api.router)
 
 _API_KEY = os.environ.get("NOVA_API_KEY", "").strip()
 if not _API_KEY:
-    # K_SERVICE is set by Cloud Run - a deployed server must never run open.
-    if os.environ.get("K_SERVICE"):
-        raise RuntimeError("NOVA_API_KEY is not set - refusing to start on Cloud Run without it.")
+    # A deployed server must never run open.
+    if auth.deployed():
+        raise RuntimeError("NOVA_API_KEY is not set - refusing to start a deployed server without it.")
     print("[auth] NOVA_API_KEY not set - /event and friends are UNAUTHENTICATED. "
           "Fine for local dev; do not deploy publicly like this.")
 
@@ -251,7 +260,7 @@ def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
 #
 # Every route below is the signed-in user's: `user`
 # comes from the verified token, and everything read or written is theirs.
-# Plain `def`, not `async def`: the handlers make blocking calls (Anthropic,
+# Plain `def`, not `async def`: the handlers make blocking calls (the model,
 # Supabase), and FastAPI runs a plain def in its threadpool - as async they
 # held the event loop, so one instance served one turn at a time.
 @app.post("/event", response_model=EventResponse)

@@ -55,7 +55,6 @@ RETITLE_MIN_GROWTH = 5
 TITLE_BATCH = 30
 SAMPLE_FACTS = 6
 MAX_TITLE = 40
-MODEL = "claude-haiku-4-5"
 
 TITLE_PENDING = "pending"     # headed by its first fact's words; needs a model heading
 TITLE_FALLBACK = "fallback"   # a model heading was attempted and failed; retry
@@ -153,7 +152,15 @@ def _place_vec(clusters: ClusterStore, user_id: UserId, fact_id: str, vec: list[
     by_id = {c.id: c for c in current}
     was = by_id.get(membership.get(fact_id, ""))
     if was is not None and cosine(vec, was.centroid) >= STAY:
-        return was.id  # stays put; the centre is corrected on the next refresh
+        # stays put; the centre is corrected on the next refresh. A group
+        # still headed by its only fact's words follows that fact's rewording,
+        # or a replaced belief ("Likes X" -> "Doesn't like X") would live on
+        # as the heading until the model names the group.
+        if was.title_source == TITLE_PENDING and was.size <= 1:
+            heading = fallback_title([text])
+            if heading != was.title:
+                clusters.save(user_id, replace(was, title=heading))
+        return was.id
 
     best, sim = nearest(vec, current, exclude=was.id if was else None)
     if was is not None:
@@ -354,24 +361,17 @@ Input is a JSON array of {"id": ..., "facts": [...]}. Return ONLY a JSON object 
 mapping each id to its heading."""
 
 
-def claude_titler(samples: list[ClusterSample]) -> dict[str, str]:
-    """One Claude Haiku call for every group that needs a heading."""
+def model_titler(samples: list[ClusterSample]) -> dict[str, str]:
+    """One model call for every group that needs a heading."""
     if not samples:
         return {}
-    from anthropic import Anthropic
+    from app.core import llm
 
-    client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"), timeout=20.0, max_retries=1)
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=1024,
-        system=TITLE_PROMPT,
-        messages=[{"role": "user", "content": json.dumps(
-            [{"id": s.id, "facts": s.texts} for s in samples])}],
+    text = llm.complete(
+        TITLE_PROMPT, json.dumps([{"id": s.id, "facts": s.texts} for s in samples]),
+        max_tokens=1024, timeout=60.0,
     )
-    text = "".join(b.text for b in response.content if b.type == "text").strip()
-    if text.startswith("```"):
-        text = text.split("```")[1].removeprefix("json")
-    parsed = json.loads(text)
+    parsed = json.loads(llm.extract_json(text))
     wanted = {s.id for s in samples}
     return {k: v for k, v in parsed.items() if k in wanted and isinstance(v, str)} if isinstance(parsed, dict) else {}
 
@@ -382,7 +382,7 @@ def _mock_titler(samples: list[ClusterSample]) -> dict[str, str]:
 
 def default_titler() -> Titler:
     mock = os.environ.get("NOVA_MOCK_LLM", "").strip().lower() in ("1", "true", "yes")
-    return _mock_titler if mock else claude_titler
+    return _mock_titler if mock else model_titler
 
 
 # --- stores -------------------------------------------------------------------------------

@@ -3,9 +3,8 @@ uvicorn[standard]>=0.32
 pydantic>=2.9
 python-dotenv>=1.0
 
-# Intent Surface / state estimator. messages.parse(output_format=...) - used by
-# the notes summariser and the Persona judge - needs a recent SDK.
-anthropic>=0.104
+# Every model call (core/llm.py): the OpenAI chat-completions protocol, served
+# by the self-hosted Qwen (deploy/compose.yml) or anything compatible.
 openai>=1.50
 numpy>=1.26
 

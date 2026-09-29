@@ -155,7 +155,7 @@ def find_statements(
     if not pending:
         return []
 
-    extract = extractor or _claude_extractor
+    extract = extractor or _model_extractor
     facts: list[StatedFact] = []
     for start in range(0, len(pending), BATCH):
         facts.extend(extract(pending[start:start + BATCH]))
@@ -201,19 +201,12 @@ def _time(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _claude_extractor(batch: list[dict[str, Any]]) -> list[StatedFact]:
-    from anthropic import Anthropic
-
+def _model_extractor(batch: list[dict[str, Any]]) -> list[StatedFact]:
+    from app.core import llm
     from app.store.consolidation import MODEL, _parse_json_array
 
-    client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=2048,
-        system=EXTRACTION_PROMPT,
-        messages=[{"role": "user", "content": json.dumps(batch)}],
-    )
-    text = "".join(b.text for b in response.content if b.type == "text")
+    text = llm.complete(EXTRACTION_PROMPT, json.dumps(batch), max_tokens=2048,
+                        timeout=120.0, model=MODEL)
 
     facts: list[StatedFact] = []
     for item in _parse_json_array(text):

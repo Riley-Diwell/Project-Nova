@@ -3,8 +3,12 @@ package com.example.novav2.network
 import com.example.novav2.BuildConfig
 import com.example.novav2.auth.AuthRepository
 import okhttp3.Authenticator
+import okhttp3.Dns
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import java.net.InetAddress
+import java.net.UnknownHostException
 
 /**
  * What every call to the Nova server carries:
@@ -45,7 +49,28 @@ object NovaHttp {
         response.request.newBuilder().header("Authorization", "Bearer $fresh").build()
     }
 
+    /** The server's tailnet address, for when its name can't be looked up. Both from
+     *  local.properties - see NOVA_BASE_URL / NOVA_SERVER_IP in app/build.gradle.kts. */
+    private val SERVER_HOST = NovaApiClient.BASE_URL.toHttpUrlOrNull()?.host
+    private val SERVER_TAILNET_IP = BuildConfig.NOVA_SERVER_IP
+
+    /**
+     * The system resolver first; if it can't find the server's tailnet name, its fixed tailnet
+     * address. The Android emulator can't use Tailscale's MagicDNS, though it routes to the
+     * tailnet fine through the host, so without this it can't reach the server at all. TLS is
+     * still checked against [SERVER_HOST] - only the lookup changes.
+     */
+    val serverDns: Dns = object : Dns {
+        override fun lookup(hostname: String): List<InetAddress> = try {
+            Dns.SYSTEM.lookup(hostname)
+        } catch (e: UnknownHostException) {
+            if (hostname != SERVER_HOST || SERVER_TAILNET_IP.isEmpty()) throw e
+            listOf(InetAddress.getByName(SERVER_TAILNET_IP))
+        }
+    }
+
     fun OkHttpClient.Builder.withNovaAuth(): OkHttpClient.Builder = this
+        .dns(serverDns)
         .addInterceptor(clientKeyInterceptor)
         .addInterceptor(bearerInterceptor)
         .authenticator(tokenAuthenticator)

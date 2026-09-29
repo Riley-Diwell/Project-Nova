@@ -70,6 +70,7 @@ object AuthRepository {
     private val http = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
+        .dns(NovaHttp.serverDns)
         .addInterceptor(NovaHttp.clientKeyInterceptor)
         .build()
     private val JSON = "application/json".toMediaType()

@@ -25,7 +25,9 @@ from typing import Any, Literal, Optional, Protocol
 
 from pydantic import BaseModel
 
-MODEL = "claude-haiku-4-5"
+from app.core import llm
+
+MODEL = llm.MODEL
 MAX_OUTPUT_TOKENS = 512
 
 Relation = Literal["duplicate", "contradicts", "unrelated"]
@@ -92,9 +94,10 @@ Return exactly one verdict per existing statement, with its index, the \
 relation, and a reason of at most one short sentence."""
 
 
-class ClaudeJudge:
-    """Claude Haiku with structured output (messages.parse), as
-    notes_pipeline/summarise.py does. `client` is injectable for tests."""
+class ModelJudge:
+    """The model with structured output (core/llm.py parse()), as
+    notes_pipeline/summarise.py does. `client` (OpenAI-compatible) is
+    injectable for tests."""
 
     def __init__(self, client: Any = None, model: str = MODEL,
                  timeout_s: float = 8.0, max_retries: int = 1) -> None:
@@ -109,29 +112,18 @@ class ClaudeJudge:
         payload = {"new": new_text,
                    "existing": [{"index": i, "text": t} for i, t in enumerate(existing)]}
         try:
-            client = self._client or self._default_client()
-            response = client.messages.parse(
-                model=self._model,
-                max_tokens=MAX_OUTPUT_TOKENS,
-                system=JUDGE_PROMPT,
-                messages=[{"role": "user", "content": json.dumps(payload)}],
-                output_format=Judgement,
+            judgement = llm.parse(
+                JUDGE_PROMPT, json.dumps(payload), Judgement,
+                max_tokens=MAX_OUTPUT_TOKENS, timeout=self._timeout_s,
+                max_retries=self._max_retries, llm=self._client, model=self._model,
             )
         except Exception as e:
             raise JudgeUnavailable(f"judge call failed: {e}") from e
-
-        stop = getattr(response, "stop_reason", None)
-        if stop in ("refusal", "max_tokens"):
-            raise JudgeUnavailable(f"judge stopped: {stop}")
-        judgement = getattr(response, "parsed_output", None)
-        if not isinstance(judgement, Judgement):
-            raise JudgeUnavailable("judge output did not parse")
         return relations_from(judgement, len(existing))
 
-    def _default_client(self) -> Any:
-        from anthropic import Anthropic
 
-        return Anthropic(timeout=self._timeout_s, max_retries=self._max_retries)
+# The name it had while the model was Claude; kept so imports don't break.
+ClaudeJudge = ModelJudge
 
 
 def relations_from(judgement: Judgement, count: int) -> list[str]:

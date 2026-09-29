@@ -17,7 +17,7 @@ THREE STAGES, DELIBERATELY SEPARATE
                              parameter or event field, keep what clears
                              MIN_SUPPORT. Pure arithmetic, recomputable,
                              checkable by hand.
-  2. phrase   (here)       - one Claude call turns each counted repetition into
+  2. phrase   (here)       - one model call turns each counted repetition into
                              a sentence and files it in the ontology. The model
                              chooses wording and category; it does not decide
                              what is or is not a trend, and it cannot invent a
@@ -74,6 +74,8 @@ from typing import Any, Callable, Optional, Union
 
 from pydantic import BaseModel
 from uuid import UUID
+
+from app.core import llm
 
 from app.store.consolidation.models import (
     CATEGORY_PREFERENCES,
@@ -134,9 +136,10 @@ __all__ = [
 
 UserId = Union[UUID, str]
 
-# Same family as the Intent Surface. This is a batch job over a handful of
-# counted candidates, not a reasoning task - it phrases and files, nothing more.
-MODEL = "claude-haiku-4-5"
+# The same model as the Intent Surface (core/llm.py). This is a batch job over
+# a handful of counted candidates, not a reasoning task - it phrases and files,
+# nothing more.
+MODEL = llm.MODEL
 
 # A phraser turns counted candidates into filed facts. Injectable so tests can run the whole pipeline without an API key.
 Phraser = Callable[[list[Candidate]], list[DerivedFact]]
@@ -293,7 +296,7 @@ def _derive_candidates(user_id: UserId, candidates: list[Candidate], phraser: Op
 
     The check is here rather than inside the phraser because it is a property
     of the pass, not of one implementation of it: whatever produces the wording
-    - Claude, a template, a test double - a fact is only allowed out if the
+    - the model, a template, a test double - a fact is only allowed out if the
     counting stage actually produced its candidate. That is what makes
     `support` and `episode_ids` mean anything. Without it, a phraser that
     hallucinated "hates bagels" would get it written to Persona wearing the
@@ -334,7 +337,7 @@ def _derive_candidates(user_id: UserId, candidates: list[Candidate], phraser: Op
 
     counted = {(c.signal, c.value) for c in fresh}
     kept: list[DerivedFact] = list(known)
-    for fact in (phraser or _claude_phraser)(fresh):
+    for fact in (phraser or _model_phraser)(fresh):
         key = (fact.candidate.signal, fact.candidate.value)
         if key not in counted:
             print(f"[consolidation] dropped unsupported fact: {fact.text!r} {key}")
@@ -402,15 +405,12 @@ def _episodes(user_id: UserId) -> list[dict[str, Any]]:
 
 # --- stage 2: phrase ---------------------------------------------------------
 
-def _claude_phraser(candidates: list[Candidate]) -> list[DerivedFact]:
-    """One Claude call for the whole batch, matched back by (signal, value).
+def _model_phraser(candidates: list[Candidate]) -> list[DerivedFact]:
+    """One model call for the whole batch, matched back by (signal, value).
 
     Anything the model returns that does not correspond to a candidate is
     dropped: it cannot introduce a fact that no episodes support.
     """
-    from anthropic import Anthropic
-
-    client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
     payload = [
         {
             "signal": c.signal,
@@ -423,13 +423,8 @@ def _claude_phraser(candidates: list[Candidate]) -> list[DerivedFact]:
         for c in candidates
     ]
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=2048,
-        system=PHRASING_PROMPT,
-        messages=[{"role": "user", "content": json.dumps(payload)}],
-    )
-    text = "".join(b.text for b in response.content if b.type == "text")
+    text = llm.complete(PHRASING_PROMPT, json.dumps(payload), max_tokens=2048,
+                        timeout=120.0, model=MODEL)
 
     by_key = {(c.signal, c.value): c for c in candidates}
     facts: list[DerivedFact] = []
@@ -447,13 +442,10 @@ def _claude_phraser(candidates: list[Candidate]) -> list[DerivedFact]:
 
 
 def _parse_json_array(text: str) -> list[dict[str, Any]]:
-    """Parse the model's reply, tolerating a ```json fence around it."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        cleaned = cleaned[4:] if cleaned.startswith("json") else cleaned
+    """Parse the model's reply, tolerating a ```json fence or a sentence
+    around it."""
     try:
-        parsed = json.loads(cleaned.strip())
+        parsed = json.loads(llm.extract_json(text))
     except json.JSONDecodeError as e:
         print(f"[consolidation] could not parse phrasing reply: {e}")
         return []

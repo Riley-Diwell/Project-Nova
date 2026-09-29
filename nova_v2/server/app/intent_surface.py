@@ -5,8 +5,9 @@ STATUS: working draft
 
 WHAT THIS FILE IS
 Uses AI to infer intent.
-    1. Runs an Anthropic client. It receives an Event and the User State the phone
-computed for it, and produces the words NOVA says plus the Actions it took.
+    1. Calls the model (core/llm.py - the self-hosted Qwen, over the OpenAI
+protocol). It receives an Event and the User State the phone computed for it,
+and produces the words NOVA says plus the Actions it took.
     2. Runs a tool calling loop to process this data and infer intent.
 
 WHO USES THIS
@@ -24,7 +25,6 @@ from typing import Any, Literal
 from uuid import UUID
 
 import requests
-from anthropic import Anthropic
 from pydantic import BaseModel
 
 # import nova libraries
@@ -36,23 +36,30 @@ from app.control.observer import observe, trends_from_facts
 from app.control.gain.gain_store import GainStore
 from app.control.gain.overrides import GainOverrides
 from app.control.gain.reinforcement import Outcome, Reinforcer
+from app.core import llm
 from app.core.request_user import as_user
 from app.tools.core.action import Action
 from app.tools.core.catalogue import CLIENT_TOOLS, DEVICE_TOOLS, build_registry
 from app.tools.core.dispatcher import Dispatcher
 from app.tools.core.registry import ToolRegistry
 from app.tools.functions.notification_management import set_batcher_mode
+from app.tools.web_search import WEB_SEARCH_TOOL, web_search
 
 from app.store import memory
 from app.store import persona
 from app.store import profile
 
-client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-
-MODEL = "claude-haiku-4-5"
 MAX_ITERATIONS = 5
 
-# How many past Episodes of the same type to hand Claude as short-term context.
+# A voice turn waits on this; the model is local, so a generous timeout still
+# fails fast when the box is down.
+LOOP_TIMEOUT_S = 45.0
+
+# web_search runs locally now (tools/web_search.py), so its cap is ours to
+# enforce - the hosted tool's max_uses did this before.
+WEB_SEARCH_MAX_USES = 3
+
+# How many past Episodes of the same type to hand the model as short-term context.
 # A prompt-size cap as much as a query limit - keep it small.
 RECENT_EPISODES = 5
 
@@ -79,8 +86,8 @@ PERSONA_MIN_SIMILARITY = 0.35
 MAPS_API_KEY = os.environ.get("google_maps_api_key")
 
 # Set NOVA_MOCK_LLM=1 in .env to test the /event pipeline (schema validation,
-# routing, wire contract) without calling the real Anthropic API - useful for
-# local testing without spending API credits.
+# routing, wire contract) without calling the model - useful for testing
+# without the model server running.
 MOCK_LLM = os.environ.get("NOVA_MOCK_LLM", "").strip().lower() in ("1", "true", "yes")
 
 # The prompt describes speech and the sources NOVA speaks from. Nothing in it
@@ -231,16 +238,9 @@ SYSTEM_PROMPT = (
 
 # --- local tools -------------------------------------------------------------
 
-# Server-side tool - Anthropic runs the search and hands back results in the
-# same response, so there is no local dispatch and no tool_result to send
-# back for it (see the tool_use loop below, which only handles CLIENT_TOOLS
-# and registry Function tools). claude-haiku-4-5 predates the dynamic-
-# filtering tool generation, so this is the basic variant, not _20260209.
-WEB_SEARCH_TOOL: dict[str, Any] = {
-    "type": "web_search_20250305",
-    "name": "web_search",
-    "max_uses": 3,
-}
+# web_search (tools/web_search.py) and get_current_address are context tools:
+# answered here, never gated, never recorded as Actions.
+CONTEXT_TOOLS = ("web_search", "get_current_address")
 
 GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
     "name": "get_current_address",
@@ -261,14 +261,14 @@ GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
 
 # Which tools exist, and which of them resolve on the phone, live in
 # tools/core/catalogue.py - so the Controller and its tests can ask what NOVA
-# can do without importing an Anthropic client or reading an API key.
+# can do without importing a model client.
 _GAIN_STORE = GainStore()
 _REGISTRY = build_registry(_GAIN_STORE)
 _DISPATCHER = Dispatcher(_REGISTRY)
 
 def _tool_definition(name: str) -> dict[str, Any]:
     """
-    One registered Function tool as the Anthropic API wants it.
+    One registered Function tool, as the OpenAI tools list wants it.
 
     Just the tool: its name, what it does, and what parameters it takes. No
     `trigger` field, because whether the user asked is settled before this runs.
@@ -279,10 +279,13 @@ def _tool_definition(name: str) -> dict[str, Any]:
     schema = _REGISTRY.get_schema(name)
 
 
+    return _as_function(schema.name, schema.description, schema.input_schema)
+
+
+def _as_function(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
     return {
-        "name": schema.name,
-        "description": schema.description,
-        "input_schema": schema.input_schema,
+        "type": "function",
+        "function": {"name": name, "description": description, "parameters": parameters},
     }
 
 def _build_tools(authorised: list[str]) -> list[dict[str, Any]]:
@@ -300,8 +303,8 @@ def _build_tools(authorised: list[str]) -> list[dict[str, Any]]:
     ability to answer "where am I?" (see dispatcher.py).
     """
     return [
-        WEB_SEARCH_TOOL,
-        GET_CURRENT_ADDRESS_TOOL,
+        *(_as_function(t["name"], t["description"], t["input_schema"])
+          for t in (WEB_SEARCH_TOOL, GET_CURRENT_ADDRESS_TOOL)),
         *(_tool_definition(name) for name in authorised),
     ]
 
@@ -429,6 +432,9 @@ class TurnContext:
     # _unknown_reminder off rather than rejecting every update_reminder.
     known_reminder_ids: set[str] | None = None
 
+    # web_search calls so far this turn, against WEB_SEARCH_MAX_USES.
+    web_searches: int = 0
+
     @property
     def ran(self) -> list[str]:
         """Names of the tools that actually ran - logging only."""
@@ -539,6 +545,12 @@ def _unknown_reminder(name: str, tool_input: dict[str, Any], ctx: TurnContext) -
 def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> Any:
     if name == "get_current_address":
         return _reverse_geocode(ctx.location_ctx)
+    if name == "web_search":
+        if ctx.web_searches >= WEB_SEARCH_MAX_USES:
+            return {"success": False, "error": (
+                "search limit reached this turn - answer from the results you have")}
+        ctx.web_searches += 1
+        return web_search(str(tool_input.get("query", "")))
     unknown = _unknown_reminder(name, tool_input, ctx)
     if unknown is not None:
         _record_action(name, tool_input, ctx, ran=False)
@@ -690,7 +702,7 @@ class IntentResult(BaseModel):
 
 class NeedMoreResult(BaseModel):
     """
-    Returned instead of IntentResult when Claude called a CLIENT_TOOLS tool.
+    Returned instead of IntentResult when the model called a CLIENT_TOOLS tool.
     The paused conversation is held in _PENDING_SESSIONS under session_id;
     the caller (main.py) hands request_type/from_time/to_time to Android,
     which resolves them on-device and posts the result to /event/continue
@@ -982,7 +994,7 @@ def _run(
     priors = saved_profile.answers.to_features(local_time) if saved_profile else None
 
     # --- the control loop, before the model runs -----------------------------
-    # In this order, and all of it deterministic. By the time Claude is called,
+    # In this order, and all of it deterministic. By the time the model is called,
     # what may happen this turn is already settled; the model's job is to choose
     # parameters and words.
     observation = observe(event, user_state, trends=trends_from_facts(facts), priors=priors)
@@ -1090,15 +1102,10 @@ def _resume(pending: dict[str, Any], tool_result: Any) -> IntentResult | NeedMor
         ctx.known_reminder_ids = (ctx.known_reminder_ids or set()) | found
 
     messages: list[dict[str, Any]] = pending["messages"]
-    tool_results = [
-        *pending.get("pending_tool_results", []),
-        {
-            "type": "tool_result",
-            "tool_use_id": pending["tool_use_id"],
-            "content": json.dumps(tool_result),
-        },
-    ]
-    messages.append({"role": "user", "content": tool_results})
+    # Every call in the paused assistant message is answered before the model
+    # runs again: the ones that ran before the hop, then the phone's.
+    messages.extend(pending.get("pending_tool_results", []))
+    messages.append(_tool_message(pending["tool_call_id"], tool_result))
     # The same TurnContext the turn started with, so the Controller's decisions,
     # the refusals and the Actions carry across the hop to the device and back.
     # The authorisation comes with it, because it is part of the Turn: a hop is the
@@ -1109,6 +1116,45 @@ def _resume(pending: dict[str, Any], tool_result: Any) -> IntentResult | NeedMor
         messages, MAX_ITERATIONS, pending["event_id"], pending["ctx"],
         is_voice=pending.get("is_voice", True),
     )
+
+
+def _tool_message(call_id: str, result: Any) -> dict[str, Any]:
+    return {"role": "tool", "tool_call_id": call_id, "content": json.dumps(result, default=str)}
+
+
+def _assistant_turn(message: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The model's reply as a plain message dict for the thread, and its tool
+    calls. Plain dicts, not SDK objects, so a parked or stashed thread is
+    ordinary data. Tool calls a server left in the text as <tool_call> markup
+    are lifted out into real calls."""
+    text = llm.strip_thinking(message.content)
+    calls = [
+        {"id": c.id, "type": "function",
+         "function": {"name": c.function.name, "arguments": c.function.arguments or "{}"}}
+        for c in (message.tool_calls or [])
+    ]
+    if not calls:
+        calls = llm.tool_calls_in_text(text)
+    text = llm.without_tool_call_text(text)
+    turn: dict[str, Any] = {"role": "assistant", "content": text or None}
+    if calls:
+        turn["tool_calls"] = calls
+    return turn, calls
+
+
+def _arguments(call: dict[str, Any]) -> dict[str, Any] | None:
+    """A tool call's arguments, or None if they aren't a JSON object."""
+    raw = call["function"].get("arguments") or "{}"
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+_BAD_ARGUMENTS = {"success": False, "error": (
+    "The arguments for that call were not a valid JSON object. Call it again "
+    "with valid JSON arguments.")}
 
 
 def _run_loop(
@@ -1129,42 +1175,138 @@ def _run_loop(
     # iterate until an appropriate answer is reached
     for _ in range(iterations_left):
         # call model
-        print(f"[loop] tools={[t['name'] for t in tools]!r}")
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=1024,
-            # Ephemeral breakpoint caches the tools list + this static prompt as
-            # one prefix - identical across every iteration of a turn and across
-            # turns that share the same authorised tool set, so only the first
-            # call in a cache window pays full input-token price for it.
-            system=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                },
-            ],
+        print(f"[loop] tools={[t['function']['name'] for t in tools]!r}")
+        response = llm.client(LOOP_TIMEOUT_S, 1).chat.completions.create(
+            model=llm.MODEL,
+            # The system prompt goes first and never changes, so the model
+            # server's prefix cache covers it (and the tools) across turns.
+            # It isn't kept in `messages`, so parked and stashed threads don't
+            # carry a copy of it.
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}, *messages],
             tools=tools,
-            messages=messages,
+            tool_choice="auto",
+            max_tokens=1024 + llm.THINKING_TOKENS,
+            temperature=0.3,
+            # Thinking on: the server hands it back apart from the answer
+            # (see llm.THINKING). It is not kept in the thread.
+            extra_body=llm.THINKING,
         )
-        print(f"[loop] stop_reason={response.stop_reason!r} "
-              f"blocks={[b.type for b in response.content]!r}")
-        print(f"[loop] cache_creation={response.usage.cache_creation_input_tokens} "
-              f"cache_read={response.usage.cache_read_input_tokens} "
-              f"input={response.usage.input_tokens}")
+        choice = response.choices[0]
+        assistant, calls = _assistant_turn(choice.message)
+        usage = getattr(response, "usage", None)
+        cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", None)
+        print(f"[loop] finish_reason={choice.finish_reason!r} "
+              f"tool_calls={[c['function']['name'] for c in calls]!r} "
+              f"prompt={getattr(usage, 'prompt_tokens', None)} cached={cached} "
+              f"completion={getattr(usage, 'completion_tokens', None)}")
+
+        # if a tool is called. Checked before finish_reason: some servers
+        # report "stop" on a reply that carries tool calls.
+        if calls:
+            messages.append(assistant)
+
+            # A client tool goes through the same check as everything else before
+            # the backend pauses and calls out to the phone - it is a registered
+            # Function tool with a dial like the others. If it was not authorised,
+            # fall through and let the loop below hand back the refusal instead
+            # of hopping to the device.
+            client_call = next(
+                (c for c in calls
+                 if c["function"]["name"] in CLIENT_TOOLS and _arguments(c) is not None),
+                None,
+            )
+            client_authorised = (
+                client_call is not None and _gate(client_call["function"]["name"], ctx) is None
+            )
+
+            # Every OTHER call in this same reply runs now regardless of the
+            # client hop below - every tool_call id in an assistant message has
+            # to be answered before the model runs again, so a reply that called
+            # e.g. both get_calendar_range and navigation_departure_time can't
+            # just answer the first and leave the second dangling until
+            # resume(). Its result is carried in _PENDING_SESSIONS and sent with
+            # the device's answer there instead.
+            tool_results = []
+            for call in calls:
+                if call is client_call and client_authorised:
+                    continue
+                name = call["function"]["name"]
+                tool_input = _arguments(call)
+                if tool_input is None:
+                    tool_results.append(_tool_message(call["id"], _BAD_ARGUMENTS))
+                    continue
+                blocked = _gate(name, ctx)
+                if blocked is not None:
+                    # Refused calls are recorded here; allowed ones are
+                    # recorded by _run_local_tool once they return.
+                    _record_action(name, tool_input, ctx, ran=False)
+                result = blocked if blocked is not None else _run_local_tool(
+                    name, tool_input, ctx
+                )
+                if (name == "navigation_departure_time"
+                        and isinstance(result, dict)
+                        and "leave_in_minutes" in result):
+                    ctx.scheduled_departure = {
+                        "destination": result.get("destination"),
+                        "mode": result.get("mode"),
+                        "leave_in_minutes": result["leave_in_minutes"],
+                        # The commitment's own countdown and title, as passed into the
+                        # tool call (see SYSTEM_PROMPT's WHEN TO LEAVE) - carried through
+                        # so Android can fill "you have X in N minutes" without asking the
+                        # model to phrase it. Both None for a destination with no calendar
+                        # anchor.
+                        "minutes_until_start": tool_input.get("minutes_until_start"),
+                        "event_title": tool_input.get("event_title"),
+                    }
+                if isinstance(result, dict) and result.get("spoken"):
+                    tool_spoken = str(result["spoken"])
+                tool_results.append(_tool_message(call["id"], result))
+
+            if client_authorised:
+                client_input = _arguments(client_call) or {}
+                client_name = client_call["function"]["name"]
+                _record_action(client_name, client_input, ctx, ran=True)
+                session_id = str(uuid.uuid4())
+                now = datetime.now(timezone.utc)
+                _prune_pending_sessions(now)
+                _PENDING_SESSIONS[session_id] = {
+                    # resume() hands this back only to the same user.
+                    "user_id": ctx.user_id,
+                    "expires_at": now + _PENDING_SESSION_TTL,
+                    "messages": messages,
+                    "tool_call_id": client_call["id"],
+                    # Any other call from this same reply already ran above and
+                    # has its tool message sitting here - resume() sends these
+                    # along with the device's eventual answer (see above).
+                    "pending_tool_results": tool_results,
+                    "event_id": event_id,
+                    "ctx": ctx,
+                    # Carried so resume() can localise whatever the phone sends
+                    # back. Without it the far side of the hop defaults to UTC,
+                    # and the calendar comes back a timezone out.
+                    "utc_offset_minutes": ctx.utc_offset_minutes,
+                    "is_voice": is_voice,
+                }
+                return NeedMoreResult(
+                    event_id=event_id,
+                    session_id=session_id,
+                    request_type=client_name,
+                    from_time=client_input.get("from_time", ""),
+                    to_time=client_input.get("to_time", ""),
+                    include_done=(
+                        bool(client_input.get("include_done"))
+                        if client_name == "get_reminders" else None
+                    ),
+                )
+
+            messages.extend(tool_results)
+            continue
 
         # finished reasoning
-        if response.stop_reason == "end_turn":
-            tool_idx = [
-                i for i, b in enumerate(response.content)
-                if b.type in ("server_tool_use", "web_search_tool_result", "tool_use", "tool_result")
-            ]
-            start = (max(tool_idx) + 1) if tool_idx else 0
-            speech = "".join(
-                b.text for b in response.content[start:] if b.type == "text"
-            )
+        if choice.finish_reason in ("stop", "eos", None):
+            speech = assistant["content"] or ""
             if not speech:
-                print(f"[loop] empty speech - raw content: {response.content!r}")
+                print(f"[loop] empty speech - raw content: {choice.message.content!r}")
                 speech = tool_spoken
             print(f"[loop] final speech={speech!r} actions={ctx.ran!r}")
             # A voice turn that ends by asking a question is left dangling on
@@ -1178,7 +1320,7 @@ def _run_loop(
                 if confirmation is not None:
                     _stash_pending_confirmation(
                         ctx.user_id,
-                        [*messages, {"role": "assistant", "content": response.content}],
+                        [*messages, {"role": "assistant", "content": speech}],
                     )
                 else:
                     _clear_pending_confirmation(ctx.user_id)
@@ -1188,112 +1330,8 @@ def _run_loop(
                 scheduled_departure=ctx.scheduled_departure,
             )
 
-        # if a tool is called
-        if response.stop_reason == "tool_use":
-            messages.append({"role": "assistant", "content": response.content})
-
-            # A client tool goes through the same check as everything else before
-            # the backend pauses and calls out to the phone - it is a registered
-            # Function tool with a dial like the others. If it was not authorised,
-            # fall through and let the block below hand back the refusal instead
-            # of hopping to the device.
-            client_call = next(
-                (b for b in response.content if b.type == "tool_use" and b.name in CLIENT_TOOLS),
-                None,
-            )
-            client_authorised = client_call is not None and _gate(client_call.name, ctx) is None
-
-            # Every OTHER tool_use block in this same turn runs now regardless of
-            # the client hop below - the Anthropic API requires every tool_use id
-            # in an assistant turn to be answered in the very next user turn, so a
-            # turn that called e.g. both get_calendar_range and
-            # navigation_departure_time can't just answer the first and leave the
-            # second's tool_use dangling until resume(). Its result is carried in
-            # _PENDING_SESSIONS and merged with the device's answer there instead.
-            tool_results = []
-            for block in response.content:
-                if block.type != "tool_use" or block is client_call:
-                    continue
-                blocked = _gate(block.name, ctx)
-                if blocked is not None:
-                    # Refused calls are recorded here; allowed ones are
-                    # recorded by _run_local_tool once they return.
-                    _record_action(block.name, block.input, ctx, ran=False)
-                result = blocked if blocked is not None else _run_local_tool(
-                    block.name, block.input, ctx
-                )
-                if (block.name == "navigation_departure_time"
-                        and isinstance(result, dict)
-                        and "leave_in_minutes" in result):
-                    ctx.scheduled_departure = {
-                        "destination": result.get("destination"),
-                        "mode": result.get("mode"),
-                        "leave_in_minutes": result["leave_in_minutes"],
-                        # The commitment's own countdown and title, as passed into the
-                        # tool call (see SYSTEM_PROMPT's WHEN TO LEAVE) - carried through
-                        # so Android can fill "you have X in N minutes" without asking the
-                        # model to phrase it. Both None for a destination with no calendar
-                        # anchor.
-                        "minutes_until_start": block.input.get("minutes_until_start"),
-                        "event_title": block.input.get("event_title"),
-                    }
-                if isinstance(result, dict) and result.get("spoken"):
-                    tool_spoken = str(result["spoken"])
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(result, default=str),
-                })
-
-            if client_authorised:
-                _record_action(client_call.name, client_call.input, ctx, ran=True)
-                session_id = str(uuid.uuid4())
-                now = datetime.now(timezone.utc)
-                _prune_pending_sessions(now)
-                _PENDING_SESSIONS[session_id] = {
-                    # resume() hands this back only to the same user.
-                    "user_id": ctx.user_id,
-                    "expires_at": now + _PENDING_SESSION_TTL,
-                    "messages": messages,
-                    "tool_use_id": client_call.id,
-                    # Any other tool_use block from this same turn already ran
-                    # above and has its tool_result sitting here - resume() sends
-                    # these alongside the device's eventual answer in one user
-                    # turn rather than a turn of their own (see the comment above).
-                    "pending_tool_results": tool_results,
-                    "event_id": event_id,
-                    "ctx": ctx,
-                    # Carried so resume() can localise whatever the phone sends
-                    # back. Without it the far side of the hop defaults to UTC,
-                    # and the calendar comes back a timezone out.
-                    "utc_offset_minutes": ctx.utc_offset_minutes,
-                    "is_voice": is_voice,
-                }
-                return NeedMoreResult(
-                    event_id=event_id,
-                    session_id=session_id,
-                    request_type=client_call.name,
-                    from_time=client_call.input.get("from_time", ""),
-                    to_time=client_call.input.get("to_time", ""),
-                    include_done=(
-                        bool(client_call.input.get("include_done"))
-                        if client_call.name == "get_reminders" else None
-                    ),
-                )
-
-            messages.append({"role": "user", "content": tool_results})
-            continue
-
-        # Server-side tool loop (web_search) hit its internal iteration cap.
-        # Resend as-is - the trailing server_tool_use block tells the API to
-        # pick up where it left off. No synthetic "continue" message; adding
-        # one would just be extra text the model has to read past.
-        if response.stop_reason == "pause_turn":
-            messages.append({"role": "assistant", "content": response.content})
-            continue
-
-        # unexpected stop_reason (max_tokens, refusal, ...)
-        print(f"[loop] breaking on unexpected stop_reason={response.stop_reason!r}")
+        # unexpected finish_reason (length, content_filter, ...)
+        print(f"[loop] breaking on unexpected finish_reason={choice.finish_reason!r}")
         break
 
     print("[loop] exited loop with no end_turn - returning empty speech")

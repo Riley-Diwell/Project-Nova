@@ -83,7 +83,7 @@ from app.store.persona.clusters import (
     InMemoryClusterStore,
     SupabaseClusterStore,
 )
-from app.store.persona.judge import ClaudeJudge, Judge, JudgeUnavailable, NullJudge
+from app.store.persona.judge import ClaudeJudge, Judge, JudgeUnavailable, ModelJudge, NullJudge
 from app.store.persona.models import (
     Fact,
     Match,
@@ -135,6 +135,7 @@ __all__ = [
     "set_judge",
     "Judge",
     "ClaudeJudge",
+    "ModelJudge",
     "NullJudge",
     "JudgeUnavailable",
     "DuplicateHash",
@@ -302,8 +303,8 @@ def get_judge(voice: bool = False) -> Judge:
         return NullJudge()
     key = "voice" if voice else "batch"
     if key not in _judges:
-        _judges[key] = (ClaudeJudge(timeout_s=2.5, max_retries=0) if voice
-                        else ClaudeJudge(timeout_s=8.0, max_retries=1))
+        _judges[key] = (ModelJudge(timeout_s=2.5, max_retries=0) if voice
+                        else ModelJudge(timeout_s=8.0, max_retries=1))
     return _judges[key]
 
 

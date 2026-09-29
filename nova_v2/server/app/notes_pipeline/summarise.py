@@ -6,12 +6,11 @@ WHEN
     redone when the user presses Re-summarise (force=True).
 
 HOW
-One Claude call with structured outputs (client.messages.parse with
-NoteSummary as the output format), so the reply is guaranteed to match the
-schema the app renders - no fence-stripping, no half-parsed JSON. An hour of
-lecture is ~12-15k tokens, which fits in one call with room to spare, so there
-is no map-reduce. Claude does not take audio: speech-to-text always happened
-on the phone first.
+One model call with structured output (core/llm.py parse(), NoteSummary as
+the schema), so the reply is validated against what the app renders before it
+is saved. An hour of lecture is ~12-15k tokens, which fits in one call, so
+there is no map-reduce. The model does not take audio: speech-to-text always
+happened on the phone first.
 
 The transcript is untrusted input - it is whatever was said in the room - so
 it goes between delimiters with an instruction to treat it as content, and
@@ -29,11 +28,12 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+from app.core import llm
 from app.store.notes import Note, NoteSummary
 
-# One-line switch, per the plan: try claude-sonnet-5 if long-lecture quality
-# is weak.
-MODEL = os.environ.get("NOTES_SUMMARY_MODEL", "claude-haiku-4-5").strip() or "claude-haiku-4-5"
+# A different model for summaries, if the server hosts one; otherwise the
+# same model as everything else.
+MODEL = os.environ.get("NOTES_SUMMARY_MODEL", "").strip() or llm.MODEL
 
 SUMMARY_MIN_WORDS = 150
 
@@ -83,34 +83,25 @@ def should_summarise(note: Note) -> bool:
 
 
 class Summariser:
-    """Claude-backed summariser. `client` is injectable so tests (and
-    NOVA_MOCK_LLM runs) never touch the network."""
+    """Model-backed summariser. `client` (an OpenAI-compatible client) is
+    injectable so tests never touch the network."""
 
     def __init__(self, client: Any = None, model: str = MODEL) -> None:
         self._client = client
         self._model = model
 
     def summarise(self, note: Note) -> NoteSummary:
-        client = self._client or _default_client()
         try:
-            response = client.messages.parse(
-                model=self._model,
-                max_tokens=MAX_OUTPUT_TOKENS,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": render_for_model(note)}],
-                output_format=NoteSummary,
+            # One attempt inside the request budget; a failure is retried by
+            # the user (Re-summarise) or the retry endpoint, not by stacking
+            # client retries past the phone's read timeout.
+            return llm.parse(
+                SYSTEM_PROMPT, render_for_model(note), NoteSummary,
+                max_tokens=MAX_OUTPUT_TOKENS, timeout=SUMMARY_TIMEOUT_S,
+                max_retries=0, llm=self._client, model=self._model,
             )
         except Exception as e:
             raise SummaryFailed(f"summary call failed: {e}") from e
-
-        if getattr(response, "stop_reason", None) == "refusal":
-            raise SummaryFailed("summary refused")
-        if getattr(response, "stop_reason", None) == "max_tokens":
-            raise SummaryFailed("summary cut off at max_tokens")
-        summary = getattr(response, "parsed_output", None)
-        if not isinstance(summary, NoteSummary):
-            raise SummaryFailed("summary did not parse")
-        return summary
 
 
 class MockSummariser:
@@ -126,15 +117,6 @@ class MockSummariser:
             tldr=f"[mock] {first}.",
             key_points=[s + "." for s in sentences[1:4]],
         )
-
-
-def _default_client() -> Any:
-    from anthropic import Anthropic
-
-    # One attempt inside the request budget; a failure is retried by the user
-    # (Re-summarise) or the retry endpoint, not by stacking SDK retries past
-    # the phone's read timeout.
-    return Anthropic(timeout=SUMMARY_TIMEOUT_S, max_retries=0)
 
 
 def render_for_model(note: Note) -> str:
