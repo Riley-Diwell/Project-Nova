@@ -46,8 +46,17 @@ DEFAULT_MIN_SIMILARITY = 0.65
 # hairball that hides the structure it was meant to show.
 DEFAULT_MAX_LINKS = 4
 
+# A fact that is also about another topic is linked to that topic's hub too
+# ("Likes watermelon before bed" is Food & drink, and close to Sleep). Measured
+# on a real Persona: genuine crossovers score 0.66-0.69 against the other
+# topic's centre, the rest 0.55-0.63 - so this sits in the gap. At most this
+# many per fact, strongest first.
+TOPIC_LINK_MIN = 0.65
+TOPIC_LINKS_PER_FACT = 2
+
 NodeKind = Literal["fact", "category", "cluster"]
-EdgeKind = Literal["category", "similar"]
+# "topic" links a fact to a topic it is also about, beyond its own (clusters).
+EdgeKind = Literal["category", "similar", "topic"]
 
 
 class GraphNode(BaseModel):
@@ -92,6 +101,7 @@ class KnowledgeGraph(BaseModel):
             "clusters": sum(1 for n in self.nodes if n.kind == "cluster"),
             "category_links": sum(1 for e in self.edges if e.kind == "category"),
             "similar_links": sum(1 for e in self.edges if e.kind == "similar"),
+            "topic_links": sum(1 for e in self.edges if e.kind == "topic"),
         }
 
 
@@ -147,7 +157,45 @@ def build_graph(
         )
 
     edges.extend(_similarity_edges(facts, vectors, min_similarity, max_links))
+    if clusters is not None:
+        edges.extend(_topic_edges(facts, vectors, membership))
     return KnowledgeGraph(nodes=nodes, edges=edges)
+
+
+def _topic_edges(
+    facts: list[Fact],
+    vectors: dict[str, list[float]],
+    membership: dict[str, str],
+) -> list[GraphEdge]:
+    """A fact's links to the other topics it is close to: its cosine to each
+    topic's centre - the mean of the facts filed there, measured here so it is
+    never stale. A fact is compared only with topics it isn't in, so a topic's
+    own members never pull its centre towards themselves."""
+    members: dict[str, list[str]] = {}
+    for fact_id, cluster_id in membership.items():
+        if fact_id in vectors:
+            members.setdefault(cluster_id, []).append(fact_id)
+    centres: dict[str, list[float]] = {}
+    for cluster_id, ids in members.items():
+        mean = [sum(col) / len(ids) for col in zip(*(vectors[i] for i in ids))]
+        norm = sum(x * x for x in mean) ** 0.5 or 1.0
+        centres[cluster_id] = [x / norm for x in mean]
+
+    edges: list[GraphEdge] = []
+    for fact in facts:
+        vec = vectors.get(fact.id or "")
+        if vec is None:
+            continue
+        own = membership.get(fact.id)
+        close = sorted(
+            ((_cosine(vec, centre), cluster_id) for cluster_id, centre in centres.items() if cluster_id != own),
+            reverse=True,
+        )
+        for score, cluster_id in close[:TOPIC_LINKS_PER_FACT]:
+            if score >= TOPIC_LINK_MIN:
+                edges.append(GraphEdge(source=fact.id, target=f"cluster:{cluster_id}", kind="topic",
+                                       weight=round(score, 3)))
+    return edges
 
 
 def _category_chain(

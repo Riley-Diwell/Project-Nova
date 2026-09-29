@@ -308,7 +308,7 @@ fun KnowledgeMapScreen(onOpenNote: (String) -> Unit = {}) {
                             groups = groups,
                             layout = layout,
                             camera = cam ?: Camera(),
-                            lod = lod ?: Lod.GROUPS,
+                            lod = lod ?: Lod.OVERVIEW,
                             selectedId = selected?.id,
                             highlight = result,
                             newlyLearned = knowledge.newlyLearned,
@@ -316,7 +316,7 @@ fun KnowledgeMapScreen(onOpenNote: (String) -> Unit = {}) {
                             onGesture = { flight?.cancel() },
                             onViewport = { viewport = it },
                             onTapFact = { selectedId = it },
-                            onTapGroup = { flyToGroup(it, CameraMath.DOTS_AT + 0.15f) },
+                            onTapGroup = { flyToGroup(it, CameraMath.LABELS_AT + 0.2f) },
                             modifier = Modifier.fillMaxSize(),
                         )
                         IconButton(onClick = ::showAll, modifier = Modifier.align(Alignment.TopEnd)) {
@@ -470,8 +470,7 @@ private fun Legend() {
         LegendItem("You told NOVA") { drawCircle(NovaBlue) }
         LegendItem("NOVA worked out") { drawCircle(NovaDerived) }
         LegendItem("Related") {
-            drawLine(NovaAccentLight, Offset(0f, center.y), Offset(size.width * 0.4f, center.y), 2.dp.toPx())
-            drawLine(NovaAccentLight, Offset(size.width * 0.6f, center.y), Offset(size.width, center.y), 2.dp.toPx())
+            drawLine(NovaAccentLight, Offset(0f, center.y), Offset(size.width, center.y), 1.5.dp.toPx())
         }
     }
 }

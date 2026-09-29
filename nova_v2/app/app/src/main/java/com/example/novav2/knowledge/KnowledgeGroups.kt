@@ -45,6 +45,16 @@ private fun byCluster(facts: List<GraphNode>, clusters: List<GraphNode>): List<M
     return groups + listOfNotNull(recent)
 }
 
+/** What pulls nodes together in the layout: related facts, and facts to the other topics they
+ *  are also about. */
+fun linksOf(graph: KnowledgeGraph): List<Link> = graph.edges.mapNotNull { e ->
+    when {
+        e.isSimilarity -> Link(e.source, e.target, e.weight, Link.Kind.SIMILAR)
+        e.isTopicLink -> Link(e.source, e.target, e.weight, Link.Kind.TOPIC)
+        else -> null
+    }
+}
+
 private fun byCategory(facts: List<GraphNode>): List<MapGroup> =
     facts.groupBy { it.category.take(CATEGORY_DEPTH) }
         .map { (path, members) ->

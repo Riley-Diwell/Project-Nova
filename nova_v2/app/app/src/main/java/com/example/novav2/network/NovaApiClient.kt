@@ -374,8 +374,9 @@ object NovaApiClient {
         val isDerived: Boolean get() = source == "derived"
     }
 
-    /** [kind] is "category" (the declared ontology) or "similar" (discovered by
-     *  vector proximity, with [weight] as the cosine similarity). */
+    /** [kind] is "category" (the declared ontology), "similar" (fact to fact, discovered by
+     *  vector proximity) or "topic" (a fact to a topic it is also about, beyond its own - target
+     *  is the topic's node id). [weight] is the cosine similarity for the last two. */
     data class GraphEdge(
         val source: String,
         val target: String,
@@ -383,6 +384,7 @@ object NovaApiClient {
         val weight: Float,
     ) {
         val isSimilarity: Boolean get() = kind == "similar"
+        val isTopicLink: Boolean get() = kind == "topic"
     }
 
     data class KnowledgeGraph(

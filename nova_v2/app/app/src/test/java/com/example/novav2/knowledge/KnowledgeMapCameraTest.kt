@@ -35,14 +35,14 @@ class KnowledgeMapCameraTest {
 
     @Test
     fun `detail steps up with zoom and doesn't flicker at the thresholds`() {
-        assertEquals(Lod.GROUPS, CameraMath.lodFor(0.3f))
-        assertEquals(Lod.DOTS, CameraMath.lodFor(0.6f))
-        assertEquals(Lod.CARDS, CameraMath.lodFor(1.2f))
+        assertEquals(Lod.OVERVIEW, CameraMath.lodFor(0.3f))
+        assertEquals(Lod.LABELS, CameraMath.lodFor(0.9f))
+        assertEquals(Lod.DETAIL, CameraMath.lodFor(2f))
 
-        // Just under the cards threshold: stays on cards if already there, stays on dots if not.
-        val justUnder = CameraMath.CARDS_AT - 0.02f
-        assertEquals(Lod.CARDS, CameraMath.lodFor(justUnder, Lod.CARDS))
-        assertEquals(Lod.DOTS, CameraMath.lodFor(CameraMath.CARDS_AT + 0.02f, Lod.DOTS))
+        // Just under the detail threshold: stays on detail if already there, on labels if not.
+        val justUnder = CameraMath.DETAIL_AT - 0.02f
+        assertEquals(Lod.DETAIL, CameraMath.lodFor(justUnder, Lod.DETAIL))
+        assertEquals(Lod.LABELS, CameraMath.lodFor(CameraMath.DETAIL_AT + 0.02f, Lod.LABELS))
     }
 
     @Test

@@ -7,6 +7,7 @@ import com.example.novav2.auth.SessionState
 import com.example.novav2.network.NovaApiClient
 import com.example.novav2.network.NovaApiClient.KnowledgeGraph
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -49,9 +50,10 @@ import java.io.IOException
  * different user is signed in.
  */
 object KnowledgeRepository {
-    // How similar two facts must be before the map draws a discovered link between them. Fixed
-    // rather than user-tunable: lower values drew so many links the map turned to noise.
-    private const val LINK_DENSITY = 0.9f
+    // The weakest similarity the server sends. Low, because the layout uses every link to set how
+    // far apart facts sit; the canvas only draws the strong ones as lines (DRAWN_LINK_MIN), so
+    // the map doesn't turn to noise.
+    private const val LINK_DENSITY = 0.55f
 
     data class KnowledgeState(
         /** Null until the first graph arrives for this user. */
@@ -80,6 +82,7 @@ object KnowledgeRepository {
     private var base: KnowledgeGraph? = null
     private var etag: String? = null
     private var layout: MapLayout = MapLayout()
+    private var layoutJob: Job? = null
     private val forgetting = mutableSetOf<String>()
     private val relabelled = mutableMapOf<String, String>()
     private var again = false
@@ -248,6 +251,7 @@ object KnowledgeRepository {
         owner = null
         base = null
         etag = null
+        layoutJob?.cancel()
         layout = MapLayout()
         camera = null
         forgetting.clear()
@@ -259,22 +263,27 @@ object KnowledgeRepository {
         _state.value.graph?.nodes?.filter { it.isFact }?.mapTo(HashSet()) { it.id }.orEmpty()
 
     /**
-     * Shows [base] with the in-flight changes over it, grouped and laid out. The layout is
-     * extended from the last one rather than redone - see [layoutOf] - and is cheap enough to
-     * run here on the main thread.
+     * Shows [base] with the in-flight changes over it, grouped at once and laid out a moment
+     * later. The layout is a force simulation (see [layoutOf]) - too slow for the main thread on
+     * a big map - so it runs in the background from the last layout, and only the newest one is
+     * kept. Until it lands, the map shows the previous positions; anything new appears with it.
      */
     private fun publish() {
         val shown = base?.without(forgetting)?.relabelled(relabelled)
         val groups = shown?.let(::groupsOf).orEmpty()
-        layout = layoutOf(groups, layout)
         val present = shown?.nodes?.mapTo(HashSet()) { it.id }.orEmpty()
         _state.update {
-            it.copy(
-                graph = shown,
-                groups = groups,
-                layout = layout,
-                newlyLearned = it.newlyLearned intersect present,
-            )
+            it.copy(graph = shown, groups = groups, newlyLearned = it.newlyLearned intersect present)
+        }
+        val links = shown?.let(::linksOf).orEmpty()
+        val from = layout
+        layoutJob?.cancel()
+        layoutJob = AuthRepository.appScope.launch {
+            val next = withContext(Dispatchers.Default) { layoutOf(groups, links, from) }
+            if (_state.value.graph !== shown) return@launch // a newer publish is on its way
+            layout = next
+            _state.update { it.copy(layout = next) }
+            save()
         }
     }
 
@@ -336,28 +345,35 @@ internal data class SavedGraph(
 }
 
 internal fun MapLayout.toJson(): JSONObject = JSONObject()
-    .put("groups", JSONArray(groups.map { (id, g) ->
-        JSONObject().put("id", id).put("x", g.x.toDouble()).put("y", g.y.toDouble())
-            .put("cols", g.cols).put("reserved", g.reservedRows)
-    }))
-    .put("slots", JSONArray(slots.map { (id, s) ->
-        JSONObject().put("id", id).put("group", s.group).put("index", s.index)
-    }))
+    .put("hubs", positionsJson(hubs))
+    .put("facts", positionsJson(facts))
+    .put("members", JSONArray(members.map { (hub, ids) -> JSONObject().put("hub", hub).put("facts", JSONArray(ids)) }))
 
-/** Null if it doesn't read back cleanly: better a fresh layout than a half-remembered one. */
+private fun positionsJson(points: Map<String, Vec>) = JSONArray(points.map { (id, p) ->
+    JSONObject().put("id", id).put("x", p.x.toDouble()).put("y", p.y.toDouble())
+})
+
+private fun positionsFrom(array: JSONArray): Map<String, Vec> = LinkedHashMap<String, Vec>().apply {
+    for (i in 0 until array.length()) {
+        val p = array.getJSONObject(i)
+        put(p.getString("id"), Vec(p.getDouble("x").toFloat(), p.getDouble("y").toFloat()))
+    }
+}
+
+/**
+ * Null if it doesn't read back cleanly: better a fresh layout than a half-remembered one. A
+ * layout saved by an older version (grid cells or ring slots, no "hubs") lands here too, and is
+ * replaced by a fresh one - once.
+ */
 internal fun layoutFromJson(json: JSONObject): MapLayout? = try {
-    val groups = json.getJSONArray("groups")
-    val slots = json.getJSONArray("slots")
+    val members = json.getJSONArray("members")
     MapLayout(
-        groups = (0 until groups.length()).associate { i ->
-            val g = groups.getJSONObject(i)
-            g.getString("id") to GroupSlot(
-                g.getDouble("x").toFloat(), g.getDouble("y").toFloat(), g.getInt("cols"), g.getInt("reserved"),
-            )
-        },
-        slots = (0 until slots.length()).associate { i ->
-            val s = slots.getJSONObject(i)
-            s.getString("id") to FactSlot(s.getString("group"), s.getInt("index"))
+        hubs = positionsFrom(json.getJSONArray("hubs")),
+        facts = positionsFrom(json.getJSONArray("facts")),
+        members = (0 until members.length()).associate { i ->
+            val m = members.getJSONObject(i)
+            val ids = m.getJSONArray("facts")
+            m.getString("hub") to (0 until ids.length()).map(ids::getString)
         },
     )
 } catch (e: JSONException) {

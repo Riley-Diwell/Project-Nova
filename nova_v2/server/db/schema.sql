@@ -394,7 +394,7 @@ create table if not exists public.persona_cluster (
     user_id       uuid        not null references auth.users (id) on delete cascade,
     title         text        not null,
     title_source  text        not null default 'pending'
-                  check (title_source in ('pending', 'fallback', 'model', 'user')),
+                  check (title_source in ('pending', 'fallback', 'model', 'user', 'topic')),
     titled_size   int         not null default 0,     -- size when last named
     centroid      vector(1024) not null,
     size          int         not null default 0,
@@ -410,6 +410,14 @@ create table if not exists public.persona_cluster_member (
     assigned_at timestamptz not null default now()
 );
 create index if not exists persona_cluster_member_user_idx on public.persona_cluster_member (user_id);
+-- Whether the model has checked this fact's topic (clusters.py). A fact placed
+-- by keyword guess alone is re-checked once, then left where it is.
+alter table public.persona_cluster_member add column if not exists confirmed boolean not null default false;
+-- Topics (a fixed list, clusters.py) replaced model-named groups; an existing
+-- table needs 'topic' added to what title_source may hold.
+alter table public.persona_cluster drop constraint if exists persona_cluster_title_source_check;
+alter table public.persona_cluster add constraint persona_cluster_title_source_check
+    check (title_source in ('pending', 'fallback', 'model', 'user', 'topic'));
 
 create table if not exists public.consolidation_state (
     user_id          uuid        primary key references auth.users (id) on delete cascade,

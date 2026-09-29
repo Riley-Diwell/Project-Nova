@@ -13,17 +13,17 @@ data class Camera(val zoom: Float = 1f, val panX: Float = 0f, val panY: Float = 
 
 /**
  * How much detail the map draws, by zoom:
- *  - [GROUPS]: zoomed out - each group is a block with its heading and a count.
- *  - [DOTS]: facts as dots with a one-line label, the heading above each group.
- *  - [CARDS]: close up - each fact as a small card: what it says and where it came from.
+ *  - [OVERVIEW]: zoomed out - topic hubs with their names, facts as bare dots on their spokes.
+ *  - [LABELS]: fact labels fade in, one line each, and the links between related facts appear.
+ *  - [DETAIL]: close up - each fact's label gets two lines.
  */
-enum class Lod { GROUPS, DOTS, CARDS }
+enum class Lod { OVERVIEW, LABELS, DETAIL }
 
 object CameraMath {
     const val MIN_ZOOM = 0.15f
-    const val MAX_ZOOM = 3f
-    const val DOTS_AT = 0.45f
-    const val CARDS_AT = 0.9f
+    const val MAX_ZOOM = 4f
+    const val LABELS_AT = 0.6f
+    const val DETAIL_AT = 1.4f
     /** Crossing a threshold takes this much more zoom than crossing back, so it doesn't flicker. */
     const val HYSTERESIS = 0.05f
 
@@ -66,12 +66,12 @@ object CameraMath {
             true -> zoom >= threshold - HYSTERESIS
             false -> zoom >= threshold + HYSTERESIS
         }
-        val cards = above(CARDS_AT, previous?.let { it == Lod.CARDS })
-        val dots = above(DOTS_AT, previous?.let { it != Lod.GROUPS })
+        val detail = above(DETAIL_AT, previous?.let { it == Lod.DETAIL })
+        val labels = above(LABELS_AT, previous?.let { it != Lod.OVERVIEW })
         return when {
-            cards -> Lod.CARDS
-            dots -> Lod.DOTS
-            else -> Lod.GROUPS
+            detail -> Lod.DETAIL
+            labels -> Lod.LABELS
+            else -> Lod.OVERVIEW
         }
     }
 
