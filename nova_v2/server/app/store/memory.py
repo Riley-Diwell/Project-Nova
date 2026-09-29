@@ -161,6 +161,53 @@ def all(user_id: UserId) -> list[dict[str, Any]]:
             return rows
 
 
+def since(
+    user_id: UserId,
+    after: str | None,
+    after_ids: set[str],
+    until: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """
+    Up to `limit` of this user's Episodes from `after` up to `until`, oldest first.
+
+    What incremental consolidation reads instead of all(): only what arrived
+    since its watermark. `after` is inclusive - several episodes can share a
+    timestamp, and one of them may not have been read yet - so the ids at
+    exactly `after` that were already read are passed in `after_ids` and
+    dropped here. `after=None` starts from the beginning of the log.
+    """
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while len(rows) < limit:
+        query = _mine(user_id).lte(_ORDER_COLUMN, until)
+        if after:
+            query = query.gte(_ORDER_COLUMN, after)
+        page = (
+            query.order(_ORDER_COLUMN).order("id")
+            .range(offset, offset + _PAGE_SIZE - 1)
+            .execute()
+            .data
+        )
+        offset += len(page)
+        rows.extend(r for r in page if not (r.get(_ORDER_COLUMN) == after and str(r.get("id")) in after_ids))
+        if len(page) < _PAGE_SIZE:
+            break
+    return rows[:limit]
+
+
+def count_since(user_id: UserId, after: str | None, until: str, cap: int) -> int:
+    """
+    How many of this user's Episodes arrived after `after` (exclusive) and by
+    `until`, counting no higher than `cap`. The cheap question behind "is
+    consolidation due?" - it never needs the exact number past the threshold.
+    """
+    query = get_client().table(_TABLE).select("id").eq(_USER_COLUMN, str(user_id)).lte(_ORDER_COLUMN, until)
+    if after:
+        query = query.gt(_ORDER_COLUMN, after)
+    return len(query.limit(cap).execute().data)
+
+
 def close(
     user_id: UserId,
     episode_id: str,

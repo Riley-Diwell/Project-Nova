@@ -92,6 +92,7 @@ class PersonaStore(Protocol):
     def get(self, user_id: UserId, fact_id: str) -> Fact: ...
     def all_facts(self, user_id: UserId) -> list[Fact]: ...
     def vectors(self, user_id: UserId) -> dict[str, list[float]]: ...
+    def vector(self, user_id: UserId, fact_id: str) -> Optional[list[float]]: ...
     def versions(self, user_id: UserId) -> dict[str, str]: ...
     def forgotten(self, user_id: UserId) -> set[str]: ...
     def forget(self, user_id: UserId, key: str) -> None: ...
@@ -401,6 +402,14 @@ class SupabasePersonaStore:
             if (vec := _as_vector(r.get("embedding")))
         }
 
+    def vector(self, user_id: UserId, fact_id: str) -> Optional[list[float]]:
+        """One stored embedding - what a fact is placed in its cluster by."""
+        res = (
+            self._db.table(TABLE).select("embedding")
+            .eq("id", fact_id).eq("user_id", str(user_id)).execute()
+        )
+        return (_as_vector(res.data[0].get("embedding")) or None) if res.data else None
+
 
     def versions(self, user_id: UserId) -> dict[str, str]:
         """Every one of this user's fact ids with when it last changed - and nothing else.
@@ -608,6 +617,9 @@ class InMemoryPersonaStore:
 
     def vectors(self, user_id: UserId) -> dict[str, list[float]]:
         return {fid: self._vecs[fid] for fid in self._mine(user_id)}
+
+    def vector(self, user_id: UserId, fact_id: str) -> Optional[list[float]]:
+        return self._vecs.get(fact_id) if fact_id in self._mine(user_id) else None
 
     def versions(self, user_id: UserId) -> dict[str, str]:
         return {fid: str(f.updated_at) for fid, f in self._mine(user_id).items()}

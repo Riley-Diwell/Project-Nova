@@ -125,8 +125,30 @@ def remember(
     with store.lock(user_id) as held:
         if not held:
             print(f"[reconcile] Persona busy - writing {fact.text!r} unreconciled")
-            return _write_unreconciled(store, user_id, fact, None)
-        return _reconcile(store, user_id, fact, judge, candidate_limit)
+            result = _write_unreconciled(store, user_id, fact, None)
+        else:
+            result = _reconcile(store, user_id, fact, judge, candidate_limit)
+        _place_in_group(store, user_id, result, fact.text)
+        return result
+
+
+def _place_in_group(store: PersonaStore, user_id: UserId, result: RememberResult, text: str) -> None:
+    """Put a written belief in its meaning group (clusters.py) straight away, so
+    the map shows it under a heading. Best-effort: anything missed is grouped
+    on the next consolidation pass. A merge leaves the kept belief's group as it
+    was; a rejection wrote nothing."""
+    if result.action in (RememberAction.MERGED, RememberAction.REJECTED) or not result.fact_id:
+        return
+    from app.store import persona
+    from app.store.persona.clusters import place
+
+    groups = persona.get_cluster_store()
+    if groups is None:
+        return
+    try:
+        place(groups, store, user_id, result.fact_id, text)
+    except Exception as e:
+        persona.clusters_failed(e)
 
 
 def reconcile_all(

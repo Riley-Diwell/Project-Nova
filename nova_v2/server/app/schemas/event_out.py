@@ -37,6 +37,12 @@ class EventOut(BaseModel):
     # these fields - the model's speech is never used for it (see
     # AmbientCheckRunner.kt).
     scheduled_departure: dict[str, Any] | None = None
+    # True when enough has happened since NOVA last learned from this user's
+    # activity (store/consolidation.due). The phone then asks for the pass in
+    # the background (POST /persona/consolidate?if_due=true) - a request it
+    # makes keeps its CPU on Cloud Run, where work the server started after
+    # replying may never finish.
+    consolidation_due: bool = False
 
 
 class NeedMoreOut(BaseModel):

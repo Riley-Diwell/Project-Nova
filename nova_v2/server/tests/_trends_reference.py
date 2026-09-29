@@ -23,21 +23,10 @@ THE ACTION SHAPES
 from all of them are still in the log. None of that lives here: Action.from_episode
 is the one place that knows about it (tools/action.py), and this module asks it
 for Actions.
-
-COUNTING INCREMENTALLY
-A trend's support is a count over the user's whole history, but the whole
-history need not be re-read to know it. Rows are first boiled down to a Tally
-per (signal, normalised value) - everything a Candidate is later built from -
-and tallies of two spans of the log merge into exactly the tally of both
-(merge_tallies). So consolidation keeps the tallies between runs and only
-reads the episodes since the last one. The substring merge is applied when
-candidates are built, over the tallies, which is why it gives the same answer
-as counting everything at once. find_candidates is the full recount, built on
-the same two steps.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field as dc_field
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Iterator
 
@@ -66,128 +55,25 @@ IGNORED_VALUES = {"", "unknown", "none", "null", "n/a"}
 # pass to see. Enough to show the range, few enough to stay cheap in the prompt.
 MAX_EXEMPLARS = 4
 
-# Bump whenever what a Tally holds, or what counts (COUNTED_*, IGNORED_VALUES,
-# _norm), changes: stored tallies from an older version are then rebuilt from
-# the whole log rather than merged into.
-TALLY_VERSION = 1
-
-TallyKey = tuple[str, str]
-
-
-@dataclass
-class Tally:
-    """One (signal, normalised value) boiled down from the rows that carry it -
-    everything _candidate needs, in row order.
-
-    Each row counts once per time it carries the pair (a turn with two calls to
-    the same destination counts twice, as it always has). `exemplars` keeps a
-    few more than MAX_EXEMPLARS so that, after the substring merge, the first
-    MAX_EXEMPLARS distinct phrasings are still the ones a full recount picks.
-    """
-
-    signal: str
-    value: str
-    support: int = 0
-    times: list[str] = dc_field(default_factory=list)       # local wall-clock ISO, row order
-    episode_ids: list[str] = dc_field(default_factory=list)
-    exemplars: list[str] = dc_field(default_factory=list)
-    originals: list[str] = dc_field(default_factory=list)   # raw spellings seen, first-seen order
-
-    def to_json(self) -> dict[str, Any]:
-        return {"signal": self.signal, "value": self.value, "support": self.support,
-                "times": self.times, "episode_ids": self.episode_ids,
-                "exemplars": self.exemplars, "originals": self.originals}
-
-    @classmethod
-    def from_json(cls, d: dict[str, Any]) -> "Tally":
-        return cls(signal=d["signal"], value=d["value"], support=int(d.get("support", 0)),
-                   times=list(d.get("times") or []), episode_ids=list(d.get("episode_ids") or []),
-                   exemplars=list(d.get("exemplars") or []), originals=list(d.get("originals") or []))
-
-
-_KEPT_EXEMPLARS = MAX_EXEMPLARS * 2
-
-
-def tally_rows(rows: list[dict[str, Any]]) -> dict[TallyKey, Tally]:
-    """Boil `rows` (oldest first) down to one Tally per (signal, normalised value)."""
-    tallies: dict[TallyKey, Tally] = {}
-    for row in rows:
-        for signal, value in _signals_of(row):
-            key = (signal, _norm(value))
-            t = tallies.get(key)
-            if t is None:
-                t = tallies[key] = Tally(signal, key[1])
-            _add_row(t, row)
-    return tallies
-
-
-def _add_row(t: Tally, row: dict[str, Any]) -> None:
-    t.support += 1
-    when = _when(row)
-    if when is not None:
-        t.times.append(when.isoformat())
-    if row.get("id"):
-        t.episode_ids.append(str(row["id"]))
-    text = (row.get("event") or {}).get("text")
-    if isinstance(text, str) and text and text not in t.exemplars and len(t.exemplars) < _KEPT_EXEMPLARS:
-        t.exemplars.append(text)
-    for raw in _originals_of(row, t.signal):
-        if raw not in t.originals:
-            t.originals.append(raw)
-
-
-def merge_tallies(old: dict[TallyKey, Tally], new: dict[TallyKey, Tally]) -> dict[TallyKey, Tally]:
-    """The tallies of an earlier span of the log and the span straight after it,
-    as one - the same as tallying both spans' rows together."""
-    merged = {k: Tally.from_json(t.to_json()) for k, t in old.items()}
-    for key, t in new.items():
-        into = merged.get(key)
-        if into is None:
-            merged[key] = Tally.from_json(t.to_json())
-            continue
-        into.support += t.support
-        into.times.extend(t.times)
-        into.episode_ids.extend(t.episode_ids)
-        for text in t.exemplars:
-            if text not in into.exemplars and len(into.exemplars) < _KEPT_EXEMPLARS:
-                into.exemplars.append(text)
-        for raw in t.originals:
-            if raw not in into.originals:
-                into.originals.append(raw)
-    return merged
-
-
-def tallies_to_json(tallies: dict[TallyKey, Tally]) -> list[dict[str, Any]]:
-    return [t.to_json() for t in tallies.values()]
-
-
-def tallies_from_json(items: list[dict[str, Any]] | None) -> dict[TallyKey, Tally]:
-    tallies: dict[TallyKey, Tally] = {}
-    for d in items or []:
-        t = Tally.from_json(d)
-        tallies[(t.signal, t.value)] = t
-    return tallies
-
-
-def candidates_from_tallies(
-    tallies: dict[TallyKey, Tally], min_support: int = MIN_SUPPORT
-) -> list[Candidate]:
-    """Every repetition the tallies hold that clears `min_support`, strongest first."""
-    groups = _merge_contained({key: [t] for key, t in tallies.items()})
-    candidates = [
-        _candidate(signal, key, parts)
-        for (signal, key), parts in groups.items()
-        if sum(p.support for p in parts) >= min_support
-    ]
-    candidates.sort(key=lambda c: (c.support, c.span_days), reverse=True)
-    return candidates
-
 
 def find_candidates(
     rows: list[dict[str, Any]], min_support: int = MIN_SUPPORT
 ) -> list[Candidate]:
     """Every repetition in `rows` that clears `min_support`, strongest first."""
-    return candidates_from_tallies(tally_rows(rows), min_support)
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        for signal, value in _signals_of(row):
+            groups[(signal, _norm(value))].append(row)
+
+    groups = _merge_contained(groups)
+
+    candidates = [
+        _candidate(signal, key, rows_in)
+        for (signal, key), rows_in in groups.items()
+        if len(rows_in) >= min_support
+    ]
+    candidates.sort(key=lambda c: (c.support, c.span_days), reverse=True)
+    return candidates
 
 
 # --- signal extraction -------------------------------------------------------
@@ -230,7 +116,9 @@ def _norm(value: str) -> str:
     return " ".join(str(value).lower().split())
 
 
-def _merge_contained(groups: dict[TallyKey, list[Tally]]) -> dict[TallyKey, list[Tally]]:
+def _merge_contained(
+    groups: dict[tuple[str, str], list[dict[str, Any]]],
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
     """Fold a value into a longer one that contains it, within the same signal.
 
     "Brooklyn Boy Bagels" and "Brooklyn Boy Bagels, Fyshwick" are one place
@@ -239,75 +127,69 @@ def _merge_contained(groups: dict[TallyKey, list[Tally]]) -> dict[TallyKey, list
     names for one place that share no substring ("ANU" / "the university") stay
     separate, and no amount of counting will join them.
     """
-    merged: dict[TallyKey, list[Tally]] = {}
-    for (signal, value), parts in sorted(groups.items(), key=lambda kv: -len(kv[0][1])):
+    merged: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for (signal, value), rows in sorted(groups.items(), key=lambda kv: -len(kv[0][1])):
         target = next(
             (k for k in merged if k[0] == signal and value in k[1]),
             None,
         )
         if target is not None:
-            merged[target].extend(parts)
+            merged[target].extend(rows)
         else:
-            merged[(signal, value)] = list(parts)
+            merged[(signal, value)] = list(rows)
     return merged
 
 
 # --- candidate assembly ------------------------------------------------------
 
-def _candidate(signal: str, value: str, parts: list[Tally]) -> Candidate:
-    times = sorted(datetime.fromisoformat(t) for p in parts for t in p.times)
+def _candidate(signal: str, value: str, rows: list[dict[str, Any]]) -> Candidate:
+    times = sorted(t for t in (_when(r) for r in rows) if t is not None)
     span_days = round((times[-1] - times[0]).total_seconds() / 86400, 2) if len(times) > 1 else 0.0
 
     return Candidate(
         signal=signal,
-        value=_display_value(value, parts),
-        support=sum(p.support for p in parts),
+        value=_display_value(value, rows, signal),
+        support=len(rows),
         span_days=span_days,
         first_seen=times[0].isoformat() if times else None,
         last_seen=times[-1].isoformat() if times else None,
-        episode_ids=[e for p in parts for e in p.episode_ids],
-        exemplars=_exemplars(parts),
+        episode_ids=[str(r["id"]) for r in rows if r.get("id")],
+        exemplars=_exemplars(rows),
         hours=[t.hour for t in times],
     )
 
 
-def _originals_of(row: dict[str, Any], signal: str) -> Iterator[str]:
-    """Every raw spelling of `signal`'s field this row holds - its tool calls'
-    and its event's - for picking the display value later."""
-    field_name = signal.split(":", 1)[-1]
-    for call in _calls_of(row):
-        raw = (call.get("params") or {}).get(field_name)
-        if isinstance(raw, str):
-            yield raw
-    raw = (row.get("event") or {}).get(field_name)
-    if isinstance(raw, str):
-        yield raw
-
-
-def _display_value(norm_value: str, parts: list[Tally]) -> str:
+def _display_value(norm_value: str, rows: list[dict[str, Any]], signal: str) -> str:
     """The recurring value as the user's data actually spells it.
 
     Groups are keyed on a normalised string, and _merge_contained may have
     folded several spellings together, so pick the longest original that this
     key covers - "Brooklyn Boy Bagels, Fyshwick" over "brooklyn boy bagels".
     """
+    field = signal.split(":", 1)[-1]
+    originals: list[str] = []
+    for row in rows:
+        for call in _calls_of(row):
+            originals.append((call.get("params") or {}).get(field))
+        originals.append((row.get("event") or {}).get(field))
+
     covered = [
-        raw for p in parts for raw in p.originals
-        if norm_value.startswith(_norm(raw))
+        raw for raw in originals
+        if isinstance(raw, str) and norm_value.startswith(_norm(raw))
     ]
     return max(covered, key=len) if covered else norm_value
 
 
-def _exemplars(parts: list[Tally]) -> list[str]:
+def _exemplars(rows: list[dict[str, Any]]) -> list[str]:
     """A few of the user's own phrasings, so the phrasing pass can hear how
     they talk about this rather than only seeing the resolved entity."""
     seen: list[str] = []
-    for p in parts:
-        for text in p.exemplars:
-            if text not in seen:
-                seen.append(text)
-            if len(seen) >= MAX_EXEMPLARS:
-                return seen
+    for row in rows:
+        text = (row.get("event") or {}).get("text")
+        if isinstance(text, str) and text and text not in seen:
+            seen.append(text)
+        if len(seen) >= MAX_EXEMPLARS:
+            break
     return seen
 
 

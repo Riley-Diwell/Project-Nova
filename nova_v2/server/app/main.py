@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -264,7 +264,20 @@ def receive_event(input_wrapper: InputWrapper, user: AuthUser = Depends(current_
     intent = intent_surface.run(user.id, input_wrapper.user_state, input_wrapper.event, episode_id)
     if isinstance(intent, IntentResult):
         _close_episode(user.id, intent)
-    return _to_response(intent)
+    return _with_consolidation_hint(user.id, _to_response(intent))
+
+
+def _with_consolidation_hint(user_id: UUID, response: EventResponse) -> EventResponse:
+    """Tell the phone when it's time to learn from recent activity. Memoised
+    and non-fatal: a turn never waits on, or fails because of, this."""
+    if isinstance(response, EventOut):
+        try:
+            from app.store import consolidation
+
+            response.consolidation_due = consolidation.due(user_id).due
+        except Exception as e:
+            print(f"[consolidation] due check skipped: {e}")
+    return response
 
 
 # --- the turn's Outcome (Sections 5.5, 5.7) ----------------------------------
@@ -341,6 +354,7 @@ def get_persona_graph(
     response: Response,
     min_similarity: float = persona.DEFAULT_MIN_SIMILARITY,
     max_links: int = persona.DEFAULT_MAX_LINKS,
+    clusters: bool = False,
     if_none_match: str | None = Header(default=None),
     user: AuthUser = Depends(current_user),
 ) -> Any:
@@ -353,17 +367,89 @@ def get_persona_graph(
     Carries an ETag. The phone keeps the last graph and sends its tag back as
     If-None-Match; if nothing has changed it gets a bodyless 304, and the server
     never loads the embeddings or links a single pair (persona.graph_etag).
+
+    `clusters=true` groups facts by meaning (persona/clusters.py) for the map's
+    subheadings; where grouping isn't available the graph comes back grouped
+    by category as before, and the phone groups by that.
+
+    Also says whether NOVA is due to learn from recent activity, in
+    X-Nova-Consolidation (due / running / idle) and X-Nova-Last-Consolidated -
+    on a 304 too, since opening the map is one of the moments the phone
+    triggers a pass.
     """
-    etag = persona.graph_etag(user.id, min_similarity=min_similarity, max_links=max_links)
+    view = persona.cluster_view(user.id) if clusters else None
+    etag = persona.graph_etag(user.id, min_similarity=min_similarity, max_links=max_links, clusters=view)
     # private: one person's beliefs, never for a shared cache. no-cache: always ask first.
-    headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache", **_consolidation_headers(user.id)}
     if _etag_matches(if_none_match, etag):
         return Response(status_code=304, headers=headers)
 
-    graph = persona.knowledge_graph(user.id, min_similarity=min_similarity, max_links=max_links)
+    graph = persona.knowledge_graph(user.id, min_similarity=min_similarity, max_links=max_links, clusters=view)
     print(f"[persona] graph {graph.stats()}")
     response.headers.update(headers)
     return {**graph.model_dump(mode="json"), "stats": graph.stats()}
+
+
+def _consolidation_headers(user_id: UUID) -> dict[str, str]:
+    """The map's view of background learning. Empty where it's unavailable -
+    the phone then just doesn't trigger from here."""
+    try:
+        from app.store import consolidation
+
+        check = consolidation.due(user_id)
+    except Exception as e:
+        print(f"[consolidation] due check skipped: {e}")
+        return {}
+    headers = {"X-Nova-Consolidation": check.status}
+    if check.last_run_at:
+        headers["X-Nova-Last-Consolidated"] = check.last_run_at.isoformat()
+    return headers
+
+
+@app.get("/persona/search")
+def search_persona(
+    q: str = Query(min_length=1, max_length=200),
+    limit: int = Query(default=20, ge=1, le=50),
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    """The Knowledge Map's search bar: this user's beliefs by meaning and by
+    keyword (persona.search - era-memory's hybrid ranking), each with its group,
+    plus the group the hits concentrate in, for the map to fly to.
+
+    A hit is kept if it is close in meaning (cosine >= SEARCH_MIN_SIMILARITY) or
+    shares a word with the query at all - "COMP2100" should find its course
+    even though the embedding barely sees it. `match` says which.
+    """
+    matches = persona.search(user.id, persona.PersonaQuery(text=q, limit=limit))
+    view = persona.cluster_view(user.id)
+    membership = view.membership if view else {}
+    hits = [
+        {
+            "fact_id": m.fact.id,
+            "text": m.fact.text,
+            "similarity": round(m.similarity, 3),
+            "lexical": round(m.lexical, 4),
+            "score": m.score,
+            "cluster_id": membership.get(m.fact.id or ""),
+            "match": "meaning" if m.similarity >= SEARCH_MIN_SIMILARITY else "keyword",
+        }
+        for m in matches
+        if m.similarity >= SEARCH_MIN_SIMILARITY or m.lexical > 0
+    ]
+    weight: dict[str, float] = {}
+    for h in hits:
+        if h["cluster_id"]:
+            weight[h["cluster_id"]] = weight.get(h["cluster_id"], 0.0) + h["score"]
+    target = max(weight, key=lambda c: weight[c]) if weight else None
+    print(f"[persona] search {q[:40]!r}: {len(hits)} hit(s), target={target}")
+    return {"hits": hits, "target_cluster": target}
+
+
+# Query-to-statement cosine runs lower than fact-to-fact (see intent_surface's
+# PERSONA_MIN_SIMILARITY, 0.35, for the measurements), so a search takes hits
+# a fair way below the grouping threshold. A starting point - calibrate on real
+# queries. Keyword hits pass regardless.
+SEARCH_MIN_SIMILARITY = 0.5
 
 
 def _etag_matches(if_none_match: str | None, etag: str) -> bool:
@@ -448,19 +534,30 @@ def _is_uuid(value: str) -> bool:
 
 
 @app.post("/persona/consolidate")
-def run_consolidation(preview: bool = False, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
-    """Turn what has happened repeatedly into what is true about the user.
+def run_consolidation(
+    preview: bool = False, if_due: bool = False, user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    """Turn what has happened into what is true about the user.
 
-    Driven from the Knowledge Map rather than a timer, because this is the one
-    moment the map exists to show: Episodes the user can scroll past becoming
-    beliefs NOVA will act on months later. A background job would do the same
-    work invisibly, and the visibility is the product.
+    There is no button for this any more: it happens on its own. /event and the
+    map's graph fetch say when a pass is due, and the phone's background worker
+    calls this with `if_due=true` - which runs an incremental pass over only
+    the episodes since the last one, or does nothing if none is due. The phone
+    makes the call because Cloud Run keeps a request's CPU only while it's
+    open. What was learned still shows: the map's "Learning…" line while it
+    runs, and a "new" marker on what it added.
 
-    `preview=true` returns exactly what a real run would write without writing
-    it - the same code path, so what is shown is what would land.
+    Without `if_due`, a full pass over the whole log (manual use). `preview=true`
+    returns exactly what a full pass would write without writing it.
     """
-    from app.store.consolidation import consolidate, preview_statements
+    from app.store.consolidation import consolidate, preview_statements, run_if_due
     from app.store.consolidation import preview as preview_trends
+
+    if if_due and not preview:
+        run = run_if_due(user.id)
+        print(f"[consolidation] if-due: ran={run.ran} running={run.running} "
+              f"episodes={run.episodes_read}")
+        return run.model_dump(mode="json")
 
     reconciled: list[dict[str, Any]] = []
     if preview:
@@ -573,4 +670,4 @@ def continue_event(input_wrapper: ContinueWrapper, user: AuthUser = Depends(curr
     # other place an episode can close.
     if isinstance(intent, IntentResult):
         _close_episode(user.id, intent)
-    return _to_response(intent)
+    return _with_consolidation_hint(user.id, _to_response(intent))

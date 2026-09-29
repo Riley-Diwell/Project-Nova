@@ -45,11 +45,17 @@ mattering the moment they drive away. Only signals named in trends.py's
 COUNTED_* maps are counted, and that list is the guard - it is an allowlist of
 things whose repetition means something, not a scan for anything that recurs.
 
-USAGE
-    from app.store.consolidation import consolidate, preview
+AUTOMATIC AND INCREMENTAL
+There is no button. Passes run on their own, when due, over only the episodes
+since the last pass - see the bottom of this file and state.py.
 
-    preview(user_id)       # what would be written, no writes
-    consolidate(user_id)   # phrase and upsert into Persona
+USAGE
+    from app.store.consolidation import consolidate, preview, run_if_due
+
+    due(user_id)           # cheap: is a pass due? (asked on every /event)
+    run_if_due(user_id)    # an incremental pass, if due - what the phone triggers
+    preview(user_id)       # what a full pass would write, no writes
+    consolidate(user_id)   # a full pass over the whole log (manual)
 
 WHOSE HISTORY
 One account's at a time. Every entry point
@@ -65,6 +71,8 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional, Union
+
+from pydantic import BaseModel
 from uuid import UUID
 
 from app.store.consolidation.models import (
@@ -79,8 +87,17 @@ from app.store.consolidation.models import (
     StatedFact,
     confidence_for,
 )
+from app.store.consolidation import state as _state
 from app.store.consolidation.statements import find_statements
-from app.store.consolidation.trends import find_candidates
+from app.store.consolidation.trends import (
+    TALLY_VERSION,
+    candidates_from_tallies,
+    find_candidates,
+    merge_tallies,
+    tallies_from_json,
+    tallies_to_json,
+    tally_rows,
+)
 
 
 # Resolved on every call rather than imported at module level: these are cheap
@@ -97,6 +114,10 @@ def _persona():
     return persona
 
 __all__ = [
+    "due",
+    "run_if_due",
+    "consolidate_incremental",
+    "RunResult",
     "consolidate",
     "consolidate_trends",
     "consolidate_statements",
@@ -227,22 +248,48 @@ def consolidate_statements(user_id: UserId, extractor: Optional[Any] = None) -> 
 def consolidate(user_id: UserId,
                 min_support: int = MIN_SUPPORT,
                 phraser: Optional[Phraser] = None,
-                extractor: Optional[Any] = None) -> dict[str, list[Any]]:
-    """Both passes, for one user, then a sweep of anything written while the
-    judge was unavailable. Returns {"derived": [...], "stated": [...],
-    "reconciled": [...]}."""
+                extractor: Optional[Any] = None,
+                titler: Optional[Any] = None) -> dict[str, list[Any]]:
+    """A full pass over the whole log, for one user: both passes, a sweep of
+    anything written while the judge was unavailable, and the map's groups
+    brought up to date. The manual path - the automatic one is
+    consolidate_incremental. Returns {"derived", "stated", "reconciled"}."""
     derived = consolidate_trends(user_id, min_support, phraser)
     stated = consolidate_statements(user_id, extractor)
+    return {"derived": derived, "stated": stated, "reconciled": _tidy(user_id, titler)[0]}
+
+
+def _tidy(user_id: UserId, titler: Optional[Any]) -> tuple[list[Any], int]:
+    """The end of every pass: settle unreconciled beliefs, then group anything
+    ungrouped and name new groups. Returns (reconciled, groups created)."""
+    persona = _persona()
     try:
-        reconciled = _persona().reconcile_all(user_id, only_unreconciled=True)
+        reconciled = persona.reconcile_all(user_id, only_unreconciled=True)
     except Exception as e:
         print(f"[consolidation] reconcile sweep skipped: {e}")
         reconciled = []
-    return {"derived": derived, "stated": stated, "reconciled": reconciled}
+    created = 0
+    groups = persona.get_cluster_store()
+    if groups is not None:
+        from app.store.persona.clusters import refresh, title_pending
+
+        try:
+            created = refresh(groups, persona.get_store(), user_id).created
+            title_pending(groups, persona.get_store(), user_id, titler)
+        except Exception as e:
+            persona.clusters_failed(e)
+    return reconciled, created
 
 
 def _derive(user_id: UserId, min_support: int, phraser: Optional[Phraser]) -> list[DerivedFact]:
-    """Count, then phrase, then check the phrasing against the counting.
+    """The trend pass over the whole log - see _derive_candidates."""
+    candidates = find_candidates(_episodes(user_id), min_support=min_support)
+    print(f"[consolidation] {len(candidates)} candidate(s) at support>={min_support}")
+    return _derive_candidates(user_id, candidates, phraser)
+
+
+def _derive_candidates(user_id: UserId, candidates: list[Candidate], phraser: Optional[Phraser]) -> list[DerivedFact]:
+    """Counted candidates -> phrased, checked facts ready to write.
 
     The check is here rather than inside the phraser because it is a property
     of the pass, not of one implementation of it: whatever produces the wording
@@ -252,9 +299,6 @@ def _derive(user_id: UserId, min_support: int, phraser: Optional[Phraser]) -> li
     hallucinated "hates bagels" would get it written to Persona wearing the
     evidence of a trend about somewhere they go.
     """
-    candidates = find_candidates(_episodes(user_id), min_support=min_support)
-    print(f"[consolidation] {len(candidates)} candidate(s) at support>={min_support}")
-
     # A pattern the user deleted from the Knowledge Map stays deleted, however
     # many more times they do the thing. Dropped here rather than at the upsert
     # so a forgotten trend is not even sent to the phrasing model: there is no
@@ -524,3 +568,196 @@ def _upsert(user_id: UserId, fact: DerivedFact) -> Any:
     print(f"[consolidation] {result.action.value} {result.fact_id}: {fact.text!r} "
           f"(support={fact.candidate.support}, confidence={fact.confidence})")
     return result
+
+
+# --- automatic, incremental consolidation --------------------------------------------
+#
+# Nobody presses a button any more. The server decides when a pass is due
+# (due(): enough new episodes, or a day since the last) and says so on /event
+# replies and graph fetches; the phone then asks for the run (POST
+# /persona/consolidate?if_due=true), because Cloud Run stops giving a request CPU
+# once its response is sent, and a run the server kicked off by itself might
+# never finish. A pass reads only the episodes since the last one (the
+# watermark in consolidation_state), counts them into the trend tallies kept
+# there, and extracts statements from just those episodes.
+
+# Episodes read per step; the tallies and watermark are committed after each.
+CHUNK = 200
+# A pass stops starting new steps after this long; the next pass carries on.
+BUDGET_S = 90.0
+
+# Without the consolidation_state table (production before db/schema.sql 3c),
+# a full pass at most this often per process, and only when the phone asks.
+_FALLBACK_EVERY_S = 24 * 3600
+_fallback_runs: dict[str, float] = {}
+
+
+class RunResult(BaseModel):
+    """What one automatic pass did - the body of POST /persona/consolidate?if_due=true."""
+    ran: bool
+    due: bool = False
+    running: bool = False
+    last_run_at: Optional[str] = None
+    episodes_read: int = 0
+    derived: list[DerivedFact] = []
+    stated: list[StatedFact] = []
+    reconciled: list[Any] = []
+    clusters_created: int = 0
+
+
+def due(user_id: UserId, *, fresh: bool = False) -> _state.Due:
+    """Is a pass due for this user? Cheap - a row read and a capped count - and
+    memoised for a few minutes, because /event asks on every turn. Never raises:
+    anything unavailable reads as "not due"."""
+    if not fresh and (hit := _state.memoised_due(user_id)) is not None:
+        return hit
+    store = _state.get_state_store()
+    if store is None:
+        return _state.Due(False)
+    try:
+        current = store.get(user_id)
+        now = datetime.now(timezone.utc)
+        count = _memory().count_since(
+            user_id,
+            current.last_episode_at if current else None,
+            (now - _state.SETTLE).isoformat(),
+            _state.DUE_AFTER_EPISODES,
+        )
+        answer = _state.is_due(current, count, now)
+    except Exception as e:
+        _state.state_failed(e)
+        return _state.Due(False)
+    _state.remember_due(user_id, answer)
+    return answer
+
+
+def run_if_due(user_id: UserId, **kw: Any) -> RunResult:
+    """One automatic pass, if one is due - what the phone's worker asks for."""
+    store = _state.get_state_store()
+    if store is None:
+        return _fallback_run(user_id, **kw)
+    check = due(user_id, fresh=True)
+    if not check.due:
+        return RunResult(ran=False, running=check.running,
+                         last_run_at=check.last_run_at.isoformat() if check.last_run_at else None)
+    return consolidate_incremental(user_id, **kw)
+
+
+def _fallback_run(user_id: UserId, **kw: Any) -> RunResult:
+    """No state table yet: a full pass, at most daily per process."""
+    import time
+
+    last = _fallback_runs.get(str(user_id))
+    if last is not None and time.monotonic() - last < _FALLBACK_EVERY_S:
+        return RunResult(ran=False)
+    _fallback_runs[str(user_id)] = time.monotonic()
+    kw.pop("budget_s", None)
+    result = consolidate(user_id, **kw)
+    return RunResult(ran=True, due=True, derived=result["derived"], stated=result["stated"],
+                     reconciled=result["reconciled"])
+
+
+def consolidate_incremental(
+    user_id: UserId,
+    *,
+    min_support: int = MIN_SUPPORT,
+    phraser: Optional[Phraser] = None,
+    extractor: Optional[Any] = None,
+    titler: Optional[Any] = None,
+    budget_s: float = BUDGET_S,
+) -> RunResult:
+    """Learn from the episodes since the last pass, and only those.
+
+      1. Take this user's lease - a pass already running means nothing to do.
+      2. Read settled episodes after the watermark, CHUNK at a time. Each chunk
+         is counted into the trend tallies and has its statements extracted,
+         then the tallies and the new watermark are committed together.
+      3. Rebuild candidates from the tallies and phrase/write only the trends
+         this pass's episodes touched - a trend nothing new supports is left
+         alone, so its belief (and the map's ETag) doesn't churn.
+      4. Settle unreconciled beliefs; group and name what's new on the map.
+    Stops starting steps once `budget_s` is spent; the next pass continues.
+    """
+    import time
+    import uuid as _uuid
+
+    store = _state.get_state_store()
+    if store is None:
+        return _fallback_run(user_id, min_support=min_support, phraser=phraser,
+                             extractor=extractor, titler=titler)
+    holder = _uuid.uuid4().hex
+    try:
+        if not store.claim(user_id, holder, _state.LEASE):
+            return RunResult(ran=False, running=True)
+    except Exception as e:
+        _state.state_failed(e)
+        return RunResult(ran=False)
+
+    started = time.monotonic()
+    result = RunResult(ran=True, due=True)
+    try:
+        current = store.get(user_id) or _state.ConsolidationState()
+        rebuild = current.tally_version != TALLY_VERSION
+        tallies = {} if rebuild else tallies_from_json(current.tallies)
+        after = None if rebuild else current.last_episode_at
+        after_ids = [] if rebuild else list(current.last_episode_ids)
+        until = (datetime.now(timezone.utc) - _state.SETTLE).isoformat()
+        if rebuild:
+            print(f"[consolidation] tally version {current.tally_version} -> {TALLY_VERSION}: recounting")
+
+        seen = _seen_episode_ids(user_id)
+        read_ids: set[str] = set()
+        while time.monotonic() - started < budget_s:
+            rows = _memory().since(user_id, after, set(after_ids), until, CHUNK)
+            if not rows:
+                break
+            tallies = merge_tallies(tallies, tally_rows(rows))
+            read_ids.update(str(r["id"]) for r in rows if r.get("id"))
+            result.episodes_read += len(rows)
+
+            facts = find_statements(rows, seen_episode_ids=seen, extractor=extractor)
+            for fact in sorted(facts, key=lambda f: f.stated_at or _EPOCH):
+                fact.outcome = _upsert_stated(user_id, fact).action.value
+            result.stated.extend(facts)
+
+            last = rows[-1]["created_at"]
+            at_last = [str(r["id"]) for r in rows if r["created_at"] == last]
+            after_ids = (after_ids + at_last) if last == after else at_last
+            after = last
+            if not store.commit(user_id, holder, tallies=tallies_to_json(tallies), tally_version=TALLY_VERSION,
+                                last_episode_at=after, last_episode_ids=after_ids):
+                print("[consolidation] lost the lease mid-pass; stopping")
+                return result
+            if len(rows) < CHUNK:
+                break
+
+        if read_ids:
+            touched = [c for c in candidates_from_tallies(tallies, min_support)
+                       if read_ids.intersection(c.episode_ids)]
+            result.derived = _derive_candidates(user_id, touched, phraser)
+            for fact in sorted(result.derived, key=lambda f: _time(f.candidate.last_seen) or _EPOCH):
+                fact.outcome = _upsert(user_id, fact).action.value
+
+        result.reconciled, result.clusters_created = _tidy(user_id, titler)
+        print(f"[consolidation] incremental pass: {result.episodes_read} episode(s), "
+              f"{len(result.derived)} derived, {len(result.stated)} stated, "
+              f"{result.clusters_created} new group(s)")
+        return result
+    finally:
+        try:
+            store.finish(user_id, holder, {
+                "episodes_read": result.episodes_read, "derived": len(result.derived),
+                "stated": len(result.stated), "clusters_created": result.clusters_created,
+            })
+        except Exception as e:
+            print(f"[consolidation] couldn't release the lease (it expires on its own): {e}")
+        _state.forget_due(user_id)
+
+
+def _seen_episode_ids(user_id: UserId) -> set[str]:
+    """Episodes the statement pass must not read again - see _pending_statements."""
+    held = _persona().all_facts(user_id)
+    dealt_with = set(_forgotten_keys(user_id)) | set(_superseded_keys(user_id))
+    return _extracted_episode_ids(held) | {
+        key.removeprefix("episode:") for key in dealt_with if key.startswith("episode:")
+    }

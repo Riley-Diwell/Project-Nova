@@ -2,6 +2,7 @@ package com.example.novav2.auth
 
 import android.content.Context
 import com.example.novav2.data.NovaDatabase
+import com.example.novav2.knowledge.ConsolidationWorker
 import com.example.novav2.knowledge.KnowledgeRepository
 import com.example.novav2.network.NotesApiClient
 import com.example.novav2.notes.NotesRepository
@@ -48,6 +49,7 @@ object LocalData {
         prefs.edit().putString(KEY_USER_ID, userId).apply()
         ReminderSync.schedule(app)
         NotesRepository.scheduleOutboxDrain(app)
+        ConsolidationWorker.schedulePeriodic(app)
     }
 
     /**
@@ -87,6 +89,7 @@ object LocalData {
         NotesDatabase.getInstance(app).noteRowDao().clear()
         NoteAudioStore.deleteAll(app)
         ProfileRepository.clear(app)
+        ConsolidationWorker.cancel(app)
         withContext(Dispatchers.Main) { KnowledgeRepository.clear() }
         app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_USER_ID).apply()
     }

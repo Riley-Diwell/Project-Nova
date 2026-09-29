@@ -1,5 +1,6 @@
 package com.example.novav2.network
 
+import com.example.novav2.knowledge.KnowledgeRepository
 import com.example.novav2.model.CalendarEventInfo
 import com.example.novav2.model.ReminderSummary
 import com.example.novav2.model.UserState
@@ -333,10 +334,13 @@ object NovaApiClient {
 
     /**
      * One belief in the Persona store, as a node of the Knowledge Map.
-     * [kind] is "fact" or "category": category nodes are the ontology skeleton
-     * (opinions -> likes -> food) and carry only a label. [source] tells a fact
-     * the user stated from one NOVA derived from their behaviour, which is the
-     * distinction the map exists to make visible.
+     * [kind] is "fact", "category" or "cluster":
+     *  - category nodes are the ontology skeleton (opinions -> likes -> food), sent by servers
+     *    that don't group by meaning yet;
+     *  - cluster nodes are the server's meaning groups - [label] is the group's heading, [size]
+     *    how many facts it holds - and each fact names its group in [clusterId].
+     * [source] tells a fact the user stated from one NOVA derived from their behaviour, which is
+     * the distinction the map exists to make visible. Fields a server doesn't send are null.
      */
     data class GraphNode(
         val id: String,
@@ -349,8 +353,15 @@ object NovaApiClient {
         val detail: String? = null,
         /** The note this belief was promoted from, if any. */
         val noteId: String? = null,
+        /** The meaning group this fact belongs to (a "cluster:<id>" node's id). */
+        val clusterId: String? = null,
+        /** A cluster node's member count. */
+        val size: Int? = null,
+        /** When the belief was last said or seen, ISO 8601. */
+        val statedAt: String? = null,
     ) {
         val isFact: Boolean get() = kind == "fact"
+        val isCluster: Boolean get() = kind == "cluster"
         val isDerived: Boolean get() = source == "derived"
     }
 
@@ -374,53 +385,110 @@ object NovaApiClient {
     data class TaggedGraph(val graph: KnowledgeGraph, val etag: String?)
 
     /**
-     * The whole Persona as a graph. [minSimilarity] controls how densely facts
-     * are linked - the backend's default sits in the gap measured between
-     * related and unrelated pairs (backend/app/persona/graph.py).
-     *
-     * Pass the [TaggedGraph.etag] of the graph already held as [ifNoneMatch]: null comes back
-     * (a 304, no body) when it is still current.
+     * What the server says about background learning, from GET /persona/graph's headers:
+     * [status] is "due" (the phone should start a run), "running" or "idle"; [lastRunAt] is ISO.
+     * Servers that don't consolidate automatically send neither, and the hint is null.
      */
-    suspend fun getKnowledgeGraph(minSimilarity: Float? = null, ifNoneMatch: String? = null): TaggedGraph? =
-        withContext(Dispatchers.IO) {
-            val url = StringBuilder("$BASE_URL/persona/graph")
-            if (minSimilarity != null) url.append("?min_similarity=$minSimilarity")
+    data class ConsolidationHint(val status: String, val lastRunAt: String?)
 
-            val request = Request.Builder().url(url.toString()).get()
-                .apply { if (ifNoneMatch != null) header("If-None-Match", ifNoneMatch) }
-                .build()
-            client.newCall(request).execute().use { response ->
-                if (response.code == 304) return@withContext null
-                val json = JSONObject(response.requireBody())
-                TaggedGraph(graph = parseKnowledgeGraph(json), etag = response.header("ETag"))
-            }
-        }
+    /** A graph fetch: [tagged] is null when the held graph is still current (a 304). */
+    data class GraphFetch(val tagged: TaggedGraph?, val hint: ConsolidationHint?)
 
     /**
-     * Runs consolidation: turns what the user has done repeatedly into durable beliefs. Returns
-     * how many of each kind were written, for the confirmation the map shows afterwards.
+     * The whole Persona as a graph. [minSimilarity] controls how densely facts
+     * are linked - the backend's default sits in the gap measured between
+     * related and unrelated pairs (server/app/store/persona/graph.py). [clusters] asks for meaning
+     * groups instead of the category skeleton; servers without them ignore it.
      *
-     * Slow by nature - it reads the whole Episode log and makes a Claude call - so callers should
-     * show progress rather than assume this returns promptly.
+     * Pass the [TaggedGraph.etag] of the graph already held as [ifNoneMatch]: [GraphFetch.tagged]
+     * comes back null (a 304, no body) when it is still current.
      */
-    suspend fun consolidate(): Pair<Int, Int> = withContext(Dispatchers.IO) {
+    suspend fun getKnowledgeGraph(
+        minSimilarity: Float? = null,
+        ifNoneMatch: String? = null,
+        clusters: Boolean = true,
+    ): GraphFetch = withContext(Dispatchers.IO) {
+        val url = "$BASE_URL/persona/graph".toHttpUrl().newBuilder()
+            .apply {
+                if (minSimilarity != null) addQueryParameter("min_similarity", minSimilarity.toString())
+                if (clusters) addQueryParameter("clusters", "true")
+            }
+            .build()
+        val request = Request.Builder().url(url).get()
+            .apply { if (ifNoneMatch != null) header("If-None-Match", ifNoneMatch) }
+            .build()
+        client.newCall(request).execute().use { response ->
+            val hint = response.header("X-Nova-Consolidation")?.let {
+                ConsolidationHint(it, response.header("X-Nova-Last-Consolidated"))
+            }
+            if (response.code == 304) return@withContext GraphFetch(null, hint)
+            val json = JSONObject(response.requireBody())
+            GraphFetch(TaggedGraph(graph = parseKnowledgeGraph(json), etag = response.header("ETag")), hint)
+        }
+    }
+
+    /** One search hit: [keyword] when it matched the query's words rather than its meaning. */
+    data class SearchHit(
+        val factId: String,
+        val score: Float,
+        val similarity: Float,
+        val keyword: Boolean,
+        val clusterId: String?,
+    )
+
+    /** GET /persona/search's answer. [targetCluster] is the group the hits concentrate in. */
+    data class PersonaSearch(val hits: List<SearchHit>, val targetCluster: String?)
+
+    /**
+     * Searches beliefs by meaning and by keyword (the server's hybrid search). Null when the
+     * server has no search endpoint yet - the caller falls back to matching on the phone. On
+     * such a server the path lands on PATCH/DELETE /persona/{id}, so that's a 405, not a 404.
+     */
+    suspend fun searchPersona(query: String, limit: Int = 20): PersonaSearch? = withContext(Dispatchers.IO) {
+        val url = "$BASE_URL/persona/search".toHttpUrl().newBuilder()
+            .addQueryParameter("q", query)
+            .addQueryParameter("limit", limit.toString())
+            .build()
+        client.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
+            if (response.code == 404 || response.code == 405) return@withContext null
+            parsePersonaSearch(JSONObject(response.requireBody()))
+        }
+    }
+
+    /** What an automatic consolidation run did. [ran] is false when the server said it wasn't due. */
+    data class ConsolidationRun(val ran: Boolean, val derived: Int, val stated: Int)
+
+    // A run reads new episodes, phrases trends and judges each new belief: minutes, not seconds.
+    private val slowClient by lazy { client.newBuilder().readTimeout(120, TimeUnit.SECONDS).build() }
+
+    /**
+     * Asks the server to learn from recent activity if it's due. Called by the background worker
+     * (knowledge/ConsolidationWorker), never from the UI - there is no button any more. A server
+     * that predates automatic consolidation ignores `if_due` and runs a full pass, which is what
+     * the old button did.
+     */
+    suspend fun consolidateIfDue(): ConsolidationRun = withContext(Dispatchers.IO) {
         val request = Request.Builder()
-            .url("$BASE_URL/persona/consolidate")
+            .url("$BASE_URL/persona/consolidate?if_due=true")
             .post(JSONObject().toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
-
-        client.newCall(request).execute().use { response ->
+        slowClient.newCall(request).execute().use { response ->
             val json = JSONObject(response.requireBody())
-            Pair(
-                json.optJSONArray("derived")?.length() ?: 0,
-                json.optJSONArray("stated")?.length() ?: 0,
+            ConsolidationRun(
+                ran = json.optBoolean("ran", true),
+                derived = json.optJSONArray("derived")?.length() ?: 0,
+                stated = json.optJSONArray("stated")?.length() ?: 0,
             )
         }
     }
 
-    /** Correct a belief. Re-embeds server-side, so it becomes findable by what
-     *  it now says. Passing null for a field leaves it unchanged. */
-    suspend fun editFact(id: String, text: String?, category: List<String>?): Unit =
+    /**
+     * Correct a belief. Re-embeds server-side, so it becomes findable by what it now says.
+     * Passing null for a field leaves it unchanged. Returns the ids of other beliefs the edit
+     * overruled (the server removes a contradicted belief when the edit is newer) - empty from
+     * servers that don't report them.
+     */
+    suspend fun editFact(id: String, text: String?, category: List<String>?): List<String> =
         withContext(Dispatchers.IO) {
             val body = JSONObject().apply {
                 if (text != null) put("text", text)
@@ -430,7 +498,11 @@ object NovaApiClient {
                 .url("$BASE_URL/persona/$id")
                 .patch(body.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
-            client.newCall(request).execute().use { it.requireBody() }
+            client.newCall(request).execute().use { response ->
+                val json = JSONObject(response.requireBody())
+                json.optJSONArray("superseded").mapObjects { it.optString("id") }
+                    .filter { it.isNotEmpty() && it != id }
+            }
         }
 
     /** Forget a belief entirely (Privacy pillar / REQ1). */
@@ -532,6 +604,9 @@ object NovaApiClient {
                 put("support", n.support ?: JSONObject.NULL)
                 put("detail", n.detail ?: JSONObject.NULL)
                 put("note_id", n.noteId ?: JSONObject.NULL)
+                put("cluster", n.clusterId ?: JSONObject.NULL)
+                put("size", n.size ?: JSONObject.NULL)
+                put("stated_at", n.statedAt ?: JSONObject.NULL)
             }
         }))
         put("edges", JSONArray(edges.map { e ->
@@ -556,6 +631,23 @@ object NovaApiClient {
         support = if (isNull("support")) null else optInt("support"),
         detail = if (isNull("detail")) null else optString("detail"),
         noteId = if (isNull("note_id")) null else optString("note_id").takeIf { it.isNotEmpty() },
+        // isNull is also true for a missing key, so a server without these reads as null.
+        clusterId = if (isNull("cluster")) null else optString("cluster").takeIf { it.isNotEmpty() },
+        size = if (isNull("size")) null else optInt("size"),
+        statedAt = if (isNull("stated_at")) null else optString("stated_at").takeIf { it.isNotEmpty() },
+    )
+
+    internal fun parsePersonaSearch(json: JSONObject): PersonaSearch = PersonaSearch(
+        hits = json.optJSONArray("hits").mapObjects {
+            SearchHit(
+                factId = it.getString("fact_id"),
+                score = it.optDouble("score", 0.0).toFloat(),
+                similarity = it.optDouble("similarity", 0.0).toFloat(),
+                keyword = it.optString("match") == "keyword",
+                clusterId = if (it.isNull("cluster_id")) null else "cluster:" + it.getString("cluster_id"),
+            )
+        },
+        targetCluster = if (json.isNull("target_cluster")) null else "cluster:" + json.getString("target_cluster"),
     )
 
     private fun JSONObject.toGraphEdge(): GraphEdge = GraphEdge(
@@ -585,6 +677,10 @@ object NovaApiClient {
             throw IOException("Backend returned ${response.code}: $responseBody")
         }
         val json = JSONObject(responseBody)
+        // The server's cheap "time to learn from recent activity" check (EventOut.consolidation_due).
+        // The phone does the run, in the background, because Cloud Run starves work that
+        // outlives a response.
+        if (json.optBoolean("consolidation_due", false)) KnowledgeRepository.consolidationDue()
         return when (json.optString("status", "final")) {
             "need_more" -> {
                 val req = json.optJSONObject("request") ?: JSONObject()

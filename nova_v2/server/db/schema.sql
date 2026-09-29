@@ -14,6 +14,8 @@
 --  3b. persona hybrid search and reconciliation - full-text, content hash,
 --                         stated_at, match_persona_hybrid(), persona_superseded
 --                         and the per-user write lease.
+--  3c. Knowledge Map groups (persona_cluster, persona_cluster_member) and
+--                         automatic consolidation state (consolidation_state).
 --   4. persona_forgotten - deletions that have to stick (see section 4 below).
 --   5. notes / note_chunks - the user's notes (app/store/notes), plus
 --                         match_notes() for hybrid search.
@@ -369,6 +371,79 @@ $$;
 
 
 -- ---------------------------------------------------------------------------
+-- 3c. Knowledge Map groups, and automatic consolidation
+-- ---------------------------------------------------------------------------
+-- Additive and re-runnable; run after 3b. Until it has run, the server works
+-- as before: the map groups by category and consolidation runs a full pass at
+-- most daily when the phone asks.
+--
+-- persona_cluster / persona_cluster_member: the map's meaning groups
+-- (app/store/persona/clusters.py). Membership is its own table, not fact
+-- metadata, because an in-place rewrite of a fact replaces its metadata; the
+-- cascade drops a fact's membership when the fact goes. `centroid` is the
+-- running mean of the members' embeddings (not normalised).
+--
+-- consolidation_state: per user, where automatic consolidation is up to
+-- (app/store/consolidation/state.py) - the last episode read, the trend
+-- tallies counted so far, the lease that stops two passes overlapping, and
+-- when the last pass finished. The tallies and the watermark live in one row
+-- so a single update moves both together.
+
+create table if not exists public.persona_cluster (
+    id            uuid        primary key default gen_random_uuid(),
+    user_id       uuid        not null references auth.users (id) on delete cascade,
+    title         text        not null,
+    title_source  text        not null default 'pending'
+                  check (title_source in ('pending', 'fallback', 'model', 'user')),
+    titled_size   int         not null default 0,     -- size when last named
+    centroid      vector(1024) not null,
+    size          int         not null default 0,
+    created_at    timestamptz not null default now(),
+    title_at      timestamptz not null default now()
+);
+create index if not exists persona_cluster_user_idx on public.persona_cluster (user_id, created_at);
+
+create table if not exists public.persona_cluster_member (
+    fact_id     uuid        primary key references public.persona (id) on delete cascade,
+    user_id     uuid        not null references auth.users (id) on delete cascade,
+    cluster_id  uuid        not null references public.persona_cluster (id) on delete cascade,
+    assigned_at timestamptz not null default now()
+);
+create index if not exists persona_cluster_member_user_idx on public.persona_cluster_member (user_id);
+
+create table if not exists public.consolidation_state (
+    user_id          uuid        primary key references auth.users (id) on delete cascade,
+    last_run_at      timestamptz,
+    last_episode_at  text,                    -- episodic_memory.created_at exactly as read
+    last_episode_ids text[]      not null default '{}',   -- ids read AT last_episode_at
+    tally_version    int         not null default 0,
+    tallies          jsonb       not null default '[]'::jsonb,
+    lease_holder     text,
+    lease_until      timestamptz,
+    last_result      jsonb
+);
+
+-- Take this user's consolidation lease: free, expired, or already ours.
+-- Returns true when taken, null when another pass holds it.
+create or replace function public.claim_consolidation(p_user uuid, p_holder text, p_ttl_ms int default 300000)
+returns boolean
+language sql volatile
+as $$
+    insert into public.consolidation_state as s (user_id, lease_holder, lease_until)
+    values (p_user, p_holder, now() + make_interval(secs => p_ttl_ms / 1000.0))
+    on conflict (user_id) do update
+        set lease_holder = excluded.lease_holder, lease_until = excluded.lease_until
+        where s.lease_until is null or s.lease_until < now() or s.lease_holder = excluded.lease_holder
+    returning true
+$$;
+
+comment on table public.persona_cluster is
+    'Knowledge Map meaning groups: sticky, headed once by a model. See app/store/persona/clusters.py.';
+comment on table public.consolidation_state is
+    'Per-user automatic consolidation: watermark, trend tallies, lease. See app/store/consolidation/state.py.';
+
+
+-- ---------------------------------------------------------------------------
 -- 4. Forgotten patterns
 -- ---------------------------------------------------------------------------
 -- Deletions that have to stick.
@@ -585,6 +660,9 @@ alter table public.persona           enable row level security;
 alter table public.persona_forgotten enable row level security;
 alter table public.persona_superseded enable row level security;
 alter table public.persona_write_lock enable row level security;
+alter table public.persona_cluster        enable row level security;
+alter table public.persona_cluster_member enable row level security;
+alter table public.consolidation_state    enable row level security;
 alter table public.notes             enable row level security;
 alter table public.note_chunks       enable row level security;
 
@@ -604,6 +682,14 @@ create policy persona_forgotten_owner on public.persona_forgotten for all to aut
 -- lease gets no policy at all - it is the server's bookkeeping, nobody else's.
 drop policy if exists persona_superseded_owner on public.persona_superseded;
 create policy persona_superseded_owner on public.persona_superseded for select to authenticated
+    using (user_id = auth.uid());
+-- Groups are readable by their owner; only the server writes them. Consolidation
+-- state is the server's bookkeeping and gets no policy.
+drop policy if exists persona_cluster_owner on public.persona_cluster;
+create policy persona_cluster_owner on public.persona_cluster for select to authenticated
+    using (user_id = auth.uid());
+drop policy if exists persona_cluster_member_owner on public.persona_cluster_member;
+create policy persona_cluster_member_owner on public.persona_cluster_member for select to authenticated
     using (user_id = auth.uid());
 
 

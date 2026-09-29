@@ -42,7 +42,7 @@ import com.example.novav2.ui.screens.AuditLogScreen
 import com.example.novav2.ui.screens.DashboardScreen
 import com.example.novav2.ui.screens.DeviceScreen
 import com.example.novav2.ui.screens.GainScreen
-import com.example.novav2.ui.screens.KnowledgeMapScreen
+import com.example.novav2.ui.screens.knowledgemap.KnowledgeMapScreen
 import com.example.novav2.ui.screens.NoteDetailScreen
 import com.example.novav2.ui.screens.NotesScreen
 import com.example.novav2.ui.screens.NotesSettingsScreen

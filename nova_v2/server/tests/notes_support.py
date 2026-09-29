@@ -50,7 +50,22 @@ class FakeMemory:
         return list(reversed(self._mine(user_id)))[:limit]
 
     def all(self, user_id) -> list[dict[str, Any]]:
+        self.full_reads = getattr(self, "full_reads", 0) + 1
         return self._mine(user_id)
+
+    def _ordered(self, user_id) -> list[dict[str, Any]]:
+        return sorted(self._mine(user_id), key=lambda r: (r["created_at"], r["id"]))
+
+    def since(self, user_id, after, after_ids, until, limit) -> list[dict[str, Any]]:
+        rows = [r for r in self._ordered(user_id)
+                if r["created_at"] <= until and (after is None or r["created_at"] >= after)
+                and not (r["created_at"] == after and r["id"] in after_ids)]
+        return rows[:limit]
+
+    def count_since(self, user_id, after, until, cap) -> int:
+        rows = [r for r in self._mine(user_id)
+                if r["created_at"] <= until and (after is None or r["created_at"] > after)]
+        return min(len(rows), cap)
 
     def close(self, user_id, episode_id: str, action=None, outcome=None) -> None:
         for r in self._mine(user_id):
@@ -80,7 +95,7 @@ def stores(monkeypatch):
     notes.set_processor(None)
 
     fake = FakeMemory()
-    for name in ("append", "get", "recent", "recent_all", "all", "close"):
+    for name in ("append", "get", "recent", "recent_all", "all", "since", "count_since", "close"):
         monkeypatch.setattr(memory, name, getattr(fake, name))
 
     with as_user(USER):

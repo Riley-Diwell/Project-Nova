@@ -77,6 +77,12 @@ from app.store.persona.graph import (
     KnowledgeGraph,
     build_graph,
 )
+from app.store.persona.clusters import (
+    ClusterStore,
+    ClusterView,
+    InMemoryClusterStore,
+    SupabaseClusterStore,
+)
 from app.store.persona.judge import ClaudeJudge, Judge, JudgeUnavailable, NullJudge
 from app.store.persona.models import (
     Fact,
@@ -110,6 +116,13 @@ from app.store.persona.store import (
 )
 
 __all__ = [
+    "get_cluster_store",
+    "set_cluster_store",
+    "cluster_view",
+    "clusters_failed",
+    "ClusterStore",
+    "ClusterView",
+    "InMemoryClusterStore",
     "remember",
     "reconcile_all",
     "RememberAction",
@@ -219,6 +232,62 @@ def set_store(store: PersonaStore) -> None:
     _store = store
 
 
+_cluster_store: Optional[ClusterStore] = None
+# Set once the cluster tables turn out to be missing (db/schema.sql 3c not run
+# yet): grouping is then off for the life of the process rather than failing,
+# and logging, on every write.
+_clusters_off = False
+
+
+def get_cluster_store() -> Optional[ClusterStore]:
+    """The meaning groups (clusters.py), or None where there are none: a test
+    or local store with no cluster store set, or production before the cluster
+    tables exist."""
+    global _cluster_store
+    if _clusters_off:
+        return None
+    if _cluster_store is None and isinstance(_store, SupabasePersonaStore):
+        from app.core.db import get_client
+
+        _cluster_store = SupabaseClusterStore(get_client())
+    return _cluster_store
+
+
+def set_cluster_store(store: Optional[ClusterStore]) -> None:
+    """Swap the cluster store (tests). None restores the default."""
+    global _cluster_store, _clusters_off
+    _cluster_store = store
+    _clusters_off = False
+
+
+def clusters_failed(e: Exception) -> None:
+    """Grouping hit an error. A missing table switches it off for this process;
+    anything else is logged and grouping carries on next time."""
+    global _clusters_off
+    message = str(e)
+    if "persona_cluster" in message and ("does not exist" in message or "PGRST205" in message
+                                         or "Could not find" in message):
+        if not _clusters_off:
+            print("[clusters] WARNING: cluster tables missing - grouping off until "
+                  "db/schema.sql section 3c is run and the server restarted.")
+        _clusters_off = True
+    else:
+        print(f"[clusters] skipped: {e}")
+
+
+def cluster_view(user_id: UserId) -> Optional[ClusterView]:
+    """This user's groups and who is in them, for the graph. None if grouping is
+    unavailable - the map then falls back to categories."""
+    store = get_cluster_store()
+    if store is None:
+        return None
+    try:
+        return ClusterView(store.clusters(user_id), store.membership(user_id))
+    except Exception as e:
+        clusters_failed(e)
+        return None
+
+
 def get_judge(voice: bool = False) -> Judge:
     """The duplicate/contradiction judge remember() uses (judge.py).
 
@@ -322,37 +391,51 @@ def knowledge_graph(
     user_id: UserId,
     min_similarity: float = DEFAULT_MIN_SIMILARITY,
     max_links: int = DEFAULT_MAX_LINKS,
+    clusters: Optional[ClusterView] = None,
 ) -> KnowledgeGraph:
-    """This user's Persona as a navigable graph for the Knowledge Map (Section 5.6)."""
+    """This user's Persona as a navigable graph for the Knowledge Map (Section 5.6).
+
+    With `clusters` (cluster_view()), grouped by meaning; without, by category."""
     store = get_store()
     return build_graph(
         store.all_facts(user_id), store.vectors(user_id),
-        min_similarity=min_similarity, max_links=max_links,
+        min_similarity=min_similarity, max_links=max_links, clusters=clusters,
     )
 
 
 # Bump when build_graph's output changes for the same facts (a new node field, a
 # different edge rule), so phones holding a graph from the old code fetch again.
-GRAPH_FORMAT = 1
+# 2: stated_at on facts, and meaning groups (cluster nodes) when asked for.
+GRAPH_FORMAT = 2
 
 
 def graph_etag(
     user_id: UserId,
     min_similarity: float = DEFAULT_MIN_SIMILARITY,
     max_links: int = DEFAULT_MAX_LINKS,
+    clusters: Optional[ClusterView] = None,
 ) -> str:
     """An ETag for knowledge_graph() with these arguments, without building it.
 
     A hash of every fact id and when it last changed (store.versions), plus the
     arguments and GRAPH_FORMAT - so it moves exactly when the graph could, and
     answering "has it changed?" skips the embeddings and the all-pairs pass.
+    With groups it also covers who is in which group and each group's heading:
+    a fact moving group, or a group being named, changes no fact row.
 
     Compute it *before* building the graph it goes out with: a write landing in
     between then leaves the tag older than the body, which only costs the phone
     one needless refetch - the other way round, it would keep a stale graph.
     """
     versions = get_store().versions(user_id)
-    digest = hashlib.sha256(f"{GRAPH_FORMAT}|{user_id}|{min_similarity!r}|{max_links}".encode())
+    digest = hashlib.sha256(
+        f"{GRAPH_FORMAT}|{user_id}|{min_similarity!r}|{max_links}|{clusters is not None}".encode()
+    )
     for fact_id in sorted(versions):
         digest.update(f"|{fact_id}@{versions[fact_id]}".encode())
+    if clusters is not None:
+        for fact_id in sorted(clusters.membership):
+            digest.update(f"|m:{fact_id}@{clusters.membership[fact_id]}".encode())
+        for c in sorted(clusters.clusters, key=lambda c: c.id):
+            digest.update(f"|c:{c.id}@{c.title}".encode())
     return f'"{digest.hexdigest()[:32]}"'

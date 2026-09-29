@@ -42,6 +42,51 @@ class GroupEmbedder:
         return [x / norm for x in vec]
 
 
+class BlendEmbedder:
+    """Exact cosines for grouping tests. Each named text is a mix of named
+    directions (near-orthogonal FakeEmbedder vectors): `set("B", fruit=1,
+    other=0.5)` sits at cosine 1/sqrt(1.25) ~ 0.89 from `set("A", fruit=1)`.
+    Unnamed texts fall back to FakeEmbedder."""
+
+    def __init__(self) -> None:
+        self._fake = FakeEmbedder()
+        self.dim = self._fake.dim
+        self.mixes: dict[str, dict[str, float]] = {}
+
+    def set(self, text: str, **weights: float) -> str:
+        self.mixes[normalise_text(text)] = weights
+        return text
+
+    def embed(self, texts: list[str], input_type: str = "document") -> list[list[float]]:
+        return [self._one(t) for t in texts]
+
+    def _one(self, text: str) -> list[float]:
+        mix = self.mixes.get(normalise_text(text))
+        if mix is None:
+            return self._fake._one(text)
+        vec = [0.0] * self.dim
+        for name, w in mix.items():
+            base = self._fake._one(f"direction:{name}")
+            vec = [v + w * b for v, b in zip(vec, base)]
+        norm = math.sqrt(sum(x * x for x in vec)) or 1.0
+        return [x / norm for x in vec]
+
+
+class StubTitler:
+    """Names every group it's asked about, and records the calls."""
+
+    def __init__(self, title: str = "Named group") -> None:
+        self.title = title
+        self.calls: list[list[str]] = []
+        self.fail = False
+
+    def __call__(self, samples):
+        self.calls.append([s.id for s in samples])
+        if self.fail:
+            raise RuntimeError("stub titler told to fail")
+        return {s.id: self.title for s in samples}
+
+
 class StubJudge:
     """Relations from a table keyed by the unordered pair of texts; anything
     not in the table is unrelated. Records every call."""

@@ -31,7 +31,7 @@ right value will drift as the store grows.
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -46,7 +46,7 @@ DEFAULT_MIN_SIMILARITY = 0.65
 # hairball that hides the structure it was meant to show.
 DEFAULT_MAX_LINKS = 4
 
-NodeKind = Literal["fact", "category"]
+NodeKind = Literal["fact", "category", "cluster"]
 EdgeKind = Literal["category", "similar"]
 
 
@@ -66,6 +66,12 @@ class GraphNode(BaseModel):
     # The note a belief was promoted from, if any - the Knowledge Map's
     # "From your note" link.
     note_id: Optional[str] = None
+    # When the belief was last said or seen (Fact.stated_at), ISO 8601.
+    stated_at: Optional[str] = None
+    # A fact's meaning group ("cluster:<id>") - the map's subheading for it.
+    cluster: Optional[str] = None
+    # A cluster node's member count.
+    size: Optional[int] = None
 
 
 class GraphEdge(BaseModel):
@@ -83,6 +89,7 @@ class KnowledgeGraph(BaseModel):
         return {
             "facts": sum(1 for n in self.nodes if n.kind == "fact"),
             "categories": sum(1 for n in self.nodes if n.kind == "category"),
+            "clusters": sum(1 for n in self.nodes if n.kind == "cluster"),
             "category_links": sum(1 for e in self.edges if e.kind == "category"),
             "similar_links": sum(1 for e in self.edges if e.kind == "similar"),
         }
@@ -93,11 +100,19 @@ def build_graph(
     vectors: dict[str, list[float]],
     min_similarity: float = DEFAULT_MIN_SIMILARITY,
     max_links: int = DEFAULT_MAX_LINKS,
+    clusters: Optional[Any] = None,
 ) -> KnowledgeGraph:
-    """Nodes and edges for the Knowledge Map."""
+    """Nodes and edges for the Knowledge Map.
+
+    With `clusters` (a clusters.ClusterView), facts are grouped by meaning:
+    one "cluster:<id>" node per group, headed and sized, each fact naming its
+    group - and no category skeleton, which the groups replace on the map.
+    Facts still carry their category path for their detail card.
+    """
     nodes: list[GraphNode] = []
     edges: list[GraphEdge] = []
     category_ids: set[str] = set()
+    membership = clusters.membership if clusters is not None else {}
 
     for fact in facts:
         if not fact.id:
@@ -113,8 +128,23 @@ def build_graph(
             support=meta.get("support"),
             detail=meta.get("quote") or meta.get("value"),
             note_id=str(meta["note_id"]) if meta.get("note_id") else None,
+            stated_at=fact.stated_at.isoformat() if fact.stated_at else None,
+            cluster=f"cluster:{membership[fact.id]}" if fact.id in membership else None,
         ))
-        edges.extend(_category_chain(fact, category_ids, nodes))
+        if clusters is None:
+            edges.extend(_category_chain(fact, category_ids, nodes))
+
+    if clusters is not None:
+        present = {f.id for f in facts if f.id}
+        sizes: dict[str, int] = {}
+        for fact_id, cluster_id in membership.items():
+            if fact_id in present:
+                sizes[cluster_id] = sizes.get(cluster_id, 0) + 1
+        nodes.extend(
+            GraphNode(id=f"cluster:{c.id}", label=c.title, kind="cluster", size=sizes[c.id])
+            for c in sorted(clusters.clusters, key=lambda c: c.created_at)
+            if sizes.get(c.id)
+        )
 
     edges.extend(_similarity_edges(facts, vectors, min_similarity, max_links))
     return KnowledgeGraph(nodes=nodes, edges=edges)
