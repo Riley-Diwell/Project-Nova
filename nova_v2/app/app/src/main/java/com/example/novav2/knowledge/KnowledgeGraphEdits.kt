@@ -14,9 +14,14 @@ internal fun KnowledgeGraph.relabelled(labels: Map<String, String>): KnowledgeGr
 }
 
 /**
- * The graph without [factIds], their links, and any category left with nothing filed under
+ * The graph without [factIds], their links, and any topic or category left with nothing under
  * it. Category ids are "cat:" + the path joined with "/" (server persona/graph.py), so the
- * categories still needed are exactly the path prefixes of the facts that remain.
+ * categories still needed are exactly the path prefixes of the facts that remain; a topic is
+ * still needed while a remaining fact names it as its clusterId.
+ *
+ * Topics have to be kept explicitly: dropping them all leaves [groupsOf] nothing to group by,
+ * so it falls back to categories and the whole map rearranges - until the next fetch put the
+ * topics back, a forget looked like it hadn't happened properly.
  */
 internal fun KnowledgeGraph.without(factIds: Set<String>): KnowledgeGraph {
     if (factIds.isEmpty()) return this
@@ -24,7 +29,14 @@ internal fun KnowledgeGraph.without(factIds: Set<String>): KnowledgeGraph {
     val neededCategories = remaining.flatMapTo(HashSet()) { fact ->
         fact.category.indices.map { depth -> "cat:" + fact.category.take(depth + 1).joinToString("/") }
     }
-    val kept = nodes.filter { if (it.isFact) it.id !in factIds else it.id in neededCategories }
+    val neededTopics = remaining.mapNotNullTo(HashSet()) { it.clusterId }
+    val kept = nodes.filter {
+        when {
+            it.isFact -> it.id !in factIds
+            it.isCluster -> it.id in neededTopics
+            else -> it.id in neededCategories
+        }
+    }
     val keptIds = kept.mapTo(HashSet()) { it.id }
     return KnowledgeGraph(
         nodes = kept,

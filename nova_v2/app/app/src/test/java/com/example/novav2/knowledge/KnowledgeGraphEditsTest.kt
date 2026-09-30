@@ -69,6 +69,39 @@ class KnowledgeGraphEditsTest {
         assertEquals(graph.nodes.filter { it.id != "gym" }, after.nodes.filter { it.id != "gym" })
     }
 
+    // The topics the map is grouped by: Food & drink holds pizza and sushi, Places holds gym, and
+    // sushi is also linked to Places.
+    private fun topic(id: String) = GraphNode(id = "cluster:$id", label = id, kind = "cluster")
+    private fun inTopic(node: GraphNode, topic: String) = node.copy(clusterId = "cluster:$topic")
+
+    private val topics = KnowledgeGraph(
+        nodes = graph.nodes.map {
+            when (it.id) {
+                "pizza", "sushi" -> inTopic(it, "food")
+                "gym" -> inTopic(it, "places")
+                else -> it
+            }
+        } + topic("food") + topic("places"),
+        edges = graph.edges + link("sushi", "cluster:places", kind = "topic"),
+    )
+
+    @Test
+    fun `forgetting a fact keeps the topics the rest of the map is grouped by`() {
+        val after = topics.without(setOf("sushi"))
+        assertEquals(topics.ids() - "sushi", after.ids())
+        assertEquals(listOf("cluster:food", "cluster:places"), after.nodes.filter { it.isCluster }.map { it.id })
+        // Grouped by topic still, not fallen back to categories.
+        assertEquals(listOf("cluster:food", "cluster:places"), groupsOf(after).map { it.id })
+        assertEquals(listOf("pizza"), groupsOf(after).first().factIds)
+    }
+
+    @Test
+    fun `forgetting a topic's last fact drops the topic`() {
+        val after = topics.without(setOf("gym"))
+        assertEquals(listOf("cluster:food"), after.nodes.filter { it.isCluster }.map { it.id })
+        assertEquals(listOf("cluster:food"), groupsOf(after).map { it.id })
+    }
+
     @Test
     fun `no changes returns the same graph`() {
         assertSame(graph, graph.without(emptySet()))
