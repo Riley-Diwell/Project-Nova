@@ -19,6 +19,7 @@ import json
 import os
 import re
 import uuid
+from types import SimpleNamespace
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -1215,6 +1216,58 @@ def _resume(pending: dict[str, Any], tool_result: Any) -> IntentResult | NeedMor
     )
 
 
+# Room for the answer once thinking has been cut short (see _force_answer).
+FORCED_ANSWER_TOKENS = 1024
+_WRAP_UP = "\n\nI've thought about this enough - time to act on it and give my answer."
+STUCK_SPEECH = "Sorry, I got tangled up working that out. Could you ask me again?"
+
+
+def _force_answer(
+    messages: list[dict[str, Any]], tools: list[dict[str, Any]], reasoning: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]], str | None]:
+    """The model thought until max_tokens and never answered. Hand its thinking
+    back, closed off with a line saying it's time to answer, and let it carry on
+    from there - budget forcing. It then answers, or calls the tool it was
+    working towards, in a second or two instead of the turn ending blank.
+
+    Needed more as standing instructions pile up: "reply in rhymes, in Pig
+    Latin, every word starting with a" is a puzzle the model will happily think
+    about for longer than any budget.
+
+    The </think> is in the prompt rather than the output, so the server's
+    reasoning parser files the whole continuation as reasoning - hence
+    content-or-reasoning below. Returns what _assistant_turn does, plus the
+    finish reason to carry on the loop with.
+    """
+    print(f"[loop] thinking ran out after {len(reasoning)} chars - forcing an answer")
+    try:
+        response = llm.client(LOOP_TIMEOUT_S, 1).chat.completions.create(
+            model=llm.MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT}, *messages,
+                {"role": "assistant", "content": f"<think>\n{reasoning.strip()}{_WRAP_UP}\n</think>\n\n"},
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=FORCED_ANSWER_TOKENS,
+            temperature=0.3,
+            extra_body={**llm.THINKING, "continue_final_message": True, "add_generation_prompt": False},
+        )
+    except Exception as e:
+        print(f"[loop] forced answer failed: {e}")
+        return {"role": "assistant", "content": None}, [], "length"
+    choice = response.choices[0]
+    text = choice.message.content or llm.reasoning_of(choice.message)
+    assistant, calls = _assistant_turn(SimpleNamespace(content=text, tool_calls=choice.message.tool_calls))
+    finish = choice.finish_reason
+    # Cut off again but with something to say: say it.
+    if finish == "length" and assistant["content"] and not calls:
+        finish = "stop"
+    print(f"[loop] forced answer finish_reason={finish!r} "
+          f"tool_calls={[c['function']['name'] for c in calls]!r} speech={assistant['content']!r}")
+    return assistant, calls, finish
+
+
 def _tool_message(call_id: str, result: Any) -> dict[str, Any]:
     return {"role": "tool", "tool_call_id": call_id, "content": json.dumps(result, default=str)}
 
@@ -1290,12 +1343,18 @@ def _run_loop(
         )
         choice = response.choices[0]
         assistant, calls = _assistant_turn(choice.message)
+        finish = choice.finish_reason
         usage = getattr(response, "usage", None)
         cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", None)
         print(f"[loop] finish_reason={choice.finish_reason!r} "
               f"tool_calls={[c['function']['name'] for c in calls]!r} "
               f"prompt={getattr(usage, 'prompt_tokens', None)} cached={cached} "
               f"completion={getattr(usage, 'completion_tokens', None)}")
+
+        # Thinking used the whole budget and nothing came out: make it stop
+        # thinking and answer, rather than end the turn in silence.
+        if finish == "length" and not calls and not assistant["content"]:
+            assistant, calls, finish = _force_answer(messages, tools, llm.reasoning_of(choice.message))
 
         # if a tool is called. Checked before finish_reason: some servers
         # report "stop" on a reply that carries tool calls.
@@ -1400,7 +1459,7 @@ def _run_loop(
             continue
 
         # finished reasoning
-        if choice.finish_reason in ("stop", "eos", None):
+        if finish in ("stop", "eos", None):
             speech = assistant["content"] or ""
             if not speech:
                 print(f"[loop] empty speech - raw content: {choice.message.content!r}")
@@ -1428,11 +1487,14 @@ def _run_loop(
             )
 
         # unexpected finish_reason (length, content_filter, ...)
-        print(f"[loop] breaking on unexpected finish_reason={choice.finish_reason!r}")
+        print(f"[loop] breaking on unexpected finish_reason={finish!r}")
         break
 
-    print("[loop] exited loop with no end_turn - returning empty speech")
+    # Someone who spoke gets an answer, even if it's that this one went wrong;
+    # an ambient event stays silent, as it always may.
+    speech = (tool_spoken or STUCK_SPEECH) if is_voice else ""
+    print(f"[loop] exited loop with no end_turn - speech={speech!r}")
     return IntentResult(
-        event_id=event_id, speech="", actions=ctx.for_wire(),
+        event_id=event_id, speech=speech, actions=ctx.for_wire(),
         episode_id=ctx.episode_id, scheduled_departure=ctx.scheduled_departure,
     )

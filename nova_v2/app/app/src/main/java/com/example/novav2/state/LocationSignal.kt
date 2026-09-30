@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import java.util.Locale
 
 /**
  * Cheap signal (CONTEXT.md "User State" - ambient sensor inference): fine-accuracy location,
@@ -36,15 +37,30 @@ object LocationSignal {
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) ==
                 PackageManager.PERMISSION_GRANTED
 
+    /**
+     * Asks for a fresh fix, and falls back to the last known one when none arrives. Without the
+     * fallback a phone that isn't producing new fixes - indoors, or the emulator, which only
+     * emits one when a location is set - never had a location at all, however recently it knew
+     * where it was.
+     */
     @SuppressLint("MissingPermission")
     fun refresh(context: Context) {
         if (!hasPermission(context)) return
-        LocationServices.getFusedLocationProviderClient(context)
-            .getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+        val client = LocationServices.getFusedLocationProviderClient(context)
+        client.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
             .addOnSuccessListener { location ->
                 if (location != null) {
-                    latestLocationCtx = "%.4f,%.4f".format(location.latitude, location.longitude)
+                    remember(location.latitude, location.longitude)
+                } else {
+                    client.lastLocation.addOnSuccessListener { last ->
+                        if (last != null) remember(last.latitude, last.longitude)
+                    }
                 }
             }
+    }
+
+    // Locale.US so the decimal separator is always '.', which the server splits on.
+    private fun remember(latitude: Double, longitude: Double) {
+        latestLocationCtx = String.format(Locale.US, "%.4f,%.4f", latitude, longitude)
     }
 }

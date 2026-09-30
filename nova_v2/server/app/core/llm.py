@@ -201,7 +201,9 @@ def tool_calls_in_text(text: str | None) -> list[dict[str, Any]]:
         try:
             data = json.loads(body)
         except json.JSONDecodeError:
-            continue
+            data = _xml_tool_call(body)
+            if data is None:
+                continue
         if not isinstance(data, dict) or not isinstance(data.get("name"), str):
             continue
         arguments = data.get("arguments", {})
@@ -214,6 +216,42 @@ def tool_calls_in_text(text: str | None) -> list[dict[str, Any]]:
             },
         })
     return calls
+
+
+_XML_FUNCTION = re.compile(r"<function=([\w.-]+)>(.*?)(?:</function>|$)", re.DOTALL)
+_XML_PARAMETER = re.compile(r"<parameter=([\w.-]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
+
+
+def _xml_tool_call(body: str) -> dict[str, Any] | None:
+    """Qwen3-Coder's tool-call markup, which the served parser (qwen3_coder)
+    normally turns into tool_calls itself:
+        <function=name><parameter=key>value</parameter>...</function>
+    Values that read as JSON (numbers, lists, objects) are decoded; the rest
+    stay strings."""
+    match = _XML_FUNCTION.search(body)
+    if not match:
+        return None
+    arguments: dict[str, Any] = {}
+    for key, raw in _XML_PARAMETER.findall(match.group(2)):
+        raw = raw.strip()
+        try:
+            value = json.loads(raw)
+            arguments[key] = value if not isinstance(value, str) else raw
+        except json.JSONDecodeError:
+            arguments[key] = raw
+    return {"name": match.group(1), "arguments": arguments}
+
+
+def reasoning_of(message: Any) -> str:
+    """The thinking a server returned apart from the answer. vLLM has called
+    the field reasoning_content and, more recently, reasoning."""
+    for name in ("reasoning_content", "reasoning"):
+        value = getattr(message, name, None)
+        if value is None:
+            value = (getattr(message, "model_extra", None) or {}).get(name)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def without_tool_call_text(text: str | None) -> str:
