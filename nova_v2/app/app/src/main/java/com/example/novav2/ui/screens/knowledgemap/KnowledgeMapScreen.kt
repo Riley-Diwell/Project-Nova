@@ -50,7 +50,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -216,7 +224,25 @@ fun KnowledgeMapScreen(onOpenNote: (String) -> Unit = {}) {
         runSearch(query)
     }
 
-    Column(Modifier.fillMaxSize().imePadding()) {
+    // Where the search field sits, so a touch anywhere else can close it.
+    var searchBounds by remember { mutableStateOf(Rect.Zero) }
+    var screenOrigin by remember { mutableStateOf(Offset.Zero) }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .imePadding()
+            .onGloballyPositioned { screenOrigin = it.positionInRoot() }
+            // Any touch outside the search field - a tap, pan or pinch on the map, the fact
+            // card, the legend - closes the search and its keyboard. Watched on the Initial
+            // pass and never consumed, so the touch still does whatever it does.
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    if (!searchBounds.contains(down.position + screenOrigin)) focusManager.clearFocus()
+                }
+            },
+    ) {
         ScreenHeader(
             title = "Knowledge Map",
             subtitle = "What NOVA believes about you, grouped by topic. Pinch in to read each one.",
@@ -341,7 +367,10 @@ fun KnowledgeMapScreen(onOpenNote: (String) -> Unit = {}) {
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp)
+                    .onGloballyPositioned { searchBounds = it.boundsInRoot() },
                 placeholder = { Text("Search what NOVA knows…") },
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 trailingIcon = if (query.isNotEmpty() || result != null) {
