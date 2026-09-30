@@ -225,6 +225,9 @@ SYSTEM_PROMPT = (
     "it again, check the most recent entry in recent_episodes for what they "
     "said before claiming you have no context - the words are there even on "
     "turns where nothing was saved to memory or persona for them. "
+    "standing_instructions, when present, are what the user has told you about "
+    "how to behave and talk to them - they apply to every reply, whatever it is "
+    "about, including how you phrase your speech. "
     "The memory tool is the notebook of what the user has told you: save when "
     "they ask you to remember or note something, and recall when they ask what "
     "they told you. "
@@ -937,6 +940,21 @@ def _relevant_persona(user_id: UUID | str, event: Event) -> list[dict[str, Any]]
     ]
 
 
+def _standing_instructions(user_id: UUID | str) -> list[str]:
+    """What the user has told Nova about how to behave (persona's "Nova" topic).
+    Listed here even when the search above also found one, so the model always
+    sees it marked as an instruction rather than just a fact. Non-fatal."""
+    try:
+        standing = persona.standing_instructions(user_id)
+    except Exception as e:
+        print(f"[persona] standing instructions skipped: {e}")
+        return []
+    texts = [f.text for f in standing]
+    if texts:
+        print(f"[persona] {len(texts)} standing instruction(s)")
+    return texts
+
+
 def _for_model(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The persona payload without the evidence block.
 
@@ -1026,6 +1044,10 @@ def _run(
         # of them. "Parked on level 3" only ever appears in the first.
         "persona": _for_model(facts),
     }
+    # How the user wants Nova to behave, on every turn - see the system prompt.
+    standing = _standing_instructions(user_id)
+    if standing:
+        payload["standing_instructions"] = standing
     # What they asked to be called in onboarding. Left out rather than null when
     # unset, so a turn without it reads exactly as before.
     if saved_profile and saved_profile.display_name:

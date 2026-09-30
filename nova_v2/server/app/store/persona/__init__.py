@@ -65,7 +65,7 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.store.persona.embeddings import Embedder, FakeEmbedder, LocalEmbedder
@@ -360,6 +360,49 @@ def superseded(user_id: UserId) -> dict[str, datetime]:
     """Every pattern a newer belief won over, and when. Consolidation may
     offer one again only with evidence newer than that - see reconcile.py."""
     return get_store().superseded(user_id)
+
+
+# The topic holding what the user has told Nova about Nova itself: how to talk
+# to them, when to interrupt, how proactive to be (clusters.TOPICS).
+STANDING_TOPIC = "Nova"
+STANDING_LIMIT = 8
+
+
+def standing_instructions(user_id: UserId, limit: int = STANDING_LIMIT) -> list[Fact]:
+    """The user's lasting instructions to Nova - every fact in the "Nova" topic,
+    newest first.
+
+    Retrieval by meaning can't find these: "only speak to me in rhymes" has
+    nothing in common with "how far to my next class", yet it governs the answer.
+    So the Intent Surface includes them on every turn rather than only when they
+    match. Empty when grouping is unavailable; never raises.
+    """
+    try:
+        get_store()  # the cluster store follows the persona store's backend
+    except Exception as e:
+        print(f"[persona] standing instructions skipped: {e}")
+        return []
+    store = get_cluster_store()
+    if store is None:
+        return []
+    try:
+        topic = next((c for c in store.clusters(user_id)
+                      if c.is_topic and c.title == STANDING_TOPIC), None)
+        if topic is None:
+            return []
+        ids = [fid for fid, cid in store.membership(user_id).items() if cid == topic.id]
+        facts = []
+        for fid in ids:
+            try:
+                facts.append(get(user_id, fid))
+            except Exception:
+                continue  # deleted since it was grouped
+    except Exception as e:
+        clusters_failed(e)
+        return []
+    facts.sort(key=lambda f: f.stated_at or f.created_at or datetime.min.replace(tzinfo=timezone.utc),
+               reverse=True)
+    return facts[:limit]
 
 
 def find_by_source_key(user_id: UserId, key: str) -> list[Fact]:
