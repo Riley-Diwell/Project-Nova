@@ -524,6 +524,44 @@ def _record_action(
     ))
 
 
+def _memory_outcome(result: Any) -> dict[str, Any]:
+    """Where a memory save landed, for its Action: long-term memory (a Persona
+    fact, and whether it was new, a duplicate or a replacement) or a note. The
+    audit log words the two differently - they are different features."""
+    if not isinstance(result, dict) or result.get("success") is not True:
+        return {"failed": True}
+    if result.get("fact_id"):
+        return {"saved_as": "memory", "outcome": result.get("outcome")}
+    if result.get("note_id"):
+        return {"saved_as": "note"}
+    return {}
+
+
+# What a canvas Action keeps of the call - never the tool's result text.
+_CANVAS_INPUT_KEYS = ("action", "course", "days", "assignment", "query", "item", "question")
+
+
+def _record_canvas(tool_input: dict[str, Any], result: Any, ctx: TurnContext) -> None:
+    """Record a canvas call as an Action, for the audit log.
+
+    The one context tool that is recorded: it reads the user's coursework and
+    grades, which is exactly the kind of thing the audit log exists to show. A
+    read keeps the title of the document it opened, so the log can say "Read
+    'Tutorial 11.docx'" rather than just "checked Canvas". No gain and no
+    control trace - nothing decided whether it could run - and consolidation
+    counts nothing from it (trends.COUNTED_ACTION_FIELDS has no canvas entry).
+    The phone skips Actions for tools it doesn't carry out.
+    """
+    recorded = {k: tool_input[k] for k in _CANVAS_INPUT_KEYS if tool_input.get(k) not in (None, "")}
+    ok = isinstance(result, dict) and result.get("success") is True
+    if ok and tool_input.get("action") == "read":
+        recorded["document"] = result.get("title")
+        recorded["document_type"] = result.get("type")
+    if ok and result.get("course"):
+        recorded["course_name"] = result["course"]
+    ctx.actions.append(Action(tool="canvas", input=recorded, trigger="requested", ran=ok, reason="context"))
+
+
 def _refused_result(name: str) -> dict[str, Any]:
     """
     What the model gets back if it calls a tool it was not offered.
@@ -585,7 +623,9 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
         except Exception as e:
             print(f"[canvas] connection lookup failed: {e}")
             return {"success": False, "error": "Canvas is unavailable right now"}
-        return run_canvas(tool_input, connection, ctx.utc_offset_minutes)
+        result = run_canvas(tool_input, connection, ctx.utc_offset_minutes)
+        _record_canvas(tool_input, result, ctx)
+        return result
     unknown = _unknown_reminder(name, tool_input, ctx)
     if unknown is not None:
         _record_action(name, tool_input, ctx, ran=False)
@@ -611,6 +651,8 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
             tool_input = {**tool_input, "episode_id": ctx.episode_id}
         # Authorisation already happened in _gate. The dispatcher just runs it.
         result = _DISPATCHER.dispatch_reactive(name, tool_input)
+        if name == "memory" and tool_input.get("action") == "save":
+            tool_input = {**tool_input, **_memory_outcome(result)}
         # Recorded after the call, so a tool that raises is not reported as run -
         # and with the augmented tool_input, so the Action carries the origin the
         # tool actually used rather than the one the model supplied.

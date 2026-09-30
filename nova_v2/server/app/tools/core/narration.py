@@ -110,6 +110,9 @@ def _format_local_range(start: str | None, end: str | None) -> str | None:
 def describe_action(tool: str, tool_input: dict[str, Any], ran: bool) -> str:
     """One sentence for one tool call, built from that tool's actual
     input_schema (tools/functions/*.py) - not guessed."""
+    if tool == "canvas":
+        return _describe_canvas(tool_input, ran)
+
     if tool == "add_calendar_event":
         title = tool_input.get("title", "an event")
         if not ran:
@@ -148,12 +151,13 @@ def describe_action(tool: str, tool_input: dict[str, Any], ran: bool) -> str:
     if tool == "memory":
         action = tool_input.get("action")
         if action == "save":
-            text = tool_input.get("text", "").strip()
-            return f'Saved a note: "{text}".' if text else "Saved a note."
+            return _describe_memory_save(tool_input)
         if action == "recall":
-            query = tool_input.get("query", "").strip()
-            return f'Looked up notes about "{query}".' if query else "Looked up your notes."
-        return "Checked your notes." if ran else "Considered checking your notes, but didn't."
+            query = (tool_input.get("query") or "").strip()
+            return (f"Looked up what you've told Nova about \"{query}\"." if query
+                    else "Looked up what you've told Nova.")
+        return ("Checked what you've told Nova." if ran
+                else "Considered checking what you've told Nova, but didn't.")
 
     if tool == "notification_management":
         action = tool_input.get("action")
@@ -191,6 +195,71 @@ def describe_action(tool: str, tool_input: dict[str, Any], ran: bool) -> str:
         return f"Checked your reminders for {when}." if when else "Checked your reminders."
 
     return f"Ran {tool}." if ran else f"Considered running {tool}, but didn't."
+
+
+def _describe_memory_save(tool_input: dict[str, Any]) -> str:
+    """A memory save, by where it landed. Filed under a category, it went into
+    long-term memory (Persona - the Knowledge Map); otherwise it became a note
+    in the Notes tab, which is a different thing and is called one.
+
+    saved_as/outcome are recorded from the tool's result (intent_surface.py,
+    _memory_outcome). Episodes from before that fall back to the category,
+    which is what decided it."""
+    text = (tool_input.get("text") or "").strip()
+    quoted = f': "{text}".' if text else "."
+    saved_as = tool_input.get("saved_as")
+    if saved_as is None and "failed" not in tool_input:
+        saved_as = "memory" if tool_input.get("category") else "note"
+    if saved_as == "memory":
+        outcome = tool_input.get("outcome")
+        if outcome == "merged":
+            return f"Already remembered this, so nothing changed{quoted}"
+        if outcome == "replaced":
+            return f"Updated a memory{quoted}"
+        return f"Remembered{quoted}"
+    if saved_as == "note":
+        return f"Saved a note{quoted}"
+    return f"Tried to remember this, but couldn't save it{quoted}"
+
+
+def _describe_canvas(tool_input: dict[str, Any], ran: bool) -> str:
+    """A canvas call - telling a document Nova opened and read apart from a
+    lookup of Canvas's own data (what's due, marks, course calendar)."""
+    action = tool_input.get("action")
+    course = tool_input.get("course_name") or tool_input.get("course")
+    in_course = f" in {course}" if course else ""
+
+    if action == "read":
+        document = tool_input.get("document")
+        if ran and document:
+            kind = {"File": "document", "Page": "page", "Assignment": "assignment brief",
+                    "Quiz": "quiz description"}.get(tool_input.get("document_type") or "", "document")
+            return f"Read the {kind} '{document}'{in_course} on Canvas."
+        item = tool_input.get("item") or "a document"
+        return f"Tried to read '{item}'{in_course} on Canvas, but couldn't open it."
+
+    if action == "upcoming":
+        days = tool_input.get("days")
+        span = f" in the next {days} days" if days else ""
+        what = f"Checked Canvas for what's due{in_course}{span}."
+    elif action == "grades":
+        assignment = tool_input.get("assignment")
+        what = (f"Checked your mark for '{assignment}'{in_course} on Canvas." if assignment
+                else f"Checked your grades{in_course} on Canvas.")
+    elif action == "classes":
+        what = f"Checked the Canvas calendar{' for ' + course if course else ''}."
+    elif action == "materials":
+        query = tool_input.get("query")
+        what = (f"Looked through the course materials{in_course} on Canvas"
+                + (f" for '{query}'." if query else "."))
+    else:
+        what = "Checked Canvas."
+    if ran:
+        return what
+    # "Checked X." -> "Tried to check X, but Canvas didn't answer."
+    verb, rest = what.split(" ", 1)
+    base = {"Checked": "check", "Looked": "look"}.get(verb, verb.lower())
+    return f"Tried to {base} {rest[:-1]}, but Canvas didn't answer."
 
 
 def _minutes_phrase(minutes: Any) -> str:
