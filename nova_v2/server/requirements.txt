@@ -12,6 +12,8 @@ numpy>=1.26
 fastmcp>=2.0
 googlemaps>=4.10
 requests>=2.32
+# Canvas course material (tools/canvas/text.py). Pure Python.
+pypdf>=4.0
 
 # Memory / Persona store
 supabase>=2.9

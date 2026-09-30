@@ -44,6 +44,8 @@ from app.tools.core.dispatcher import Dispatcher
 from app.tools.core.registry import ToolRegistry
 from app.tools.functions.notification_management import set_batcher_mode
 from app.tools.web_search import WEB_SEARCH_TOOL, web_search
+from app.store import canvas as canvas_store
+from app.tools.canvas.tool import CANVAS_TOOL, run_canvas
 
 from app.store import memory
 from app.store import persona
@@ -58,6 +60,8 @@ LOOP_TIMEOUT_S = 45.0
 # web_search runs locally now (tools/web_search.py), so its cap is ours to
 # enforce - the hosted tool's max_uses did this before.
 WEB_SEARCH_MAX_USES = 3
+# canvas calls per turn: materials then read, sometimes twice, plus a lookup.
+CANVAS_MAX_USES = 6
 
 # How many past Episodes of the same type to hand the model as short-term context.
 # A prompt-size cap as much as a query limit - keep it small.
@@ -175,6 +179,9 @@ SYSTEM_PROMPT = (
     "nudge itself from the tool's own numbers, not from anything you say, so "
     "there is nothing to phrase - just call the tool and return \"\". Only "
     "answer about leaving out loud when the user asked directly (a voice turn). "
+    "UNIVERSITY. When a canvas tool is offered, use it for coursework: what's "
+    "due, marks and feedback, and what a class covers - the calendar says when "
+    "a class is, Canvas says what's in it. "
     "TIMERS AND ALARMS. Call set_timer for a bare countdown with no clock "
     "time and nothing to say - 'set a timer for 10 minutes', 'ping me in 90 "
     "seconds' - "
@@ -246,7 +253,7 @@ SYSTEM_PROMPT = (
 
 # web_search (tools/web_search.py) and get_current_address are context tools:
 # answered here, never gated, never recorded as Actions.
-CONTEXT_TOOLS = ("web_search", "get_current_address")
+CONTEXT_TOOLS = ("web_search", "get_current_address", "canvas")
 
 GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
     "name": "get_current_address",
@@ -294,10 +301,11 @@ def _as_function(name: str, description: str, parameters: dict[str, Any]) -> dic
         "function": {"name": name, "description": description, "parameters": parameters},
     }
 
-def _build_tools(authorised: list[str]) -> list[dict[str, Any]]:
+def _build_tools(authorised: list[str], canvas: bool = False) -> list[dict[str, Any]]:
     """
     The tool list for one turn: exactly what the Controller authorised, plus the
-    context tools.
+    context tools - canvas only for a user who has connected it, so nobody else's
+    prompt grows by a tool they can't use.
 
     A Function tool with no authority this
     turn is simply absent, so calling it is structurally impossible rather than
@@ -312,6 +320,9 @@ def _build_tools(authorised: list[str]) -> list[dict[str, Any]]:
         *(_as_function(t["name"], t["description"], t["input_schema"])
           for t in (WEB_SEARCH_TOOL, GET_CURRENT_ADDRESS_TOOL)),
         *(_tool_definition(name) for name in authorised),
+        # Last, so the shared prefix above stays identical for every user.
+        *([_as_function(CANVAS_TOOL["name"], CANVAS_TOOL["description"], CANVAS_TOOL["input_schema"])]
+          if canvas else []),
     ]
 
 # The registry is built here, so this is where the gain package gets pointed at
@@ -441,6 +452,11 @@ class TurnContext:
     # web_search calls so far this turn, against WEB_SEARCH_MAX_USES.
     web_searches: int = 0
 
+    # Whether this user has connected Canvas (store/canvas.py), which is what
+    # puts the canvas tool on offer; and its calls so far, against CANVAS_MAX_USES.
+    canvas: bool = False
+    canvas_calls: int = 0
+
     @property
     def ran(self) -> list[str]:
         """Names of the tools that actually ran - logging only."""
@@ -557,6 +573,19 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
                 "search limit reached this turn - answer from the results you have")}
         ctx.web_searches += 1
         return web_search(str(tool_input.get("query", "")))
+    if name == "canvas":
+        if not ctx.canvas:
+            return {"success": False, "error": "Canvas isn't connected"}
+        if ctx.canvas_calls >= CANVAS_MAX_USES:
+            return {"success": False, "error": (
+                "Canvas limit reached this turn - answer from what you have")}
+        ctx.canvas_calls += 1
+        try:
+            connection = canvas_store.get(ctx.user_id)
+        except Exception as e:
+            print(f"[canvas] connection lookup failed: {e}")
+            return {"success": False, "error": "Canvas is unavailable right now"}
+        return run_canvas(tool_input, connection, ctx.utc_offset_minutes)
     unknown = _unknown_reminder(name, tool_input, ctx)
     if unknown is not None:
         _record_action(name, tool_input, ctx, ran=False)
@@ -1073,6 +1102,7 @@ def _run(
         or (saved_profile.answers.travel_mode if saved_profile else None),
         utc_offset_minutes=user_state.utc_offset_minutes,
         episode_id=episode_id,
+        canvas=canvas_store.is_connected(user_id),
         known_reminder_ids=(
             {r.id for r in user_state.reminders}
             if user_state.reminders_pending_total is not None else None
@@ -1190,7 +1220,7 @@ def _run_loop(
     is_voice: bool = False,
 ) -> IntentResult | NeedMoreResult:
     # Read off the Turn rather than passed in.
-    tools = _build_tools(ctx.turn.authorised())
+    tools = _build_tools(ctx.turn.authorised(), canvas=ctx.canvas)
 
     # The last line a tool offered for the user to hear. Spoken if the model
     # ends the turn saying nothing - after a save it sometimes returns no text

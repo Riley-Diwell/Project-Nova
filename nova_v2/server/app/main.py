@@ -55,6 +55,7 @@ from app.api import me as me_api
 from app.api import notes as notes_api
 from app.api import notes_pipeline as notes_pipeline_api
 from app.api import reminders as reminders_api
+from app.api import canvas as canvas_api
 from app.core import auth, llm
 from app.core.auth import AuthUser, current_user
 from app.core.request_user import bind_request_user
@@ -148,6 +149,7 @@ auth.check_startup()
 app.include_router(auth_api.router)
 app.include_router(me_api.router)
 app.include_router(reminders_api.router)
+app.include_router(canvas_api.router)
 
 _API_KEY = os.environ.get("NOVA_API_KEY", "").strip()
 if not _API_KEY:

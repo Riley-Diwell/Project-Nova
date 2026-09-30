@@ -46,6 +46,7 @@ import com.example.novav2.ui.screens.knowledgemap.KnowledgeMapScreen
 import com.example.novav2.ui.screens.NoteDetailScreen
 import com.example.novav2.ui.screens.NotesScreen
 import com.example.novav2.ui.screens.NotesSettingsScreen
+import com.example.novav2.ui.screens.CanvasScreen
 import com.example.novav2.ui.screens.ProfileScreen
 import com.example.novav2.ui.screens.RemindersScreen
 import com.example.novav2.ui.screens.SETTINGS_SUBSCREEN_ROUTES
@@ -209,6 +210,9 @@ fun NovaApp(
             }
             composable(NovaDestination.Profile.route) {
                 SettingsSubScreen(NovaDestination.Profile, navController) { ProfileScreen() }
+            }
+            composable(NovaDestination.Canvas.route) {
+                SettingsSubScreen(NovaDestination.Canvas, navController) { CanvasScreen() }
             }
         }
     }

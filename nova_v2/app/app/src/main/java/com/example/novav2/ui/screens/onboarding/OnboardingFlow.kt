@@ -28,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,7 +53,9 @@ import com.example.novav2.ui.components.ScreenGutter
 import com.example.novav2.ui.components.SleepQuestion
 import com.example.novav2.ui.components.TimetableQuestion
 import com.example.novav2.ui.components.TravelModeQuestion
+import com.example.novav2.ui.screens.CanvasConnectSection
 import com.example.novav2.ui.screens.DeviceScreen
+import com.example.novav2.network.CanvasApiClient
 import kotlinx.coroutines.launch
 import java.io.IOException
 
@@ -60,10 +63,11 @@ private const val STEP_NAME = 0
 private const val STEP_WEEK = 1
 private const val STEP_RHYTHM = 2
 private const val STEP_BEHAVIOUR = 3
-private const val STEP_DEVICE = 4
-private const val STEPS = 5
+private const val STEP_CANVAS = 4
+private const val STEP_DEVICE = 5
+private const val STEPS = 6
 
-private val TITLES = listOf("About you", "Your week", "Your rhythm", "How Nova behaves", "Your Nova device")
+private val TITLES = listOf("About you", "Your week", "Your rhythm", "How Nova behaves", "Your uni's Canvas", "Your Nova device")
 
 /**
  * Onboarding: the few questions that let Nova fit the user from day
@@ -86,6 +90,7 @@ fun OnboardingFlow() {
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
+    val canvasStatus by CanvasApiClient.status.collectAsState()
 
     fun persist() = ProfileRepository.saveDraft(ProfileRepository.Draft(name, answers, step))
     fun change(next: OnboardingAnswers) { answers = next; persist() }
@@ -111,6 +116,7 @@ fun OnboardingFlow() {
             answers.timetableInCalendar != null
         STEP_RHYTHM -> answers.sleepStart != null || answers.sleepEnd != null || answers.travelMode != null
         STEP_BEHAVIOUR -> answers.focusInterruptions != null || answers.proactivity != null
+        STEP_CANVAS -> canvasStatus?.connected == true
         else -> true
     }
 
@@ -181,6 +187,15 @@ fun OnboardingFlow() {
                         STEP_BEHAVIOUR -> {
                             Column { FocusQuestion(answers, ::change) }
                             Column { ProactivityQuestion(answers, ::change) }
+                        }
+                        STEP_CANVAS -> Column {
+                            Text(
+                                "Optional. You can connect it later from Settings → Canvas.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 12.dp),
+                            )
+                            CanvasConnectSection()
                         }
                     }
                     Spacer(Modifier.height(8.dp))

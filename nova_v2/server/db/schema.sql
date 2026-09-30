@@ -23,6 +23,8 @@
 --   7. reminders       - each account's reminders, synced from the phone
 --                         (app/store/reminders.py).
 --   8. profiles        - display name and onboarding answers (app/store/profile.py).
+--   9. canvas_connections - each account's Canvas address and encrypted access
+--                         token (app/store/canvas.py). Server-only: no policy.
 --
 -- Every table is per-account: a user_id referencing Supabase Auth's auth.users
 -- with on delete cascade, and an owner RLS policy as a backstop to the server's
@@ -755,3 +757,26 @@ create policy profiles_owner on public.profiles for all to authenticated
 
 comment on table public.profiles is
     'One per account: display name and onboarding answers (app/schemas/profile.py).';
+
+
+-- ---------------------------------------------------------------------------
+-- 9. Canvas connections
+-- ---------------------------------------------------------------------------
+-- The Canvas address a user signs in at and the personal access token they
+-- made for Nova (Account -> Settings -> Approved Integrations), encrypted by
+-- the server (app/store/canvas.py). The token reads everything the student can
+-- in Canvas, grades included, so RLS is on with NO policy: only the service
+-- role - the Nova server - can read or write a row, never a user's own JWT.
+
+create table if not exists public.canvas_connections (
+    user_id          uuid        primary key references auth.users (id) on delete cascade,
+    base_url         text        not null check (base_url like 'https://%'),
+    token_ciphertext text        not null,
+    canvas_user_name text,
+    connected_at     timestamptz not null default now()
+);
+
+alter table public.canvas_connections enable row level security;
+
+comment on table public.canvas_connections is
+    'One per account: Canvas address and Fernet-encrypted access token. Server-only.';

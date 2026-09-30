@@ -58,6 +58,7 @@ private val TRAVEL_MODES = listOf("transit", "walking", "driving")
  * Voice/Map/Audit are. Routes themselves are unchanged, still registered in NovaApp's NavHost. */
 private val SETTINGS_SUBSCREENS = listOf(
     NovaDestination.Profile to "Your week, sleep and how Nova should behave",
+    NovaDestination.Canvas to "Connect Canvas for deadlines, marks and course notes",
     NovaDestination.NotesSettings to "Export or delete your notes, and whether recordings are kept",
     NovaDestination.Audit to "Every automated action Nova has taken, and why",
     NovaDestination.Device to "Pair and manage your Nova companion device",

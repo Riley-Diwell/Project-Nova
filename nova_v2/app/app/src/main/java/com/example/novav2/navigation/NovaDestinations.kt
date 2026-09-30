@@ -10,6 +10,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.automirrored.filled.StickyNote2
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -28,6 +29,8 @@ sealed class NovaDestination(val route: String, val label: String, val icon: Ima
     data object Settings : NovaDestination("settings", "Settings", Icons.Default.Person)
     /** Settings -> Your profile: the onboarding answers, editable. */
     data object Profile : NovaDestination("profile", "Profile", Icons.Default.AccountCircle)
+    /** Settings -> Canvas: connect the user's uni Canvas with an access token. */
+    data object Canvas : NovaDestination("canvas", "Canvas", Icons.Default.School)
 }
 
 // Dashboard is still hidden from the bottom nav - the screen/route exists, just not linked here
