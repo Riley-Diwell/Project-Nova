@@ -36,7 +36,9 @@ class SetTimerTool(BaseTool):
                 "Starts a countdown timer on the user's phone via the device's "
                 "Clock app. Use this when the user asks for a timer or a "
                 "countdown with no specific clock time - 'set a timer for 10 "
-                "minutes', 'remind me in an hour', 'ping me in 90 seconds'. "
+                "minutes', 'ping me in 90 seconds'. A reminder with something to "
+                "say ('remind me in an hour to call mum') is set_reminder, not "
+                "this. "
                 "Convert whatever duration they said into whole seconds "
                 "yourself (10 minutes -> 600, 1 hour -> 3600, 90 seconds -> "
                 "90) - never pass the phrase itself. The timer starts the "
@@ -44,10 +46,9 @@ class SetTimerTool(BaseTool):
                 "e.g. 'timer set for 10 minutes', not as pending."
             ),
             gain_description=(
-                "How readily Nova starts a timer without being asked outright "
-                "- e.g. starting one unprompted off something you said in "
-                "passing. At 1.0 it acts on a stated need. At 0.0 it only "
-                "starts a timer you explicitly ask for."
+                "How readily Nova starts a timer without being asked outright. "
+                "Nova can't yet measure a need for one on its own, so for now "
+                "it only starts a timer you ask for, whatever this dial says."
             ),
             input_schema={
                 "type": "object",
@@ -102,8 +103,8 @@ class SetAlarmTool(BaseTool):
             ),
             gain_description=(
                 "How readily Nova sets an alarm without being asked outright. "
-                "At 1.0 it acts on a stated need - 'I should be up by 7' gets "
-                "one set. At 0.0 it only sets an alarm you explicitly ask for."
+                "Nova can't yet measure a need for one on its own, so for now "
+                "it only sets an alarm you ask for, whatever this dial says."
             ),
             input_schema={
                 "type": "object",

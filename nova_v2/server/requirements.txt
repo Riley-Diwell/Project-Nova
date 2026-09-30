@@ -3,8 +3,8 @@ uvicorn[standard]>=0.32
 pydantic>=2.9
 python-dotenv>=1.0
 
-# Intent Surface / state estimator
-anthropic>=0.40
+# Every model call (core/llm.py): the OpenAI chat-completions protocol, served
+# by the self-hosted Qwen (deploy/compose.yml) or anything compatible.
 openai>=1.50
 numpy>=1.26
 
@@ -12,9 +12,21 @@ numpy>=1.26
 fastmcp>=2.0
 googlemaps>=4.10
 requests>=2.32
+# Canvas course material (tools/canvas/text.py). Pure Python.
+pypdf>=4.0
 
 # Memory / Persona store
 supabase>=2.9
 # Persona embeddings, run locally (ONNX, no PyTorch). Downloads
 # BAAI/bge-large-en-v1.5 (~1.2 GB) on first use, then caches it.
 fastembed>=0.4
+# Persona hybrid search: era-memory's rank fusion + recency scoring
+# (app/store/persona/ranking.py). Base install, no dependencies. Pinned
+# exactly - ranking.py imports era_memory.core.logic, which is not its
+# documented public API.
+era-memory==0.1.3
+
+# Accounts: checking Supabase access tokens, and calling Supabase Auth (GoTrue).
+# Both already arrive via supabase, but they're used directly, so pin them here.
+PyJWT[crypto]>=2.8
+httpx>=0.27

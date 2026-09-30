@@ -47,11 +47,6 @@ FIRING_THRESHOLD: Final[float] = 0.15
 # can be tuned after from testing, small and symmetric for now
 REINFORCEMENT_STEP: Final[float] = 0.05
 
-# bound user over riding gain from 0 - 1
-OVERRIDE_MIN: Final[float] = GAIN_MIN
-OVERRIDE_MAX: Final[float] = GAIN_MAX
-
-
 def clamp(value: float, low: float = GAIN_MIN, high: float = GAIN_MAX) -> float:
     """
     Clamp a gain value into [low, high].

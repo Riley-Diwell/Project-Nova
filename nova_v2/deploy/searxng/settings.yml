@@ -1,0 +1,22 @@
+# SearXNG for NOVA's web_search tool. Internal to the compose network: only
+# the NOVA server calls it, for JSON.
+use_default_settings: true
+
+general:
+  instance_name: nova-search
+
+server:
+  # From SEARXNG_SECRET in the environment.
+  secret_key: "overridden-by-env"
+  limiter: false
+  image_proxy: false
+  public_instance: false
+
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true

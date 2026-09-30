@@ -1,0 +1,35 @@
+{
+	auto_https off
+	admin off
+}
+
+# Internal: Supabase's URL layout for the NOVA server. Not published.
+:8000 {
+	handle_path /rest/v1/* {
+		reverse_proxy rest:3000
+	}
+	handle_path /auth/v1/* {
+		reverse_proxy auth:9999
+	}
+	respond 404
+}
+
+# Published on 127.0.0.1:8088, and from there to the tailnet by tailscale serve.
+:8088 {
+	# The model's OpenAI-compatible API, for anyone on the tailnet with the key.
+	@model path /v1/*
+	handle @model {
+		@keyed header Authorization "Bearer {$LLM_SHARE_KEY}"
+		handle @keyed {
+			request_header -Authorization
+			reverse_proxy qwen:18020 {
+				flush_interval -1
+			}
+		}
+		respond "missing or invalid bearer key" 401
+	}
+
+	handle {
+		reverse_proxy nova:8080
+	}
+}

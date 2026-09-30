@@ -5,8 +5,9 @@ STATUS: working draft
 
 WHAT THIS FILE IS
 Uses AI to infer intent.
-    1. Runs an Anthropic client. It receives an Event and the User State the phone
-computed for it, and produces the words NOVA says plus the Actions it took.
+    1. Calls the model (core/llm.py - the self-hosted Qwen, over the OpenAI
+protocol). It receives an Event and the User State the phone computed for it,
+and produces the words NOVA says plus the Actions it took.
     2. Runs a tool calling loop to process this data and infer intent.
 
 WHO USES THIS
@@ -18,38 +19,57 @@ import json
 import os
 import re
 import uuid
+from types import SimpleNamespace
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from uuid import UUID
 
 import requests
-from anthropic import Anthropic
 from pydantic import BaseModel
 
 # import nova libraries
 from app.schemas.user_state import UserState
 from app.schemas.event import Event
-from app.control.commands import classify
+from app.control.commands import classify, note_body
 from app.control.controller import Decision, ProportionalController, Reason, Turn
 from app.control.observer import observe, trends_from_facts
 from app.control.gain.gain_store import GainStore
 from app.control.gain.overrides import GainOverrides
 from app.control.gain.reinforcement import Outcome, Reinforcer
+from app.core import llm
+from app.core.request_user import as_user
 from app.tools.core.action import Action
-from app.tools.core.catalogue import CLIENT_TOOLS, build_registry
+from app.tools.core.catalogue import CLIENT_TOOLS, DEVICE_TOOLS, build_registry
 from app.tools.core.dispatcher import Dispatcher
+from app.tools.core.registry import ToolRegistry
 from app.tools.functions.notification_management import set_batcher_mode
+from app.tools.web_search import WEB_SEARCH_TOOL, web_search
+from app.store import canvas as canvas_store
+from app.tools.canvas.tool import CANVAS_TOOL, run_canvas
 
 from app.store import memory
 from app.store import persona
+from app.store import profile
 
-client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-
-MODEL = "claude-haiku-4-5"
 MAX_ITERATIONS = 5
 
-# How many past Episodes of the same type to hand Claude as short-term context.
+# A voice turn waits on this; the model is local, so a generous timeout still
+# fails fast when the box is down.
+LOOP_TIMEOUT_S = 45.0
+# Thinking plus answer, per model call in the loop. The model generates about
+# 130 tokens a second, so this bounds one step at ~12 s; most think for a few
+# hundred tokens. One that runs out is made to answer (_force_answer) rather
+# than given more - a voice turn is better quick than exhaustively considered.
+LOOP_MAX_TOKENS = 1536
+
+# web_search runs locally now (tools/web_search.py), so its cap is ours to
+# enforce - the hosted tool's max_uses did this before.
+WEB_SEARCH_MAX_USES = 3
+# canvas calls per turn: materials then read, sometimes twice, plus a lookup.
+CANVAS_MAX_USES = 6
+
+# How many past Episodes of the same type to hand the model as short-term context.
 # A prompt-size cap as much as a query limit - keep it small.
 RECENT_EPISODES = 5
 
@@ -76,8 +96,8 @@ PERSONA_MIN_SIMILARITY = 0.35
 MAPS_API_KEY = os.environ.get("google_maps_api_key")
 
 # Set NOVA_MOCK_LLM=1 in .env to test the /event pipeline (schema validation,
-# routing, wire contract) without calling the real Anthropic API - useful for
-# local testing without spending API credits.
+# routing, wire contract) without calling the model - useful for testing
+# without the model server running.
 MOCK_LLM = os.environ.get("NOVA_MOCK_LLM", "").strip().lower() in ("1", "true", "yes")
 
 # The prompt describes speech and the sources NOVA speaks from. Nothing in it
@@ -85,6 +105,9 @@ MOCK_LLM = os.environ.get("NOVA_MOCK_LLM", "").strip().lower() in ("1", "true", 
 # only the tools the Controller authorised, so an unauthorised call is
 # structurally impossible rather than prose-discouraged.
 SYSTEM_PROMPT = (
+    "THINK BRIEFLY: this is a spoken conversation and the user is waiting while "
+    "you think - keep your private reasoning to a few short sentences, then act "
+    "or answer. "
     "You are NOVA, an ambient assistant. You receive the triggering event "
     "(e.g. what the user said) and their current state, both as JSON. "
     "Decide what to say - short, natural speech, or an empty string if nothing "
@@ -153,7 +176,10 @@ SYSTEM_PROMPT = (
     "event_title - copy it verbatim, never paraphrase or invent one. Leave "
     "both out for a destination with no calendar anchor. "
     "If that entry has no location, say you don't have one for it rather than "
-    "guessing. This also covers 'which way do I walk' when they're already "
+    "guessing. If navigation_departure_time says it doesn't have the user's "
+    "location, tell them that - never give a travel time or directions "
+    "anyway, from a guessed starting point or from general knowledge. "
+    "This also covers 'which way do I walk' when they're already "
     "there - call navigation_departure_time with mode 'walking'. On an ambient "
     "event (nobody spoke - a timer or a location change), call "
     "navigation_departure_time for the next commitment when one is available "
@@ -162,14 +188,44 @@ SYSTEM_PROMPT = (
     "nudge itself from the tool's own numbers, not from anything you say, so "
     "there is nothing to phrase - just call the tool and return \"\". Only "
     "answer about leaving out loud when the user asked directly (a voice turn). "
-    "TIMERS AND ALARMS. Call set_timer for a countdown with no clock time "
-    "named - 'set a timer for 10 minutes', 'ping me in 90 seconds' - "
+    "UNIVERSITY. When a canvas tool is offered, use it for coursework: what's "
+    "due, marks and feedback, and what a class covers - the calendar says when "
+    "a class is, Canvas says what's in it. "
+    "TIMERS AND ALARMS. Call set_timer for a bare countdown with no clock "
+    "time and nothing to say - 'set a timer for 10 minutes', 'ping me in 90 "
+    "seconds' - "
     "converting whatever they said into whole duration_seconds yourself (10 "
     "minutes -> 600). Call set_alarm instead when they name a clock time - "
     "'wake me up at 7', 'set an alarm for 6:30am' - using hour/minute in the "
     "user's LOCAL time (top-level local_time), never UTC. Both fire on the "
     "device the moment the call is made, so confirm them in speech as done, "
     "not as pending. "
+    "REMINDERS. A reminder has something to say ('remind me to email Dr Chen "
+    "at 4:30', 'remind me in 20 minutes to take the pasta off', 'don't let me "
+    "forget to submit the form') - call set_reminder. A timer is a bare "
+    "countdown, an alarm is a wake-up, and something with a place, people or "
+    "a duration is a calendar event. For a relative time pass in_minutes and "
+    "never add it to local_time yourself. 'After this lecture' or 'after "
+    "class' means copying that current_events entry's end_local exactly. If "
+    "they gave no time, ask when. user_state.reminders lists their reminders "
+    "for the next week and any that just went off - answer questions about "
+    "them from there, and call get_reminders for anything outside it. "
+    "update_reminder completes, snoozes, edits or deletes one, and its "
+    "reminder_id must be copied from user_state.reminders or a get_reminders "
+    "result, never invented. 'That' or 'it' just after a reminder went off "
+    "means the one with the smallest fired_minutes_ago. "
+    "CHANGING A REMINDER. 'Change my dentist reminder to 4pm', 'move the "
+    "form reminder to Friday', 'make the Sam one say call Sam instead' - find "
+    "the reminder whose text matches their words in user_state.reminders; if "
+    "none does, call get_reminders from local_time to a year ahead to look "
+    "for it before saying you can't find it. If two or more match, ask which "
+    "one. Then call update_reminder with action 'edit'. A new clock time "
+    "keeps the reminder's own date (read it off its due_local) and a new day "
+    "keeps its own time, both passed as a full due_local; 'an hour later' or "
+    "'push it back' is shift_minutes; new wording is text. Never create a "
+    "second reminder instead of editing, and never delete and re-add. "
+    "Reminders are stored on the device the moment the call is made, so "
+    "confirm them as done. "
     "EDITING OR DELETING A CALENDAR EVENT both need its event_id, which only "
     "ever comes from a get_calendar_range result (this turn's or one in "
     "recent_episodes) - call get_calendar_range first if you don't already "
@@ -185,31 +241,32 @@ SYSTEM_PROMPT = (
     "it again, check the most recent entry in recent_episodes for what they "
     "said before claiming you have no context - the words are there even on "
     "turns where nothing was saved to memory or persona for them. "
+    "standing_instructions, when present, are what the user has told you about "
+    "how to behave and talk to them - they apply to every reply, whatever it is "
+    "about, including how you phrase your speech. "
     "The memory tool is the notebook of what the user has told you: save when "
     "they ask you to remember or note something, and recall when they ask what "
-    "they told you. "
+    "they told you. A lasting instruction about how you should behave or talk "
+    "- 'always reply in Pig Latin', 'from now on keep it short', 'stop calling "
+    "me mate' - is itself a request to remember it: save it (category "
+    "preferences, nova) as well as following it, so it becomes one of the "
+    "standing_instructions. "
     "persona is the long-term one: durable facts about who this user is, "
     "retrieved by meaning for this event. These are how you answer about "
     "habits, usuals and preferences - established background rather than "
     "anything just said, true in general rather than necessarily true right "
     "now. The ones marked source 'derived' NOVA worked out by counting repeated "
-    "behaviour and carry how many times it was seen; where a derived fact and "
-    "something the user actually stated disagree, the stated one wins."
+    "behaviour and carry how many times it was seen. Conflicting facts are "
+    "resolved before you see them - whichever the user said or did most "
+    "recently is kept - so treat each one as current."
 )
 
 
 # --- local tools -------------------------------------------------------------
 
-# Server-side tool - Anthropic runs the search and hands back results in the
-# same response, so there is no local dispatch and no tool_result to send
-# back for it (see the tool_use loop below, which only handles CLIENT_TOOLS
-# and registry Function tools). claude-haiku-4-5 predates the dynamic-
-# filtering tool generation, so this is the basic variant, not _20260209.
-WEB_SEARCH_TOOL: dict[str, Any] = {
-    "type": "web_search_20250305",
-    "name": "web_search",
-    "max_uses": 3,
-}
+# web_search (tools/web_search.py) and get_current_address are context tools:
+# answered here, never gated, never recorded as Actions.
+CONTEXT_TOOLS = ("web_search", "get_current_address", "canvas")
 
 GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
     "name": "get_current_address",
@@ -230,14 +287,14 @@ GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
 
 # Which tools exist, and which of them resolve on the phone, live in
 # tools/core/catalogue.py - so the Controller and its tests can ask what NOVA
-# can do without importing an Anthropic client or reading an API key.
+# can do without importing a model client.
 _GAIN_STORE = GainStore()
 _REGISTRY = build_registry(_GAIN_STORE)
 _DISPATCHER = Dispatcher(_REGISTRY)
 
 def _tool_definition(name: str) -> dict[str, Any]:
     """
-    One registered Function tool as the Anthropic API wants it.
+    One registered Function tool, as the OpenAI tools list wants it.
 
     Just the tool: its name, what it does, and what parameters it takes. No
     `trigger` field, because whether the user asked is settled before this runs.
@@ -248,16 +305,25 @@ def _tool_definition(name: str) -> dict[str, Any]:
     schema = _REGISTRY.get_schema(name)
 
 
+    return _as_function(schema.name, schema.description, schema.input_schema)
+
+
+def _as_function(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
     return {
-        "name": schema.name,
-        "description": schema.description,
-        "input_schema": schema.input_schema,
+        "type": "function",
+        "function": {"name": name, "description": description, "parameters": parameters},
     }
 
 def _build_tools(authorised: list[str]) -> list[dict[str, Any]]:
     """
     The tool list for one turn: exactly what the Controller authorised, plus the
     context tools.
+
+    canvas is offered to everyone, connected or not (an unconnected user's call
+    says how to connect it). The tools sit near the front of every prompt, so a
+    list that differed by account made the model server re-read ~13k tokens
+    whenever two people's turns alternated - about 11 s each time. One list for
+    everyone keeps that part cached.
 
     A Function tool with no authority this
     turn is simply absent, so calling it is structurally impossible rather than
@@ -269,21 +335,30 @@ def _build_tools(authorised: list[str]) -> list[dict[str, Any]]:
     ability to answer "where am I?" (see dispatcher.py).
     """
     return [
-        WEB_SEARCH_TOOL,
-        GET_CURRENT_ADDRESS_TOOL,
+        *(_as_function(t["name"], t["description"], t["input_schema"])
+          for t in (WEB_SEARCH_TOOL, GET_CURRENT_ADDRESS_TOOL, CANVAS_TOOL)),
         *(_tool_definition(name) for name in authorised),
     ]
 
 # The registry is built here, so this is where the gain package gets pointed at
-# it. main.py's GET/PUT /tools/gain go straight through this - the tuning logic
-# itself lives in control/gain/overrides.py, next to the reinforcement that moves
-# the same numbers from the other direction.
-GAIN_OVERRIDES = GainOverrides(_REGISTRY, _GAIN_STORE)
-_REINFORCER = Reinforcer(_REGISTRY, _GAIN_STORE)
-_CONTROLLER = ProportionalController(_REGISTRY)
+# it. _REGISTRY holds the tools and the seed's starting gains; every user has
+# their own dials on top, so each turn,
+# outcome and Gain-tab request works on a view carrying that user's gains, read
+# fresh from the table. main.py's GET/PUT /tools/gain go through gain_overrides()
+# - the tuning logic itself lives in control/gain/overrides.py, next to the
+# reinforcement that moves the same numbers from the other direction.
+def _gains_for(user_id: UUID | str) -> tuple[ToolRegistry, GainStore]:
+    """This user's view of the registry, and the store their changes save to."""
+    store = _GAIN_STORE.for_user(user_id)
+    return _REGISTRY.with_gains(store.load_all()), store
 
 
-def reinforce_episode(episode_id: str, outcome: str) -> dict[str, float]:
+def gain_overrides(user_id: UUID | str) -> GainOverrides:
+    """The Gain tab's reads and writes, for this user's dials."""
+    return GainOverrides(*_gains_for(user_id))
+
+
+def reinforce_episode(user_id: UUID | str, episode_id: str, outcome: str) -> dict[str, float]:
     """
     Move the gain of everything an Episode actually did, given the user's
     verdict on it. Returns {tool: new learned value} for what moved.
@@ -300,6 +375,9 @@ def reinforce_episode(episode_id: str, outcome: str) -> dict[str, float]:
     if only proactive calls counted, nothing would ever be scored and no gain
     would ever move. A tool earns the right to act unasked by being useful when
     asked. See docs/adr/0002.
+
+    Only this user's Episode, and only their dials: someone else's episode id
+    reads as no such episode, and nothing moves.
     """
     try:
         verdict = Outcome(outcome)
@@ -308,7 +386,7 @@ def reinforce_episode(episode_id: str, outcome: str) -> dict[str, float]:
         return {}
 
     try:
-        episode = memory.get(episode_id)
+        episode = memory.get(user_id, episode_id)
     except Exception as e:
         print(f"[gain] reinforcement skipped, episode unreadable: {e}")
         return {}
@@ -316,12 +394,13 @@ def reinforce_episode(episode_id: str, outcome: str) -> dict[str, float]:
         print(f"[gain] reinforcement skipped, no such episode {episode_id!r}")
         return {}
 
+    reinforcer = Reinforcer(*_gains_for(user_id))
     moved: dict[str, float] = {}
     for action in Action.from_episode(episode.get("action")):
         if not action.ran or action.tool in moved:
             continue
         try:
-            moved[action.tool] = _REINFORCER.reinforce(action.tool, verdict)
+            moved[action.tool] = reinforcer.reinforce(action.tool, verdict)
         except KeyError:
             # Not a registered Function tool - nothing to tune.
             continue
@@ -338,6 +417,11 @@ class TurnContext:
     """
 
     turn: Turn
+
+    # Whose turn this is - from the verified token, via main.py. Set again as
+    # the request user (core/request_user.py) on the far side of a client-tool
+    # hop, and checked against the caller there (see resume()).
+    user_id: UUID | str | None = None
 
     location_ctx: str | None = None
 
@@ -373,6 +457,20 @@ class TurnContext:
     # (see the tool loop below) - it builds the leave-soon notification text
     # itself from these fields instead of trusting the model to phrase it.
     scheduled_departure: dict[str, Any] | None = None
+
+    # The reminder ids the model has actually been shown this turn - the
+    # user_state.reminders window plus any get_reminders result. None when the
+    # phone sent no window at all (an older client), which turns the check in
+    # _unknown_reminder off rather than rejecting every update_reminder.
+    known_reminder_ids: set[str] | None = None
+
+    # web_search calls so far this turn, against WEB_SEARCH_MAX_USES.
+    web_searches: int = 0
+
+    # Whether this user has connected Canvas (store/canvas.py) - the tool is on
+    # offer either way (_build_tools) - and its calls so far, against CANVAS_MAX_USES.
+    canvas: bool = False
+    canvas_calls: int = 0
 
     @property
     def ran(self) -> list[str]:
@@ -441,6 +539,44 @@ def _record_action(
     ))
 
 
+def _memory_outcome(result: Any) -> dict[str, Any]:
+    """Where a memory save landed, for its Action: long-term memory (a Persona
+    fact, and whether it was new, a duplicate or a replacement) or a note. The
+    audit log words the two differently - they are different features."""
+    if not isinstance(result, dict) or result.get("success") is not True:
+        return {"failed": True}
+    if result.get("fact_id"):
+        return {"saved_as": "memory", "outcome": result.get("outcome")}
+    if result.get("note_id"):
+        return {"saved_as": "note"}
+    return {}
+
+
+# What a canvas Action keeps of the call - never the tool's result text.
+_CANVAS_INPUT_KEYS = ("action", "course", "days", "assignment", "query", "item", "question")
+
+
+def _record_canvas(tool_input: dict[str, Any], result: Any, ctx: TurnContext) -> None:
+    """Record a canvas call as an Action, for the audit log.
+
+    The one context tool that is recorded: it reads the user's coursework and
+    grades, which is exactly the kind of thing the audit log exists to show. A
+    read keeps the title of the document it opened, so the log can say "Read
+    'Tutorial 11.docx'" rather than just "checked Canvas". No gain and no
+    control trace - nothing decided whether it could run - and consolidation
+    counts nothing from it (trends.COUNTED_ACTION_FIELDS has no canvas entry).
+    The phone skips Actions for tools it doesn't carry out.
+    """
+    recorded = {k: tool_input[k] for k in _CANVAS_INPUT_KEYS if tool_input.get(k) not in (None, "")}
+    ok = isinstance(result, dict) and result.get("success") is True
+    if ok and tool_input.get("action") == "read":
+        recorded["document"] = result.get("title")
+        recorded["document_type"] = result.get("type")
+    if ok and result.get("course"):
+        recorded["course_name"] = result["course"]
+    ctx.actions.append(Action(tool="canvas", input=recorded, trigger="requested", ran=ok, reason="context"))
+
+
 def _refused_result(name: str) -> dict[str, Any]:
     """
     What the model gets back if it calls a tool it was not offered.
@@ -459,13 +595,65 @@ def _refused_result(name: str) -> dict[str, Any]:
     }
 
 
+def _unknown_reminder(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> dict[str, Any] | None:
+    """The refusal for an update_reminder naming an id the model was never
+    shown, or None to let it through.
+
+    The phone treats an unknown id as a silent no-op, and by then the model
+    has already said "done" - so a guessed or stale id has to be caught here,
+    where the model can still recover by looking the reminder up.
+    """
+    if name != "update_reminder" or ctx.known_reminder_ids is None:
+        return None
+    if str(tool_input.get("reminder_id")) in ctx.known_reminder_ids:
+        return None
+    return {
+        "success": False,
+        "error": (
+            "That reminder_id isn't in user_state.reminders or a get_reminders "
+            "result this turn. Call get_reminders (from local_time to a year "
+            "ahead) to find the reminder they mean, then use its id."
+        ),
+    }
+
+
 def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> Any:
     if name == "get_current_address":
         return _reverse_geocode(ctx.location_ctx)
+    if name == "web_search":
+        if ctx.web_searches >= WEB_SEARCH_MAX_USES:
+            return {"success": False, "error": (
+                "search limit reached this turn - answer from the results you have")}
+        ctx.web_searches += 1
+        return web_search(str(tool_input.get("query", "")))
+    if name == "canvas":
+        if not ctx.canvas:
+            return {"success": False, "error": (
+                "Canvas isn't connected for this user - tell them they can connect "
+                "it in Settings, under Canvas")}
+        if ctx.canvas_calls >= CANVAS_MAX_USES:
+            return {"success": False, "error": (
+                "Canvas limit reached this turn - answer from what you have")}
+        ctx.canvas_calls += 1
+        try:
+            connection = canvas_store.get(ctx.user_id)
+        except Exception as e:
+            print(f"[canvas] connection lookup failed: {e}")
+            return {"success": False, "error": "Canvas is unavailable right now"}
+        result = run_canvas(tool_input, connection, ctx.utc_offset_minutes)
+        _record_canvas(tool_input, result, ctx)
+        return result
+    unknown = _unknown_reminder(name, tool_input, ctx)
+    if unknown is not None:
+        _record_action(name, tool_input, ctx, ran=False)
+        return unknown
     if _REGISTRY.has(name):
-        if ctx.location_ctx and "origin" not in tool_input:
+        # Not for DEVICE_TOOLS: a reminder has no use for the user's
+        # coordinates, and whatever is injected here is written into the Action
+        # and so into the Episode log.
+        if ctx.location_ctx and "origin" not in tool_input and name not in DEVICE_TOOLS:
             tool_input = {**tool_input, "origin": ctx.location_ctx}
-        if ctx.preferred_travel_mode and "mode" not in tool_input:
+        if ctx.preferred_travel_mode and "mode" not in tool_input and name not in DEVICE_TOOLS:
             tool_input = {**tool_input, "mode": ctx.preferred_travel_mode}
         if "utc_offset_minutes" not in tool_input:
             # So a tool that needs to interpret a user-relative clock string (e.g.
@@ -473,12 +661,29 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
             # user's own wall clock instead of the server process's - see
             # navigation.py's _query_google_maps/_estimate_without_api.
             tool_input = {**tool_input, "utc_offset_minutes": ctx.utc_offset_minutes}
+        if name == "memory" and ctx.episode_id and "episode_id" not in tool_input:
+            # A durable "remember..." is filed straight into Persona, and the
+            # turn's episode is its identity there: the tombstone key if it is
+            # forgotten, and what stops consolidation re-extracting it.
+            tool_input = {**tool_input, "episode_id": ctx.episode_id}
         # Authorisation already happened in _gate. The dispatcher just runs it.
         result = _DISPATCHER.dispatch_reactive(name, tool_input)
+        if name == "memory" and tool_input.get("action") == "save":
+            tool_input = {**tool_input, **_memory_outcome(result)}
         # Recorded after the call, so a tool that raises is not reported as run -
         # and with the augmented tool_input, so the Action carries the origin the
         # tool actually used rather than the one the model supplied.
-        _record_action(name, tool_input, ctx, ran=True)
+        #
+        # A DEVICE_TOOLS call that rejected its own input is recorded as not run:
+        # its Action is an instruction to the phone, which skips ran=false, and
+        # the Audit tab and reinforcement should not count a call that did
+        # nothing. Other tools keep ran=True whatever they returned.
+        ran = not (
+            name in DEVICE_TOOLS
+            and isinstance(result, dict)
+            and result.get("success") is False
+        )
+        _record_action(name, tool_input, ctx, ran=ran)
         return result
     return {"error": f"unknown tool: {name}"}
 
@@ -591,7 +796,7 @@ class IntentResult(BaseModel):
 
 class NeedMoreResult(BaseModel):
     """
-    Returned instead of IntentResult when Claude called a CLIENT_TOOLS tool.
+    Returned instead of IntentResult when the model called a CLIENT_TOOLS tool.
     The paused conversation is held in _PENDING_SESSIONS under session_id;
     the caller (main.py) hands request_type/from_time/to_time to Android,
     which resolves them on-device and posts the result to /event/continue
@@ -603,9 +808,20 @@ class NeedMoreResult(BaseModel):
     request_type: str
     from_time: str
     to_time: str
+    # get_reminders only - whether the phone should include completed ones.
+    include_done: bool | None = None
 
 
 _PENDING_SESSIONS: dict[str, dict[str, Any]] = {}
+
+# A paused turn the phone never came back to (app killed, network gone) would
+# otherwise sit in memory until the instance restarts.
+_PENDING_SESSION_TTL = timedelta(minutes=10)
+
+
+def _prune_pending_sessions(now: datetime) -> None:
+    for session_id in [k for k, v in _PENDING_SESSIONS.items() if v["expires_at"] < now]:
+        _PENDING_SESSIONS.pop(session_id, None)
 
 # Carries the *actual* message thread (not a recap of it) across one voice
 # turn when the previous turn ended by asking the user a question. Without
@@ -613,10 +829,10 @@ _PENDING_SESSIONS: dict[str, dict[str, Any]] = {}
 # spoken outcome text sitting in recent_episodes - which is why a bare "yes"
 # could take two tries to land: the model had to reparse its own prior
 # sentence instead of just seeing the question as a live turn in context.
-# Single global slot because this is a single-user ambient device with one
-# voice conversation in flight at a time - same assumption _PENDING_SESSIONS
-# already makes.
-_PENDING_CONFIRMATION: dict[str, Any] | None = None
+# One slot per user. It used to be a single
+# global, from when there was one user: with accounts, A's "yes" would have
+# continued B's thread - B's calendar and all - in A's reply.
+_PENDING_CONFIRMATION: dict[str, dict[str, Any]] = {}
 
 # How long a dangling question stays answerable. Long enough for a real
 # "yes" a few seconds later, short enough that a stale question from minutes
@@ -629,24 +845,28 @@ _PENDING_CONFIRMATION_TTL = timedelta(minutes=3)
 _PENDING_CONFIRMATION_MAX_MESSAGES = 12
 
 
-def _stash_pending_confirmation(messages: list[dict[str, Any]]) -> None:
+def _stash_pending_confirmation(user_id: UUID | str | None, messages: list[dict[str, Any]]) -> None:
     """Called when a voice turn ends on a question - keeps the live thread
-    so the next voice turn can continue it instead of starting over."""
-    global _PENDING_CONFIRMATION
+    so this user's next voice turn can continue it instead of starting over."""
+    key = str(user_id)
     if len(messages) > _PENDING_CONFIRMATION_MAX_MESSAGES:
-        _PENDING_CONFIRMATION = None
+        _PENDING_CONFIRMATION.pop(key, None)
         return
-    _PENDING_CONFIRMATION = {
+    now = datetime.now(timezone.utc)
+    # Drop other users' stale threads while here, so the dict can't grow
+    # with everyone who ever left a question hanging.
+    for stale in [k for k, v in _PENDING_CONFIRMATION.items() if v["expires_at"] < now]:
+        _PENDING_CONFIRMATION.pop(stale, None)
+    _PENDING_CONFIRMATION[key] = {
         "messages": messages,
-        "expires_at": datetime.now(timezone.utc) + _PENDING_CONFIRMATION_TTL,
+        "expires_at": now + _PENDING_CONFIRMATION_TTL,
     }
 
 
-def _pop_pending_confirmation() -> list[dict[str, Any]] | None:
-    """Consumes the pending thread, if any and still fresh. Popped rather
-    than peeked so a resolved or abandoned turn can't be answered twice."""
-    global _PENDING_CONFIRMATION
-    pending, _PENDING_CONFIRMATION = _PENDING_CONFIRMATION, None
+def _pop_pending_confirmation(user_id: UUID | str | None) -> list[dict[str, Any]] | None:
+    """Consumes this user's pending thread, if any and still fresh. Popped
+    rather than peeked so a resolved or abandoned turn can't be answered twice."""
+    pending = _PENDING_CONFIRMATION.pop(str(user_id), None)
     if pending is None:
         return None
     if datetime.now(timezone.utc) > pending["expires_at"]:
@@ -654,11 +874,10 @@ def _pop_pending_confirmation() -> list[dict[str, Any]] | None:
     return pending["messages"]
 
 
-def _clear_pending_confirmation() -> None:
+def _clear_pending_confirmation(user_id: UUID | str | None) -> None:
     """Called when a voice turn resolves without leaving a question open -
     any earlier dangling question is now moot."""
-    global _PENDING_CONFIRMATION
-    _PENDING_CONFIRMATION = None
+    _PENDING_CONFIRMATION.pop(str(user_id), None)
 
 
 _YES_NO_LEAD_IN = re.compile(
@@ -696,9 +915,9 @@ def _classify_confirmation(speech: str) -> Literal["yes_no", "open"] | None:
 
 # --- the loop ---------------------------------------------------------------
 
-def _recent_episodes(event: Event) -> list[dict[str, Any]]:
+def _recent_episodes(user_id: UUID | str, event: Event) -> list[dict[str, Any]]:
     """
-    The last RECENT_EPISODES Episodes of this event's type, oldest first, as
+    This user's last RECENT_EPISODES Episodes of this event's type, oldest first, as
     short-term context for the model.
 
     Asks for one more than it needs: main.py opens this turn's Episode before
@@ -711,7 +930,7 @@ def _recent_episodes(event: Event) -> list[dict[str, Any]]:
     not see now it must not see in history either.
     """
     try:
-        rows = memory.recent(event.type, RECENT_EPISODES + 1)
+        rows = memory.recent(user_id, event.type, RECENT_EPISODES + 1)
     except Exception as e:
         print(f"[memory] read skipped: {e}")
         return []
@@ -724,6 +943,10 @@ def _recent_episodes(event: Event) -> list[dict[str, Any]]:
 
 def _for_model_episode(row: dict[str, Any]) -> dict[str, Any]:
     stored_state = dict(row.get("user_state") or {})
+    # main.py never stores these, but older rows or a hand-written one might.
+    # A stale reminder list must never compete with the live one this turn.
+    stored_state.pop("reminders", None)
+    stored_state.pop("reminders_pending_total", None)
     offset = stored_state.get("utc_offset_minutes")
     offset = offset if isinstance(offset, int) else 0
 
@@ -756,9 +979,9 @@ def _redact_control_trace(action_column: Any) -> Any:
     }
 
 
-def _relevant_persona(event: Event) -> list[dict[str, Any]]:
+def _relevant_persona(user_id: UUID | str, event: Event) -> list[dict[str, Any]]:
     """
-    Long-term facts about the user, retrieved by meaning for this event.
+    Long-term facts about this user, retrieved by meaning for this event.
 
     The other half of what recent_episodes does. recent_episodes is the last
     few raw episodes OF THIS EVENT TYPE - short-term, narrow, and it scrolls:
@@ -779,7 +1002,7 @@ def _relevant_persona(event: Event) -> list[dict[str, Any]]:
         return []
 
     try:
-        matches = persona.search(persona.PersonaQuery(
+        matches = persona.search(user_id, persona.PersonaQuery(
             text=query,
             limit=PERSONA_HITS,
             min_similarity=PERSONA_MIN_SIMILARITY,
@@ -794,8 +1017,8 @@ def _relevant_persona(event: Event) -> list[dict[str, Any]]:
             "text": m.fact.text,
             "category": m.fact.category,
             "confidence": m.fact.confidence,
-            # Stated vs worked-out. The prompt leans on this to decide which
-            # wins when a derived habit and something the user said disagree.
+            # Stated vs worked-out: how much to lean on it. Conflicts between
+            # them are already settled in the store (persona.remember).
             "source": (m.fact.metadata or {}).get("source", "stated"),
             "support": (m.fact.metadata or {}).get("support"),
             "similarity": round(m.similarity, 3),
@@ -803,6 +1026,21 @@ def _relevant_persona(event: Event) -> list[dict[str, Any]]:
         }
         for m in matches
     ]
+
+
+def _standing_instructions(user_id: UUID | str) -> list[str]:
+    """What the user has told Nova about how to behave (persona's "Nova" topic).
+    Listed here even when the search above also found one, so the model always
+    sees it marked as an instruction rather than just a fact. Non-fatal."""
+    try:
+        standing = persona.standing_instructions(user_id)
+    except Exception as e:
+        print(f"[persona] standing instructions skipped: {e}")
+        return []
+    texts = [f.text for f in standing]
+    if texts:
+        print(f"[persona] {len(texts)} standing instruction(s)")
+    return texts
 
 
 def _for_model(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -829,7 +1067,18 @@ def _persona_query(event: Event) -> str:
 
 
 def run(
-    user_state: UserState, event: Event, episode_id: str | None = None
+    user_id: UUID | str, user_state: UserState, event: Event, episode_id: str | None = None
+) -> IntentResult | NeedMoreResult:
+    """One turn, for one user: their history, Persona, dials and pending
+    question, and nobody else's. Tools that need the user read it from
+    core/request_user.py, which this sets for the turn's duration - so a caller
+    outside a request (a test, a script) gets the same scoping."""
+    with as_user(user_id):
+        return _run(user_id, user_state, event, episode_id)
+
+
+def _run(
+    user_id: UUID | str, user_state: UserState, event: Event, episode_id: str | None
 ) -> IntentResult | NeedMoreResult:
     if MOCK_LLM:
         text = getattr(event, "text", None)
@@ -841,26 +1090,34 @@ def run(
             episode_id=episode_id,
         )
 
-    facts = _relevant_persona(event)
+    facts = _relevant_persona(user_id, event)
+
+    # event.timestamp is always UTC; local_time is that same instant converted
+    # to the user's own clock.
+    local_time = event.timestamp + timedelta(minutes=user_state.utc_offset_minutes)
+
+    # The user's onboarding answers (store/profile.py), as this moment's
+    # estimator inputs. None before onboarding, which the Observer reads as
+    # "behave as before".
+    saved_profile = profile.for_turn(user_id)
+    priors = saved_profile.answers.to_features(local_time) if saved_profile else None
 
     # --- the control loop, before the model runs -----------------------------
-    # In this order, and all of it deterministic. By the time Claude is called,
+    # In this order, and all of it deterministic. By the time the model is called,
     # what may happen this turn is already settled; the model's job is to choose
     # parameters and words.
-    observation = observe(event, user_state, trends=trends_from_facts(facts))
+    observation = observe(event, user_state, trends=trends_from_facts(facts), priors=priors)
     # The batcher used to keep its own copy of calendar_ctx/dnd to derive this -
     # now it just gets told, same source of truth as everything else this turn.
-    set_batcher_mode(observation.mode.value)
+    set_batcher_mode(user_id, observation.mode.value)
     command = classify(event)
-    turn = _CONTROLLER.open_turn(observation, command)
+    gains, _ = _gains_for(user_id)
+    turn = ProportionalController(gains).open_turn(observation, command)
     authorised = turn.authorised()
     print(f"[control] predicted={observation.predicted.value} "
           f"confidence={observation.prediction_confidence:.2f} "
           f"command={command is not None} authorised={authorised!r}")
 
-    # event.timestamp is always UTC; local_time is that same instant converted
-
-    local_time = event.timestamp + timedelta(minutes=user_state.utc_offset_minutes)
     user_state_dump = user_state.model_dump(mode="json")
     _localize_calendar_events(user_state_dump.get("current_events", []), user_state.utc_offset_minutes)
     _localize_calendar_events(user_state_dump.get("upcoming_events", []), user_state.utc_offset_minutes)
@@ -869,19 +1126,27 @@ def run(
         "event": _strip_utc_fields(event.model_dump(mode="json")),
         "user_state": _strip_utc_fields(user_state_dump),
         "local_time": local_time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "recent_episodes": _recent_episodes(event),
+        "recent_episodes": _recent_episodes(user_id, event),
         # Short-term above, long-term here: the detail of the last few similar
         # events, plus the durable facts consolidation has distilled out of all
         # of them. "Parked on level 3" only ever appears in the first.
         "persona": _for_model(facts),
     }
+    # How the user wants Nova to behave, on every turn - see the system prompt.
+    standing = _standing_instructions(user_id)
+    if standing:
+        payload["standing_instructions"] = standing
+    # What they asked to be called in onboarding. Left out rather than null when
+    # unset, so a turn without it reads exactly as before.
+    if saved_profile and saved_profile.display_name:
+        payload["user_name"] = saved_profile.display_name
 
     is_voice = event.type == "voice"
     # Only voice turns can be "yes"/"no" answers to a prior spoken question,
     # so only voice turns consume the pending thread - an ambient event
     # arriving in between (location update, notification, ...) must not
     # steal or clear it.
-    carried = _pop_pending_confirmation() if is_voice else None
+    carried = _pop_pending_confirmation(user_id) if is_voice else None
     new_turn: dict[str, Any] = {"role": "user", "content": json.dumps(payload)}
     messages: list[dict[str, Any]] = [*carried, new_turn] if carried else [new_turn]
     if carried:
@@ -889,36 +1154,72 @@ def run(
 
     ctx = TurnContext(
         turn=turn,
+        user_id=user_id,
         location_ctx=user_state.location_ctx,
-        preferred_travel_mode=user_state.preferred_travel_mode,
+        # The phone's Settings value, else the onboarding answer.
+        preferred_travel_mode=user_state.preferred_travel_mode
+        or (saved_profile.answers.travel_mode if saved_profile else None),
         utc_offset_minutes=user_state.utc_offset_minutes,
         episode_id=episode_id,
+        canvas=canvas_store.is_connected(user_id),
+        known_reminder_ids=(
+            {r.id for r in user_state.reminders}
+            if user_state.reminders_pending_total is not None else None
+        ),
     )
+    verbatim = note_body(event)
+    if verbatim is not None and "memory" in authorised:
+        return _save_verbatim_note(verbatim, event.id, ctx)
     return _run_loop(messages, MAX_ITERATIONS, event.id, ctx, is_voice=is_voice)
 
 
-def resume(session_id: str, tool_result: Any) -> IntentResult | NeedMoreResult:
+def _save_verbatim_note(text: str, event_id: UUID, ctx: TurnContext) -> IntentResult:
+    """ "note ..." saved word for word, without the model (control/commands.py
+    note_body). Through the memory tool all the same, so it is gated, recorded
+    as an Action and reinforced like any other save - just not rephrased."""
+    # A note answers nothing, so a question left pending before it is dropped.
+    _clear_pending_confirmation(ctx.user_id)
+    result = _run_local_tool("memory", {"action": "save", "text": text}, ctx)
+    speech = result.get("spoken", "") if isinstance(result, dict) else ""
+    print(f"[loop] verbatim note - final speech={speech!r} actions={ctx.ran!r}")
+    return IntentResult(
+        event_id=event_id, speech=speech, actions=ctx.for_wire(),
+        episode_id=ctx.episode_id,
+    )
+
+
+def resume(user_id: UUID | str, session_id: str, tool_result: Any) -> IntentResult | NeedMoreResult:
     """Resumes a conversation paused on a CLIENT_TOOLS call, feeding the
     client-supplied result back in as that tool's result. Raises KeyError if
-    session_id is unknown (already resumed, or the process restarted)."""
-    pending = _PENDING_SESSIONS.pop(session_id, None)
-    if pending is None:
+    session_id is unknown (already resumed, expired, or the process restarted)
+    - or isn't this user's: someone else's session looks exactly like
+    one that doesn't exist, and stays parked for its owner."""
+    pending = _PENDING_SESSIONS.get(session_id)
+    if (pending is None
+            or str(pending["user_id"]) != str(user_id)
+            or pending["expires_at"] < datetime.now(timezone.utc)):
         raise KeyError(f"unknown or expired session_id: {session_id!r}")
+    del _PENDING_SESSIONS[session_id]
+    with as_user(user_id):
+        return _resume(pending, tool_result)
 
+
+def _resume(pending: dict[str, Any], tool_result: Any) -> IntentResult | NeedMoreResult:
     utc_offset_minutes = pending.get("utc_offset_minutes", 0)
     if isinstance(tool_result, dict) and isinstance(tool_result.get("events"), list):
         _localize_calendar_events(tool_result["events"], utc_offset_minutes)
 
+    # A get_reminders result widens what update_reminder may name this turn.
+    ctx: TurnContext = pending["ctx"]
+    if isinstance(tool_result, dict) and isinstance(tool_result.get("reminders"), list):
+        found = {str(r["id"]) for r in tool_result["reminders"] if isinstance(r, dict) and r.get("id")}
+        ctx.known_reminder_ids = (ctx.known_reminder_ids or set()) | found
+
     messages: list[dict[str, Any]] = pending["messages"]
-    tool_results = [
-        *pending.get("pending_tool_results", []),
-        {
-            "type": "tool_result",
-            "tool_use_id": pending["tool_use_id"],
-            "content": json.dumps(tool_result),
-        },
-    ]
-    messages.append({"role": "user", "content": tool_results})
+    # Every call in the paused assistant message is answered before the model
+    # runs again: the ones that ran before the hop, then the phone's.
+    messages.extend(pending.get("pending_tool_results", []))
+    messages.append(_tool_message(pending["tool_call_id"], tool_result))
     # The same TurnContext the turn started with, so the Controller's decisions,
     # the refusals and the Actions carry across the hop to the device and back.
     # The authorisation comes with it, because it is part of the Turn: a hop is the
@@ -931,6 +1232,97 @@ def resume(session_id: str, tool_result: Any) -> IntentResult | NeedMoreResult:
     )
 
 
+# Room for the answer once thinking has been cut short (see _force_answer).
+FORCED_ANSWER_TOKENS = 1024
+_WRAP_UP = "\n\nI've thought about this enough - time to act on it and give my answer."
+STUCK_SPEECH = "Sorry, I got tangled up working that out. Could you ask me again?"
+
+
+def _force_answer(
+    messages: list[dict[str, Any]], tools: list[dict[str, Any]], reasoning: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]], str | None]:
+    """The model thought until max_tokens and never answered. Hand its thinking
+    back, closed off with a line saying it's time to answer, and let it carry on
+    from there - budget forcing. It then answers, or calls the tool it was
+    working towards, in a second or two instead of the turn ending blank.
+
+    Needed more as standing instructions pile up: "reply in rhymes, in Pig
+    Latin, every word starting with a" is a puzzle the model will happily think
+    about for longer than any budget.
+
+    The </think> is in the prompt rather than the output, so the server's
+    reasoning parser files the whole continuation as reasoning - hence
+    content-or-reasoning below. Returns what _assistant_turn does, plus the
+    finish reason to carry on the loop with.
+    """
+    print(f"[loop] thinking ran out after {len(reasoning)} chars - forcing an answer")
+    try:
+        response = llm.client(LOOP_TIMEOUT_S, 1).chat.completions.create(
+            model=llm.MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT}, *messages,
+                {"role": "assistant", "content": f"<think>\n{reasoning.strip()}{_WRAP_UP}\n</think>\n\n"},
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=FORCED_ANSWER_TOKENS,
+            temperature=0.3,
+            extra_body={**llm.THINKING, "continue_final_message": True, "add_generation_prompt": False},
+        )
+    except Exception as e:
+        print(f"[loop] forced answer failed: {e}")
+        return {"role": "assistant", "content": None}, [], "length"
+    choice = response.choices[0]
+    text = choice.message.content or llm.reasoning_of(choice.message)
+    assistant, calls = _assistant_turn(SimpleNamespace(content=text, tool_calls=choice.message.tool_calls))
+    finish = choice.finish_reason
+    # Cut off again but with something to say: say it.
+    if finish == "length" and assistant["content"] and not calls:
+        finish = "stop"
+    print(f"[loop] forced answer finish_reason={finish!r} "
+          f"tool_calls={[c['function']['name'] for c in calls]!r} speech={assistant['content']!r}")
+    return assistant, calls, finish
+
+
+def _tool_message(call_id: str, result: Any) -> dict[str, Any]:
+    return {"role": "tool", "tool_call_id": call_id, "content": json.dumps(result, default=str)}
+
+
+def _assistant_turn(message: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The model's reply as a plain message dict for the thread, and its tool
+    calls. Plain dicts, not SDK objects, so a parked or stashed thread is
+    ordinary data. Tool calls a server left in the text as <tool_call> markup
+    are lifted out into real calls."""
+    text = llm.strip_thinking(message.content)
+    calls = [
+        {"id": c.id, "type": "function",
+         "function": {"name": c.function.name, "arguments": c.function.arguments or "{}"}}
+        for c in (message.tool_calls or [])
+    ]
+    if not calls:
+        calls = llm.tool_calls_in_text(text)
+    text = llm.without_tool_call_text(text)
+    turn: dict[str, Any] = {"role": "assistant", "content": text or None}
+    if calls:
+        turn["tool_calls"] = calls
+    return turn, calls
+
+
+def _arguments(call: dict[str, Any]) -> dict[str, Any] | None:
+    """A tool call's arguments, or None if they aren't a JSON object."""
+    raw = call["function"].get("arguments") or "{}"
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+_BAD_ARGUMENTS = {"success": False, "error": (
+    "The arguments for that call were not a valid JSON object. Call it again "
+    "with valid JSON arguments.")}
+
+
 def _run_loop(
     messages: list[dict[str, Any]],
     iterations_left: int,
@@ -941,101 +1333,95 @@ def _run_loop(
     # Read off the Turn rather than passed in.
     tools = _build_tools(ctx.turn.authorised())
 
+    # The last line a tool offered for the user to hear. Spoken if the model
+    # ends the turn saying nothing - after a save it sometimes returns no text
+    # at all, and a request met with silence reads as not having worked.
+    tool_spoken = ""
+
     # iterate until an appropriate answer is reached
     for _ in range(iterations_left):
         # call model
-        print(f"[loop] tools={[t['name'] for t in tools]!r}")
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=1024,
-            # Ephemeral breakpoint caches the tools list + this static prompt as
-            # one prefix - identical across every iteration of a turn and across
-            # turns that share the same authorised tool set, so only the first
-            # call in a cache window pays full input-token price for it.
-            system=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                },
-            ],
+        print(f"[loop] tools={[t['function']['name'] for t in tools]!r}")
+        response = llm.client(LOOP_TIMEOUT_S, 1).chat.completions.create(
+            model=llm.MODEL,
+            # The system prompt goes first and never changes, so the model
+            # server's prefix cache covers it (and the tools) across turns.
+            # It isn't kept in `messages`, so parked and stashed threads don't
+            # carry a copy of it.
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}, *messages],
             tools=tools,
-            messages=messages,
+            tool_choice="auto",
+            max_tokens=LOOP_MAX_TOKENS,
+            temperature=0.3,
+            # Thinking on: the server hands it back apart from the answer
+            # (see llm.THINKING). It is not kept in the thread.
+            extra_body=llm.THINKING,
         )
-        print(f"[loop] stop_reason={response.stop_reason!r} "
-              f"blocks={[b.type for b in response.content]!r}")
-        print(f"[loop] cache_creation={response.usage.cache_creation_input_tokens} "
-              f"cache_read={response.usage.cache_read_input_tokens} "
-              f"input={response.usage.input_tokens}")
+        choice = response.choices[0]
+        assistant, calls = _assistant_turn(choice.message)
+        finish = choice.finish_reason
+        usage = getattr(response, "usage", None)
+        cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", None)
+        print(f"[loop] finish_reason={choice.finish_reason!r} "
+              f"tool_calls={[c['function']['name'] for c in calls]!r} "
+              f"prompt={getattr(usage, 'prompt_tokens', None)} cached={cached} "
+              f"completion={getattr(usage, 'completion_tokens', None)}")
 
-        # finished reasoning
-        if response.stop_reason == "end_turn":
-            tool_idx = [
-                i for i, b in enumerate(response.content)
-                if b.type in ("server_tool_use", "web_search_tool_result", "tool_use", "tool_result")
-            ]
-            start = (max(tool_idx) + 1) if tool_idx else 0
-            speech = "".join(
-                b.text for b in response.content[start:] if b.type == "text"
-            )
-            if not speech:
-                print(f"[loop] empty speech - raw content: {response.content!r}")
-            print(f"[loop] final speech={speech!r} actions={ctx.ran!r}")
-            # A voice turn that ends by asking a question is left dangling on
-            # purpose: stash the real thread (assistant question included) so
-            # a same-topic "yes" a moment later continues it verbatim instead
-            # of being reconstructed from this episode's logged outcome text.
-            # Anything else (a statement, an ambient event) clears/skips it -
-            # see _stash_pending_confirmation / _pop_pending_confirmation.
-            confirmation = _classify_confirmation(speech) if is_voice else None
-            if is_voice:
-                if confirmation is not None:
-                    _stash_pending_confirmation(
-                        [*messages, {"role": "assistant", "content": response.content}]
-                    )
-                else:
-                    _clear_pending_confirmation()
-            return IntentResult(
-                event_id=event_id, speech=speech, actions=ctx.for_wire(),
-                episode_id=ctx.episode_id, confirmation=confirmation,
-                scheduled_departure=ctx.scheduled_departure,
-            )
+        # Thinking used the budget before a whole answer came out: make it stop
+        # thinking and answer, rather than end the turn in silence or speak
+        # half a sentence. A reply that used every token may also have been cut
+        # off inside a tool call - the server still says "tool_calls", with
+        # the arguments missing - so that counts too, and the call is dropped.
+        hit_cap = (getattr(usage, "completion_tokens", 0) or 0) >= LOOP_MAX_TOKENS
+        if hit_cap or (finish == "length" and not calls):
+            if calls:
+                print(f"[loop] cut off inside {[c['function']['name'] for c in calls]!r} - dropping it")
+            assistant, calls, finish = _force_answer(messages, tools, llm.reasoning_of(choice.message))
 
-        # if a tool is called
-        if response.stop_reason == "tool_use":
-            messages.append({"role": "assistant", "content": response.content})
+        # if a tool is called. Checked before finish_reason: some servers
+        # report "stop" on a reply that carries tool calls.
+        if calls:
+            messages.append(assistant)
 
             # A client tool goes through the same check as everything else before
             # the backend pauses and calls out to the phone - it is a registered
             # Function tool with a dial like the others. If it was not authorised,
-            # fall through and let the block below hand back the refusal instead
+            # fall through and let the loop below hand back the refusal instead
             # of hopping to the device.
             client_call = next(
-                (b for b in response.content if b.type == "tool_use" and b.name in CLIENT_TOOLS),
+                (c for c in calls
+                 if c["function"]["name"] in CLIENT_TOOLS and _arguments(c) is not None),
                 None,
             )
-            client_authorised = client_call is not None and _gate(client_call.name, ctx) is None
+            client_authorised = (
+                client_call is not None and _gate(client_call["function"]["name"], ctx) is None
+            )
 
-            # Every OTHER tool_use block in this same turn runs now regardless of
-            # the client hop below - the Anthropic API requires every tool_use id
-            # in an assistant turn to be answered in the very next user turn, so a
-            # turn that called e.g. both get_calendar_range and
-            # navigation_departure_time can't just answer the first and leave the
-            # second's tool_use dangling until resume(). Its result is carried in
-            # _PENDING_SESSIONS and merged with the device's answer there instead.
+            # Every OTHER call in this same reply runs now regardless of the
+            # client hop below - every tool_call id in an assistant message has
+            # to be answered before the model runs again, so a reply that called
+            # e.g. both get_calendar_range and navigation_departure_time can't
+            # just answer the first and leave the second dangling until
+            # resume(). Its result is carried in _PENDING_SESSIONS and sent with
+            # the device's answer there instead.
             tool_results = []
-            for block in response.content:
-                if block.type != "tool_use" or block is client_call:
+            for call in calls:
+                if call is client_call and client_authorised:
                     continue
-                blocked = _gate(block.name, ctx)
+                name = call["function"]["name"]
+                tool_input = _arguments(call)
+                if tool_input is None:
+                    tool_results.append(_tool_message(call["id"], _BAD_ARGUMENTS))
+                    continue
+                blocked = _gate(name, ctx)
                 if blocked is not None:
                     # Refused calls are recorded here; allowed ones are
                     # recorded by _run_local_tool once they return.
-                    _record_action(block.name, block.input, ctx, ran=False)
+                    _record_action(name, tool_input, ctx, ran=False)
                 result = blocked if blocked is not None else _run_local_tool(
-                    block.name, block.input, ctx
+                    name, tool_input, ctx
                 )
-                if (block.name == "navigation_departure_time"
+                if (name == "navigation_departure_time"
                         and isinstance(result, dict)
                         and "leave_in_minutes" in result):
                     ctx.scheduled_departure = {
@@ -1047,25 +1433,29 @@ def _run_loop(
                         # so Android can fill "you have X in N minutes" without asking the
                         # model to phrase it. Both None for a destination with no calendar
                         # anchor.
-                        "minutes_until_start": block.input.get("minutes_until_start"),
-                        "event_title": block.input.get("event_title"),
+                        "minutes_until_start": tool_input.get("minutes_until_start"),
+                        "event_title": tool_input.get("event_title"),
                     }
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(result, default=str),
-                })
+                if isinstance(result, dict) and result.get("spoken"):
+                    tool_spoken = str(result["spoken"])
+                tool_results.append(_tool_message(call["id"], result))
 
             if client_authorised:
-                _record_action(client_call.name, client_call.input, ctx, ran=True)
+                client_input = _arguments(client_call) or {}
+                client_name = client_call["function"]["name"]
+                _record_action(client_name, client_input, ctx, ran=True)
                 session_id = str(uuid.uuid4())
+                now = datetime.now(timezone.utc)
+                _prune_pending_sessions(now)
                 _PENDING_SESSIONS[session_id] = {
+                    # resume() hands this back only to the same user.
+                    "user_id": ctx.user_id,
+                    "expires_at": now + _PENDING_SESSION_TTL,
                     "messages": messages,
-                    "tool_use_id": client_call.id,
-                    # Any other tool_use block from this same turn already ran
-                    # above and has its tool_result sitting here - resume() sends
-                    # these alongside the device's eventual answer in one user
-                    # turn rather than a turn of their own (see the comment above).
+                    "tool_call_id": client_call["id"],
+                    # Any other call from this same reply already ran above and
+                    # has its tool message sitting here - resume() sends these
+                    # along with the device's eventual answer (see above).
                     "pending_tool_results": tool_results,
                     "event_id": event_id,
                     "ctx": ctx,
@@ -1078,28 +1468,55 @@ def _run_loop(
                 return NeedMoreResult(
                     event_id=event_id,
                     session_id=session_id,
-                    request_type=client_call.name,
-                    from_time=client_call.input.get("from_time", ""),
-                    to_time=client_call.input.get("to_time", ""),
+                    request_type=client_name,
+                    from_time=client_input.get("from_time", ""),
+                    to_time=client_input.get("to_time", ""),
+                    include_done=(
+                        bool(client_input.get("include_done"))
+                        if client_name == "get_reminders" else None
+                    ),
                 )
 
-            messages.append({"role": "user", "content": tool_results})
+            messages.extend(tool_results)
             continue
 
-        # Server-side tool loop (web_search) hit its internal iteration cap.
-        # Resend as-is - the trailing server_tool_use block tells the API to
-        # pick up where it left off. No synthetic "continue" message; adding
-        # one would just be extra text the model has to read past.
-        if response.stop_reason == "pause_turn":
-            messages.append({"role": "assistant", "content": response.content})
-            continue
+        # finished reasoning
+        if finish in ("stop", "eos", None):
+            speech = assistant["content"] or ""
+            if not speech:
+                print(f"[loop] empty speech - raw content: {choice.message.content!r}")
+                speech = tool_spoken
+            print(f"[loop] final speech={speech!r} actions={ctx.ran!r}")
+            # A voice turn that ends by asking a question is left dangling on
+            # purpose: stash the real thread (assistant question included) so
+            # a same-topic "yes" a moment later continues it verbatim instead
+            # of being reconstructed from this episode's logged outcome text.
+            # Anything else (a statement, an ambient event) clears/skips it -
+            # see _stash_pending_confirmation / _pop_pending_confirmation.
+            confirmation = _classify_confirmation(speech) if is_voice else None
+            if is_voice:
+                if confirmation is not None:
+                    _stash_pending_confirmation(
+                        ctx.user_id,
+                        [*messages, {"role": "assistant", "content": speech}],
+                    )
+                else:
+                    _clear_pending_confirmation(ctx.user_id)
+            return IntentResult(
+                event_id=event_id, speech=speech, actions=ctx.for_wire(),
+                episode_id=ctx.episode_id, confirmation=confirmation,
+                scheduled_departure=ctx.scheduled_departure,
+            )
 
-        # unexpected stop_reason (max_tokens, refusal, ...)
-        print(f"[loop] breaking on unexpected stop_reason={response.stop_reason!r}")
+        # unexpected finish_reason (length, content_filter, ...)
+        print(f"[loop] breaking on unexpected finish_reason={finish!r}")
         break
 
-    print("[loop] exited loop with no end_turn - returning empty speech")
+    # Someone who spoke gets an answer, even if it's that this one went wrong;
+    # an ambient event stays silent, as it always may.
+    speech = (tool_spoken or STUCK_SPEECH) if is_voice else ""
+    print(f"[loop] exited loop with no end_turn - speech={speech!r}")
     return IntentResult(
-        event_id=event_id, speech="", actions=ctx.for_wire(),
+        event_id=event_id, speech=speech, actions=ctx.for_wire(),
         episode_id=ctx.episode_id, scheduled_departure=ctx.scheduled_departure,
     )

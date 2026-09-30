@@ -13,7 +13,7 @@ declared state may omit them.
 
 WHO USES THIS
 - Riley: Android posts this alongside every Event to POST /event
-- Georgia: intent_surface / loop.py consume it as context
+- intent_surface.py: consumes it as turn context; control/observer.py predicts from it
 """
 
 from typing import List, Optional
@@ -33,6 +33,21 @@ class CalendarEventInfo(BaseModel):
     self_status: str           # "accepted" / "declined" / "tentative" / "none"
     minutes_until_start: int   # negative = currently in progress
     event_id: int              # CalendarContract.Events._ID - what delete_calendar_event targets
+
+
+class ReminderInfo(BaseModel):
+    """One reminder in the window the phone attaches to voice turns - mirrors
+    android's model/Reminder.kt ReminderSummary. The phone owns reminders; this
+    is a read-only view of them for the model (tools/functions/reminder_tool.py).
+    """
+    id: str
+    text: str
+    due_local: str                          # the user's wall clock, no suffix
+    minutes_until_due: int                  # negative = overdue
+    status: str                             # pending / snoozed / deferred / fired
+    priority: str = "normal"
+    fired_minutes_ago: Optional[int] = None
+    recurrence: Optional[str] = None        # e.g. "weekly", for a repeating one
 
 
 class UserState(BaseModel):
@@ -80,3 +95,11 @@ class UserState(BaseModel):
     # Declared (not inferred) in Settings - navigation_departure_time's default
     # mode when the model doesn't name one. "transit" / "walking" / "driving".
     preferred_travel_mode: Optional[str] = None
+
+    # Reminders (additive). Only attached to voice turns - ambient snapshots
+    # leave these empty - and never stored in the Episode (main.py).
+    # `reminders` is a bounded window: fired in the last 12h, snoozed/deferred,
+    # and pending within 7 days, soonest first. The total counts every active
+    # reminder, so the model knows when the window is not the whole list.
+    reminders: List[ReminderInfo] = []
+    reminders_pending_total: Optional[int] = None

@@ -52,9 +52,26 @@ BLE notification is detectable instead of silently corrupting the decode:
 
 ```
 byte 0:      sequence number (wraps at 256)
-byte 1:      flags — bit0 = start of utterance, bit1 = end of utterance
+byte 1:      flags (below)
 bytes 2-261: existing 260-byte ADPCM block, unchanged
 ```
+
+| Bit | Value | Name | On | Meaning |
+|---|---|---|---|---|
+| 0 | `0x01` | START | first frame | start of a recording |
+| 1 | `0x02` | END | last frame (empty block) | end of a recording |
+| 2 | `0x04` | NOTE | START frame | a dictated note. Defined, but the firmware doesn't send it yet |
+
+A START without NOTE is a plain hold (a command or question). Apps ignore
+bits they don't know.
+
+START is sent on exactly the first frame of a recording. It used to be sent
+whenever the sequence number was 0, which it is again every 256 frames
+(~8.2 s) — so every longer recording carried a false START and the phone
+discarded everything before it. The phone also ignores a
+START that arrives while a recording is already open, and closes a recording
+itself (marked truncated) if no frame arrives for 1.5 s, so a lost END frame
+or a dropped link can't leave it open forever.
 
 262 bytes total per notification. This is the reason MTU negotiation matters
 (see Connection setup) — the default un-negotiated ATT MTU (23 bytes) can't
@@ -80,6 +97,22 @@ lockstep with button state.
 First real use: the departure-alert work already built
 (`AmbientNotifier`/`DepartureAlarmReceiver`) writes a haptic pulse here
 alongside posting the phone notification it already sends.
+
+## Button
+
+One button. Only hold is mapped for now; clicks are detected and sent, but
+nothing acts on them yet.
+
+| Input | Firmware sends | Feedback on the device |
+|---|---|---|
+| Hold (> 500 ms) | audio, START | LED1 on while held |
+| Single click | `events` `0x01` | — |
+| Double click | `events` `0x02` | — |
+| Three or more clicks | `events` `0x03` + count | — |
+
+A hold records a voice command or question for the assistant, and stops when
+the button is released. The phone confirms a saved note with its own haptic
+command (one buzz = saved, two long = failed).
 
 ## Connection setup
 

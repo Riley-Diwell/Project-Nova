@@ -1,0 +1,175 @@
+# NOVA self-hosted: the model, the database, sign-in, web search and the API,
+# in one folder. See README.md.
+#
+# Only caddy publishes a port, and only on 127.0.0.1:8088; `tailscale serve`
+# puts that on https://<host>.<tailnet>.ts.net for the tailnet and nothing
+# else. Everything else talks over the compose network.
+
+name: nova
+
+services:
+  # Qwen 3.8 27B, OpenAI-compatible on :18020. The same image, flags and
+  # volumes the hand-run qwen38-dev container used, so the weights aren't
+  # downloaded again.
+  qwen:
+    image: ghcr.io/syv-ai/qwen38-27b-rtx3090:latest
+    restart: unless-stopped
+    ipc: host
+    environment:
+      SPEC: dflash2
+      PREFIX_CACHE: "1"
+      CTX: ${QWEN_CTX:-fast}
+      ENABLE_THINKING: "false"
+      TOOLS: "1"
+      VISION: "0"
+      HF_HUB_DISABLE_XET: "1"
+    volumes:
+      - qwen38-models:/app/models
+      - qwen38-cache:/cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${QWEN_GPU:-1}"]
+              capabilities: [gpu]
+
+  # Postgres 17 + pgvector, with Supabase's roles and auth schema, so
+  # server/db/schema.sql runs unchanged.
+  db:
+    image: supabase/postgres:17.6.1.136
+    restart: unless-stopped
+    volumes:
+      - ./supabase/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:ro
+      - ./supabase/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:ro
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./server/db:/nova-schema:ro
+      - ./data/backups:/backups
+      - db-config:/etc/postgresql-custom
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      PGPORT: 5432
+      POSTGRES_PORT: 5432
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: postgres
+      POSTGRES_DB: postgres
+      JWT_EXP: 3600
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf", "-c", "log_min_messages=fatal"]
+
+  # Supabase Auth (GoTrue): sign-up, password login, refresh-token rotation.
+  # server/app/core/gotrue.py calls it exactly as it called hosted Supabase.
+  auth:
+    image: supabase/gotrue:v2.196.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${PUBLIC_URL}/auth/v1
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      GOTRUE_SITE_URL: ${PUBLIC_URL}
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP:-false}
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_ISSUER: ${PUBLIC_URL}/auth/v1
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "false"
+      # No mail server: accounts are confirmed on sign-up, as on hosted.
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_SMTP_ADMIN_EMAIL: admin@nova.local
+      GOTRUE_SMTP_SENDER_NAME: NOVA
+
+  # PostgREST: what supabase-py (the server's data access) talks to.
+  rest:
+    image: postgrest/postgrest:v14.17
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_MAX_ROWS: 1000
+      PGRST_DB_EXTRA_SEARCH_PATH: public,extensions
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: 3600
+
+  # Web search for the web_search tool (server/app/tools/web_search.py).
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET}
+      SEARXNG_BASE_URL: http://searxng:8080/
+
+  # The NOVA API.
+  nova:
+    build: ./server
+    image: nova-server:local
+    restart: unless-stopped
+    depends_on:
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_started
+      qwen:
+        condition: service_started
+    environment:
+      # print() lines ([loop], [persona], ...) reach `docker compose logs` at once.
+      PYTHONUNBUFFERED: "1"
+      NOVA_PRODUCTION: "1"
+      NOVA_API_KEY: ${NOVA_API_KEY}
+      SUPABASE_URL: http://gateway:8000
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_JWT_SECRET: ${JWT_SECRET}
+      LLM_BASE_URL: http://qwen:18020/v1
+      LLM_MODEL: ${LLM_MODEL:-qwen3.8-27b}
+      SEARXNG_URL: http://searxng:8080
+      google_maps_api_key: ${GOOGLE_MAPS_API_KEY}
+
+  # Two sites. :8000 is internal only - Supabase's URL layout (/rest/v1,
+  # /auth/v1) for the server, the job Kong does in a full Supabase install.
+  # :8088 is what the tailnet sees: the NOVA API, plus the model's OpenAI API
+  # at /v1 for anyone holding LLM_SHARE_KEY.
+  gateway:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8088:8088"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    environment:
+      LLM_SHARE_KEY: ${LLM_SHARE_KEY}
+
+volumes:
+  qwen38-models:
+    external: true
+  qwen38-cache:
+    external: true
+  db-config:
+  caddy-data:

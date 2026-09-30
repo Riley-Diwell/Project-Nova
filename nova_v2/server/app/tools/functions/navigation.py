@@ -10,7 +10,8 @@ INPUT
   - destination (required) - where they want to go
   - arrival_time (optional) - when they need to be there
   - origin (optional) - defaults to the user's current location_ctx,
-    injected by intent_surface/loop.py before dispatch (see _run_local_tool)
+    injected by intent_surface.py before dispatch (see _run_local_tool). With
+    neither, the tool says it doesn't know where the user is - no default origin
   - mode (optional) - transit | walking | driving, defaults to the user's
     preferred_travel_mode (injected the same way as origin) or DEFAULT_TRAVEL_MODE
   - minutes_until_start (optional) - the calendar commitment's own countdown,
@@ -54,9 +55,11 @@ from app.tools.core.base import BaseTool
 
 MAPS_API_KEY = os.environ.get("google_maps_api_key")
 
-# Last-resort origin when neither an explicit origin nor the user's
-# location_ctx is available (e.g. direct/offline calls to this tool).
-DEFAULT_HOME = {"lat": -35.2809, "lng": 149.1300}
+# There is deliberately no default origin. This used to fall back to a fixed
+# point in Canberra city when the phone sent no location, which produced a
+# confident, real-looking route ("24 minutes, head southwest on Theatre Lane")
+# from somewhere the user might not be - in the same turn get_current_address
+# was truthfully saying it had no location. With no origin the tool says so.
 
 # Silent fallback when neither the model nor the user's preferred_travel_mode
 # supplies one. A uni student is more likely to walk, bus or bike than drive,
@@ -271,7 +274,7 @@ class NavigationTool(BaseTool):
     def _execute(self, tool_input: dict[str, Any]) -> Any:
         destination = tool_input.get("destination", "")
         arrival_time = tool_input.get("arrival_time")
-        origin = tool_input.get("origin") or f"{DEFAULT_HOME['lat']},{DEFAULT_HOME['lng']}"
+        origin = tool_input.get("origin")
         mode = tool_input.get("mode") or DEFAULT_TRAVEL_MODE
         minutes_until_start = tool_input.get("minutes_until_start")
         # Injected by intent_surface.py's _run_local_tool, same as origin/mode -
@@ -291,6 +294,20 @@ class NavigationTool(BaseTool):
         # anywhere - see _clean_campus_location. A no-op for a destination that
         # was never in that shape to begin with (e.g. "Coffee Club").
         destination = _clean_campus_location(destination)
+
+        if not origin:
+            # Covers the offline estimate table too: its numbers assume the user
+            # is somewhere in Canberra, which is exactly what isn't known here.
+            return {
+                "success": False,
+                "destination": destination,
+                "spoken": (
+                    f"I don't have your location right now, so I can't work out "
+                    f"how long it takes to get to {destination} from where you are."
+                ),
+                "reason": "no location from the phone",
+                "needs_location": True,
+            }
 
         if MAPS_API_KEY:
             return _query_google_maps(

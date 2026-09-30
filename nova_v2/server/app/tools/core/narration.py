@@ -49,6 +49,17 @@ def describe_event(event_type: str, event: dict[str, Any]) -> str | None:
     if event_type == "screen":
         return "Screen turned on" if event.get("status") else "Screen turned off"
 
+    if event_type == "note_captured":
+        # Content-free by design (api/notes.py _log_captured) - the sentence
+        # can say what kind of note and where, never what it said.
+        kind = {"capture": "a recording", "dictation": "a dictated note"}.get(
+            event.get("kind"), "a voice note")
+        duration = event.get("duration_s")
+        if isinstance(duration, (int, float)) and duration >= 60:
+            kind = f"{kind} ({round(duration / 60)} min)"
+        where = event.get("calendar_title")
+        return f"Captured {kind} during {where}" if where else f"Captured {kind}"
+
     # "timestamp" (a bare periodic tick) and "note" (memory_tool's own episodic
     # bookkeeping row, never closed with an action - see memory_tool.py) have
     # nothing a user would recognise as a trigger.
@@ -99,6 +110,9 @@ def _format_local_range(start: str | None, end: str | None) -> str | None:
 def describe_action(tool: str, tool_input: dict[str, Any], ran: bool) -> str:
     """One sentence for one tool call, built from that tool's actual
     input_schema (tools/functions/*.py) - not guessed."""
+    if tool == "canvas":
+        return _describe_canvas(tool_input, ran)
+
     if tool == "add_calendar_event":
         title = tool_input.get("title", "an event")
         if not ran:
@@ -137,12 +151,13 @@ def describe_action(tool: str, tool_input: dict[str, Any], ran: bool) -> str:
     if tool == "memory":
         action = tool_input.get("action")
         if action == "save":
-            text = tool_input.get("text", "").strip()
-            return f'Saved a note: "{text}".' if text else "Saved a note."
+            return _describe_memory_save(tool_input)
         if action == "recall":
-            query = tool_input.get("query", "").strip()
-            return f'Looked up notes about "{query}".' if query else "Looked up your notes."
-        return "Checked your notes." if ran else "Considered checking your notes, but didn't."
+            query = (tool_input.get("query") or "").strip()
+            return (f"Looked up what you've told Nova about \"{query}\"." if query
+                    else "Looked up what you've told Nova.")
+        return ("Checked what you've told Nova." if ran
+                else "Considered checking what you've told Nova, but didn't.")
 
     if tool == "notification_management":
         action = tool_input.get("action")
@@ -153,7 +168,123 @@ def describe_action(tool: str, tool_input: dict[str, Any], ran: bool) -> str:
             return "Cleared all pending notifications."
         return "Checked pending notifications." if ran else "Considered checking notifications, but didn't."
 
+    if tool == "set_reminder":
+        text = (tool_input.get("text") or "").strip() or "something"
+        if not ran:
+            return f"Considered setting a reminder to '{text}', but didn't."
+        return f"Set a reminder to '{text}'{_reminder_when(tool_input)}."
+
+    if tool == "update_reminder":
+        label = (tool_input.get("label") or "").strip() or "a reminder"
+        action = tool_input.get("action")
+        if not ran:
+            verb = {"complete": "marking", "snooze": "snoozing", "edit": "changing",
+                    "delete": "removing"}.get(action, "changing")
+            return f"Considered {verb} the reminder '{label}', but didn't."
+        if action == "complete":
+            return f"Marked '{label}' done."
+        if action == "snooze":
+            minutes = tool_input.get("in_minutes") or 10
+            return f"Snoozed '{label}' for {_minutes_phrase(minutes)}."
+        if action == "delete":
+            return f"Removed the reminder '{label}'."
+        return f"Changed the reminder '{label}'."
+
+    if tool == "get_reminders":
+        when = _format_local_range(tool_input.get("from_time"), tool_input.get("to_time"))
+        return f"Checked your reminders for {when}." if when else "Checked your reminders."
+
     return f"Ran {tool}." if ran else f"Considered running {tool}, but didn't."
+
+
+def _describe_memory_save(tool_input: dict[str, Any]) -> str:
+    """A memory save, by where it landed. Filed under a category, it went into
+    long-term memory (Persona - the Knowledge Map); otherwise it became a note
+    in the Notes tab, which is a different thing and is called one.
+
+    saved_as/outcome are recorded from the tool's result (intent_surface.py,
+    _memory_outcome). Episodes from before that fall back to the category,
+    which is what decided it."""
+    text = (tool_input.get("text") or "").strip()
+    quoted = f': "{text}".' if text else "."
+    saved_as = tool_input.get("saved_as")
+    if saved_as is None and "failed" not in tool_input:
+        saved_as = "memory" if tool_input.get("category") else "note"
+    if saved_as == "memory":
+        outcome = tool_input.get("outcome")
+        if outcome == "merged":
+            return f"Already remembered this, so nothing changed{quoted}"
+        if outcome == "replaced":
+            return f"Updated a memory{quoted}"
+        return f"Remembered{quoted}"
+    if saved_as == "note":
+        return f"Saved a note{quoted}"
+    return f"Tried to remember this, but couldn't save it{quoted}"
+
+
+def _describe_canvas(tool_input: dict[str, Any], ran: bool) -> str:
+    """A canvas call - telling a document Nova opened and read apart from a
+    lookup of Canvas's own data (what's due, marks, course calendar)."""
+    action = tool_input.get("action")
+    course = tool_input.get("course_name") or tool_input.get("course")
+    in_course = f" in {course}" if course else ""
+
+    if action == "read":
+        document = tool_input.get("document")
+        if ran and document:
+            kind = {"File": "document", "Page": "page", "Assignment": "assignment brief",
+                    "Quiz": "quiz description"}.get(tool_input.get("document_type") or "", "document")
+            return f"Read the {kind} '{document}'{in_course} on Canvas."
+        item = tool_input.get("item") or "a document"
+        return f"Tried to read '{item}'{in_course} on Canvas, but couldn't open it."
+
+    if action == "upcoming":
+        days = tool_input.get("days")
+        span = f" in the next {days} days" if days else ""
+        what = f"Checked Canvas for what's due{in_course}{span}."
+    elif action == "grades":
+        assignment = tool_input.get("assignment")
+        what = (f"Checked your mark for '{assignment}'{in_course} on Canvas." if assignment
+                else f"Checked your grades{in_course} on Canvas.")
+    elif action == "classes":
+        what = f"Checked the Canvas calendar{' for ' + course if course else ''}."
+    elif action == "materials":
+        query = tool_input.get("query")
+        what = (f"Looked through the course materials{in_course} on Canvas"
+                + (f" for '{query}'." if query else "."))
+    else:
+        what = "Checked Canvas."
+    if ran:
+        return what
+    # "Checked X." -> "Tried to check X, but Canvas didn't answer."
+    verb, rest = what.split(" ", 1)
+    base = {"Checked": "check", "Looked": "look"}.get(verb, verb.lower())
+    return f"Tried to {base} {rest[:-1]}, but Canvas didn't answer."
+
+
+def _minutes_phrase(minutes: Any) -> str:
+    """"20 minutes", "1 hour", "1 hour 30 minutes" - for in_minutes values."""
+    if not isinstance(minutes, int) or isinstance(minutes, bool) or minutes <= 0:
+        return f"{minutes} minutes"
+    hours, mins = divmod(minutes, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour" + ("s" if hours != 1 else ""))
+    if mins:
+        parts.append(f"{mins} minute" + ("s" if mins != 1 else ""))
+    return " ".join(parts)
+
+
+def _reminder_when(tool_input: dict[str, Any]) -> str:
+    """" for Wed, Sep 23, 4:30pm" / " in 20 minutes" / "" - set_reminder's time,
+    plus how it repeats if it does."""
+    due = _format_local_dt(tool_input.get("due_local"))
+    minutes = tool_input.get("in_minutes")
+    when = f" for {due}" if due else (f" in {_minutes_phrase(minutes)}" if minutes else "")
+    recurrence = tool_input.get("recurrence")
+    if isinstance(recurrence, dict) and recurrence.get("frequency"):
+        when += f", repeating {recurrence['frequency']}"
+    return when
 
 
 def matches_query(entry: dict[str, Any], q: str) -> bool:

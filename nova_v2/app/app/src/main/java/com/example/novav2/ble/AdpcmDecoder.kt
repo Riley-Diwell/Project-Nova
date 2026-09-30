@@ -22,6 +22,17 @@ class AdpcmDecoder {
     }
 
     /**
+     * Seeds the running state from a block's own header - the encoder writes its predictor and
+     * step index there *before* encoding the block. Lets playback start mid-recording (replay
+     * from a transcript timestamp) without decoding everything before it.
+     */
+    fun seedFrom(block: ByteArray) {
+        if (block.size < 4) return
+        predictor = ((block[0].toInt() and 0xFF) or (block[1].toInt() shl 8)).toShort().toInt()
+        index = (block[2].toInt() and 0xFF).coerceIn(0, STEP_TABLE.size - 1)
+    }
+
+    /**
      * Decodes one block: 4-byte header (predictor lo/hi, step index, reserved —
      * see encodeADPCMBlock) followed by packed 4-bit samples, low nibble first.
      * The header is only checked for presence (a short/malformed block decodes

@@ -13,6 +13,7 @@ import com.example.novav2.state.ActivitySignal
 import com.example.novav2.state.AmbientCheckRunner
 import com.example.novav2.state.AmbientNotifier
 import com.example.novav2.state.LocationSignal
+import com.example.novav2.state.ReminderScheduler
 import com.example.novav2.state.SensorSignal
 import com.example.novav2.state.SignalRepository
 import kotlinx.coroutines.CoroutineScope
@@ -45,6 +46,9 @@ class SignalMonitorService : Service() {
 
         ActivitySignal.startUpdates(this)
         SensorSignal.startUpdates(this)
+        // Restores the reminder alarm after a force-stop even when the app UI never opens -
+        // this service is restarted by START_STICKY, MainActivity is not.
+        ReminderScheduler.reconcileAsync(this)
 
         scope.launch {
             var ticksSinceAmbientCheck = 0

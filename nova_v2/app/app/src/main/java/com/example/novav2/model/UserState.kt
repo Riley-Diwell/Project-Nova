@@ -48,4 +48,9 @@ data class UserState(
     // Declared in Settings, not inferred - navigation_departure_time's default
     // mode when the model doesn't name one. "transit" / "walking" / "driving".
     val preferredTravelMode: String? = null,
+    // Reminders window (additive) - attached to voice turns only, by
+    // ReminderRepository.attachWindow. Left empty (and the total null) on ambient snapshots,
+    // which then carry no reminder text over the wire.
+    val reminders: List<ReminderSummary> = emptyList(),
+    val remindersPendingTotal: Int? = null,
 )

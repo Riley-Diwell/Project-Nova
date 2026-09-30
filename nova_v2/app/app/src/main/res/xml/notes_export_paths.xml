@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What the notes-export FileProvider may share: only the export files NotesSettingsScreen
+     writes, never kept audio or the notes outbox. -->
+<paths>
+    <cache-path name="exports" path="exports/" />
+</paths>

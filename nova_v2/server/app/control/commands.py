@@ -93,6 +93,17 @@ _IMPERATIVE_VERBS = frozenset({
     "help",
 })
 
+# How NOVA itself should behave from now on - "always reply in Pig Latin",
+# "never call me mate", "don't be so chatty", "speak slower". An instruction to
+# NOVA is a request by any reading, and it has to reach the memory tool to be
+# kept: classified as chat, no Function tool is offered, and it is followed for
+# one reply and then forgotten. (Apostrophes are dropped before this check, so
+# "don't" arrives as "dont".)
+_INSTRUCTION_OPENERS = frozenset({
+    "always", "never", "dont", "keep", "reply", "respond", "answer", "speak",
+    "talk", "use", "quit", "be",
+})
+
 # Request frames that are neither a leading wh-word nor a leading imperative.
 # "can you x" opens with an auxiliary and is caught anyway; these are the ones
 # where the ask sits in the middle of the sentence.
@@ -107,6 +118,13 @@ _REQUEST_FRAMES = (
     "could you",
     "would you",
     "will you",
+    # A reminder ask that doesn't lead with the verb: "at 5 remind me to call
+    # mum", "tomorrow remind me...". "remind" is already an imperative, but
+    # only as the first word.
+    "remind me",
+    "don't let me forget",
+    "dont let me forget",
+    "from now on",
 )
 
 
@@ -157,7 +175,13 @@ def _is_request(spoken: str) -> bool:
         return False
 
     first = words[0].replace("'", "")
-    if first in _WH_WORDS or first in _AUXILIARIES or first in _IMPERATIVE_VERBS:
+    if (first in _WH_WORDS or first in _AUXILIARIES or first in _IMPERATIVE_VERBS
+            or first in _INSTRUCTION_OPENERS):
+        return True
+
+    # "only reply in pirate speak" - but not "only five minutes left".
+    if first == "only" and len(words) > 1 and (
+            words[1] in _INSTRUCTION_OPENERS or words[1] in _IMPERATIVE_VERBS):
         return True
 
     # "let's" is an imperative wearing a contraction.
@@ -179,3 +203,40 @@ def _strip_address(text: str) -> str:
             return stripped
         text = stripped
     return text
+
+
+# --- "note ..." --------------------------------------------------------------
+# A note is kept word for word, so it never goes through the model: asked to
+# save "note in the light of the moon...", the model paraphrased it into a
+# one-line description and the user's words were lost. The same prefixes the
+# phone matches for held-button recordings (android notes/NoteRouter.kt), so
+# "note ..." means the same thing whichever way it reaches NOVA. "Remember ..."
+# is deliberately not one - it still goes to the model, which decides whether
+# it is durable enough to become part of what NOVA knows.
+# Longest first, so "note to self" wins over "note".
+_NOTE_PREFIX = re.compile(
+    r"^(?:note\s+to\s+self|take\s+a\s+note|make\s+a\s+note|note|memo)\b[\s:,.\-]*"
+    # "note that the draft is due" -> "the draft is due".
+    r"(?:(?:that|to|down)\b[\s:,.\-]*)?",
+    re.I,
+)
+
+
+def note_body(event: Any) -> Optional[str]:
+    """The note to save verbatim if the user said "note ...", otherwise None.
+
+    Original casing kept; only the wake phrase and the prefix are removed. A
+    prefix with nothing after it ("note that") is not a note of nothing."""
+    if getattr(event, "type", None) not in SPEECH_EVENT_TYPES:
+        return None
+    spoken = getattr(event, "text", None)
+    if not isinstance(spoken, str):
+        return None
+
+    # _strip_address lowercases nothing itself, so it keeps the user's casing.
+    text = _strip_address(spoken.strip())
+    match = _NOTE_PREFIX.match(text)
+    if match is None:
+        return None
+    body = text[match.end():].strip()
+    return body or None

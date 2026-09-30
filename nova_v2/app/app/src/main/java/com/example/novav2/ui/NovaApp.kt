@@ -19,11 +19,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavController
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -31,44 +29,80 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.example.novav2.BuildConfig
+import com.example.novav2.auth.AuthRepository
+import com.example.novav2.auth.SessionState
 import com.example.novav2.model.UserProfile
+import com.example.novav2.profile.ProfileRepository
+import com.example.novav2.navigation.NOTE_DETAIL_ROUTE
 import com.example.novav2.navigation.NovaDestination
+import com.example.novav2.navigation.noteDetailRoute
 import com.example.novav2.navigation.bottomNavDestinations
 import com.example.novav2.ui.screens.AuditLogScreen
 import com.example.novav2.ui.screens.DashboardScreen
 import com.example.novav2.ui.screens.DeviceScreen
 import com.example.novav2.ui.screens.GainScreen
-import com.example.novav2.ui.screens.KnowledgeMapScreen
-import com.example.novav2.ui.screens.OnboardingScreen
+import com.example.novav2.ui.screens.knowledgemap.KnowledgeMapScreen
+import com.example.novav2.ui.screens.NoteDetailScreen
+import com.example.novav2.ui.screens.NotesScreen
+import com.example.novav2.ui.screens.NotesSettingsScreen
+import com.example.novav2.ui.screens.CanvasScreen
+import com.example.novav2.ui.screens.ProfileScreen
+import com.example.novav2.ui.screens.RemindersScreen
+import com.example.novav2.ui.screens.SETTINGS_SUBSCREEN_ROUTES
 import com.example.novav2.ui.screens.SettingsScreen
+import com.example.novav2.ui.screens.settingsTitle
 import com.example.novav2.ui.screens.StateScreen
 import com.example.novav2.ui.screens.VoiceScreen
+import com.example.novav2.ui.screens.auth.AuthFlow
+import com.example.novav2.ui.screens.onboarding.OnboardingFlow
+import com.example.novav2.ui.screens.onboarding.ProfileLoading
+import com.example.novav2.ui.screens.onboarding.ProfileUnavailable
 
 @Composable
 fun NovaApp(
     assistRequested: MutableState<Boolean> = mutableStateOf(false),
     autoListenRequested: MutableState<Boolean> = mutableStateOf(false),
+    remindersRequested: MutableState<Boolean> = mutableStateOf(false),
+    /** A note to open - set when a notes notification opened the app ("" = just the tab). */
+    noteRequested: MutableState<String?> = mutableStateOf(null),
 ) {
-    // TODO: re-enable onboarding gate - skipped for now to speed up dev iteration.
-    var onboardingComplete by rememberSaveable { mutableStateOf(true) }
-    var userName by rememberSaveable { mutableStateOf("") }
-    var dailyGoalMinutes by rememberSaveable { mutableIntStateOf(120) }
-
-    val profile = UserProfile(name = userName, dailyGoalMinutes = dailyGoalMinutes)
-
-    if (!onboardingComplete) {
-        OnboardingScreen(
-            profile = profile,
-            onNameChange = { userName = it },
-            onGoalChange = { dailyGoalMinutes = it },
-            onFinish = { onboardingComplete = true }
-        )
+    // Signed out: Welcome and sign-in instead of the app.
+    val session by AuthRepository.state.collectAsState()
+    if (session is SessionState.SignedOut) {
+        AuthFlow()
         return
     }
+
+    // Signed in but not onboarded: onboarding first. The
+    // profile is cached, so an offline start of an onboarded account goes straight in. A debug
+    // build can skip it with SKIP_ONBOARDING=true in local.properties.
+    val profileState by ProfileRepository.state.collectAsState()
+    val skippedProfile by ProfileRepository.skippedThisRun.collectAsState()
+    if (!BuildConfig.SKIP_ONBOARDING && !skippedProfile) {
+        when (val p = profileState) {
+            ProfileRepository.ProfileState.Loading -> { ProfileLoading(); return }
+            is ProfileRepository.ProfileState.Unavailable -> { ProfileUnavailable(p.message); return }
+            is ProfileRepository.ProfileState.Ready -> if (p.profile?.needsOnboarding != false) {
+                OnboardingFlow()
+                return
+            }
+        }
+    }
+    val accountProfile = (profileState as? ProfileRepository.ProfileState.Ready)?.profile
+    val profile = UserProfile(name = accountProfile?.displayName.orEmpty())
 
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
+    // Pushed screens keep the tab they were opened from lit, instead of leaving no tab selected.
+    val selectedTabRoute = when (currentRoute) {
+        NOTE_DETAIL_ROUTE -> navController.previousBackStackEntry?.destination?.route
+            ?.takeIf { route -> bottomNavDestinations.any { it.route == route } }
+            ?: NovaDestination.Notes.route
+        in SETTINGS_SUBSCREEN_ROUTES -> NovaDestination.Settings.route
+        else -> currentRoute
+    }
 
     LaunchedEffect(assistRequested.value) {
         if (assistRequested.value) {
@@ -80,13 +114,35 @@ fun NovaApp(
         }
     }
 
+    // Tapping a reminder notification lands on the Reminders tab.
+    LaunchedEffect(remindersRequested.value) {
+        if (remindersRequested.value) {
+            navController.navigate(NovaDestination.Reminders.route) {
+                popUpTo(navController.graph.findStartDestination().id)
+                launchSingleTop = true
+            }
+            remindersRequested.value = false
+        }
+    }
+
+    // Tapping a notes notification lands on the note (or the Notes tab).
+    LaunchedEffect(noteRequested.value) {
+        val noteId = noteRequested.value ?: return@LaunchedEffect
+        navController.navigate(NovaDestination.Notes.route) {
+            popUpTo(navController.graph.findStartDestination().id)
+            launchSingleTop = true
+        }
+        if (noteId.isNotEmpty()) navController.navigate(noteDetailRoute(noteId))
+        noteRequested.value = null
+    }
+
     Scaffold(
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
         bottomBar = {
             NavigationBar {
                 bottomNavDestinations.forEach { destination ->
                     NavigationBarItem(
-                        selected = currentRoute == destination.route,
+                        selected = selectedTabRoute == destination.route,
                         onClick = {
                             navController.navigate(destination.route) {
                                 // No saveState/restoreState: those would let a settings
@@ -116,7 +172,11 @@ fun NovaApp(
                 VoiceScreen(
                     bottomBarHeight = innerPadding.calculateBottomPadding(),
                     autoListenRequested = autoListenRequested,
+                    onOpenNote = { navController.navigate(noteDetailRoute(it)) },
                 )
+            }
+            composable(NovaDestination.Reminders.route) {
+                RemindersScreen()
             }
             composable(NovaDestination.State.route) {
                 SettingsSubScreen(NovaDestination.State, navController) { StateScreen() }
@@ -124,17 +184,35 @@ fun NovaApp(
             composable(NovaDestination.Gain.route) {
                 SettingsSubScreen(NovaDestination.Gain, navController) { GainScreen() }
             }
+            composable(NovaDestination.Notes.route) {
+                NotesScreen(onOpenNote = { navController.navigate(noteDetailRoute(it)) })
+            }
+            composable(NOTE_DETAIL_ROUTE) { entry ->
+                val noteId = entry.arguments?.getString("noteId").orEmpty()
+                SettingsSubScreen(NovaDestination.Notes, navController) {
+                    NoteDetailScreen(noteId, onClosed = { navController.popBackStack() })
+                }
+            }
+            composable(NovaDestination.NotesSettings.route) {
+                SettingsSubScreen(NovaDestination.NotesSettings, navController) { NotesSettingsScreen() }
+            }
             composable(NovaDestination.Knowledge.route) {
-                KnowledgeMapScreen()
+                KnowledgeMapScreen(onOpenNote = { navController.navigate(noteDetailRoute(it)) })
             }
             composable(NovaDestination.Audit.route) {
-                AuditLogScreen()
+                SettingsSubScreen(NovaDestination.Audit, navController) { AuditLogScreen() }
             }
             composable(NovaDestination.Device.route) {
                 SettingsSubScreen(NovaDestination.Device, navController) { DeviceScreen() }
             }
             composable(NovaDestination.Settings.route) {
                 SettingsScreen(navController)
+            }
+            composable(NovaDestination.Profile.route) {
+                SettingsSubScreen(NovaDestination.Profile, navController) { ProfileScreen() }
+            }
+            composable(NovaDestination.Canvas.route) {
+                SettingsSubScreen(NovaDestination.Canvas, navController) { CanvasScreen() }
             }
         }
     }
@@ -154,7 +232,7 @@ private fun SettingsSubScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(destination.label) },
+                title = { Text(destination.settingsTitle) },
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")

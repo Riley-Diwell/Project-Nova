@@ -22,13 +22,16 @@ WHO USES THIS
 """
 
 # import necessary libraries
+import hmac
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Literal
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -42,11 +45,21 @@ from app import intent_surface
 from app.intent_surface import IntentResult, NeedMoreResult
 from app.tools.core import narration
 from app.tools.core.action import Action
-from app.tools.functions.notification_batcher import NotificationBatcher
-from app.tools.functions.notification_management import register_batcher
+from app.tools.functions.notification_management import start_batchers, stop_batchers
 
 from app.store import memory
+from app.store import notes
 from app.store import persona
+from app.api import auth as auth_api
+from app.api import me as me_api
+from app.api import notes as notes_api
+from app.api import notes_pipeline as notes_pipeline_api
+from app.api import reminders as reminders_api
+from app.api import canvas as canvas_api
+from app.core import auth, llm
+from app.core.auth import AuthUser, current_user
+from app.core.request_user import bind_request_user
+from app.notes_pipeline import NotesPipelineProcessor
 
 
 # On a fresh container, the first request to touch Persona was paying ~28s
@@ -57,9 +70,12 @@ from app.store import persona
 # long-lived process; bad on Cloud Run, which scales nova-v2 to zero when
 # idle, so this recurred on every cold start rather than only once.
 #
-# _warm_up pays that cost here instead, during container startup - Cloud
-# Run's startup probe waits for the app to come up before routing any real
-# traffic to it, so this delays "ready", not a user's turn.
+# _warm_up pays that cost here instead, right after startup - on a background
+# thread, not before serving. Blocking startup on it made *every* request on a
+# cold instance wait ~30s for the model, including a token refresh that needs
+# no model at all, which made sign-out slow. Now light requests
+# are answered at once, and only a request that needs Persona before the model
+# is ready waits for it (persona's init lock makes that wait, not a 2nd load).
 def _warm_up() -> None:
     """Force-construct Persona's embedder and the Supabase client before the
     server starts accepting requests. Non-fatal like every other Supabase/
@@ -77,9 +93,10 @@ def _warm_up() -> None:
     # so only an actual request pays the TLS/auth cost episode_open otherwise
     # would. Goes through memory's own public API rather than naming the
     # table directly, same boundary memory.py itself asks callers to respect.
+    # ping(), not a read: there's no signed-in user at start-up to read for.
     start = time.perf_counter()
     try:
-        memory.recent_all(1)
+        memory.ping()
         print(f"[warmup] Supabase connection ready ({(time.perf_counter() - start) * 1000:.0f}ms)")
     except Exception as e:
         print(f"[warmup] Supabase warm-up skipped: {e}")
@@ -91,33 +108,76 @@ def _warm_up() -> None:
     except Exception as e:
         print(f"[warmup] persona warm-up skipped: {e}")
 
+    # One token from the model, so a stopped or unreachable model server shows
+    # up in the log at start-up rather than on the first voice turn.
+    start = time.perf_counter()
+    try:
+        llm.complete("Reply with OK.", "ping", max_tokens=4, timeout=120.0)
+        print(f"[warmup] model {llm.MODEL} ready ({(time.perf_counter() - start) * 1000:.0f}ms)")
+    except Exception as e:
+        print(f"[warmup] model warm-up failed ({llm.LLM_BASE_URL}): {e}")
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    _warm_up()
-    # Shared with the notification_management tool (see intent_surface.py's
-    # ToolRegistry) - without this, the tool has no batcher to query.
-    batcher = NotificationBatcher()
-    batcher.start()
-    register_batcher(batcher)
+    threading.Thread(target=_warm_up, name="warm-up", daemon=True).start()
+    # The notification_management tool gets one batcher per user, made on their
+    # first turn - see tools/functions/notification_management.py.
+    start_batchers()
     yield
-    batcher.stop()
+    stop_batchers()
 
 
 # initialise app
-app = FastAPI(title="NOVA V1", lifespan=_lifespan)
+# Every route needs a signed-in user (a Supabase access token) unless it's in
+# auth.PUBLIC_ROUTES - see core/auth.py.
+# bind_request_user makes the verified user visible to Function tools deep inside
+# /event (the memory tool reads the user's notes) - see core/request_user.py.
+app = FastAPI(
+    title="NOVA V1", lifespan=_lifespan,
+    dependencies=[Depends(auth.require_user), Depends(bind_request_user)],
+)
+
+# Notes: the store's REST surface, and the pipeline that
+# chunks and summarises long notes after the router stores them.
+notes.set_processor(NotesPipelineProcessor())
+app.include_router(notes_api.router)
+app.include_router(notes_pipeline_api.router)
+
+# Accounts.
+auth.check_startup()
+app.include_router(auth_api.router)
+app.include_router(me_api.router)
+app.include_router(reminders_api.router)
+app.include_router(canvas_api.router)
 
 _API_KEY = os.environ.get("NOVA_API_KEY", "").strip()
 if not _API_KEY:
+    # A deployed server must never run open.
+    if auth.deployed():
+        raise RuntimeError("NOVA_API_KEY is not set - refusing to start a deployed server without it.")
     print("[auth] NOVA_API_KEY not set - /event and friends are UNAUTHENTICATED. "
           "Fine for local dev; do not deploy publicly like this.")
 
+# Reachable without the client key, for uptime checks.
+_OPEN_PATHS = {"/health"}  # not /healthz: Cloud Run reserves paths ending in z
 
+
+# The client key identifies a build, not a person (it ships in the APK), so a
+# mismatch is 403. 401 is kept for bearer-token problems.
+# compare_digest keeps the check constant-time.
 @app.middleware("http")
 async def _require_api_key(request: Request, call_next):
-    if _API_KEY and request.headers.get("x-nova-api-key") != _API_KEY:
-        return JSONResponse(status_code=401, content={"detail": "missing or invalid X-Nova-Api-Key"})
+    if _API_KEY and request.url.path not in _OPEN_PATHS:
+        supplied = request.headers.get("x-nova-api-key", "")
+        if not hmac.compare_digest(supplied.encode(), _API_KEY.encode()):
+            return JSONResponse(status_code=403, content={"detail": "missing or invalid X-Nova-Api-Key"})
     return await call_next(request)
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 # combine event and user_state into one wrapper - matches what Android posts
 class InputWrapper(BaseModel):
@@ -140,12 +200,17 @@ class ContinueWrapper(BaseModel):
 # Logged before the loop runs so an episode survives a failing Claude call, and
 # so intent_surface.run() can read prior episodes back as context.
 # Non-fatal: an unconfigured or unreachable Supabase must not fail /event.
-def _open_episode(event: Event, user_state: UserState) -> str | None:
+def _open_episode(user_id: UUID, event: Event, user_state: UserState) -> str | None:
     try:
-        episode_id = memory.append({
+        episode_id = memory.append(user_id, {
             "event_type": event.type,
             "event": event.model_dump(mode="json"),
-            "user_state": user_state.model_dump(mode="json"),
+            # The reminder window stays out of the episode log (privacy): the
+            # account's reminders live only in their own table (store/reminders.py),
+            # and the Action input already records what Nova did.
+            "user_state": user_state.model_dump(
+                mode="json", exclude={"reminders", "reminders_pending_total"}
+            ),
         })
         print(f"[memory] opened episode {episode_id} (event_type={event.type!r})")
         return episode_id
@@ -154,11 +219,11 @@ def _open_episode(event: Event, user_state: UserState) -> str | None:
         return None
 
 # log that looked like feedback and was not.
-def _close_episode(intent: IntentResult) -> None:
+def _close_episode(user_id: UUID, intent: IntentResult) -> None:
     if not intent.episode_id:
         return
     try:
-        memory.close(intent.episode_id, action={
+        memory.close(user_id, intent.episode_id, action={
             "actions": intent.actions,
             "speech": intent.speech,
         })
@@ -170,14 +235,17 @@ def _close_episode(intent: IntentResult) -> None:
 
 def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
     if isinstance(intent, NeedMoreResult):
+        request = {
+            "type": intent.request_type,
+            "from": intent.from_time,
+            "to": intent.to_time,
+        }
+        if intent.include_done is not None:
+            request["include_done"] = intent.include_done
         return NeedMoreOut(
             event_id=intent.event_id,
             session_id=intent.session_id,
-            request={
-                "type": intent.request_type,
-                "from": intent.from_time,
-                "to": intent.to_time,
-            },
+            request=request,
         )
     return EventOut(
         event_id=intent.event_id,
@@ -191,17 +259,36 @@ def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
 
 # this is how I receive events from Riley
 # app.post handles incoming HTTP POST requests
+#
+# Every route below is the signed-in user's: `user`
+# comes from the verified token, and everything read or written is theirs.
+# Plain `def`, not `async def`: the handlers make blocking calls (the model,
+# Supabase), and FastAPI runs a plain def in its threadpool - as async they
+# held the event loop, so one instance served one turn at a time.
 @app.post("/event", response_model=EventResponse)
-async def receive_event(input_wrapper: InputWrapper) -> EventResponse:
+def receive_event(input_wrapper: InputWrapper, user: AuthUser = Depends(current_user)) -> EventResponse:
     print(f"[/event] received text: {getattr(input_wrapper.event, 'text', None)!r}")
     us = input_wrapper.user_state
     print(f"[/event] calendar_ctx={us.calendar_ctx!r} "
           f"current_events={len(us.current_events)} upcoming_events={len(us.upcoming_events)}")
-    episode_id = _open_episode(input_wrapper.event, us)
-    intent = intent_surface.run(input_wrapper.user_state, input_wrapper.event, episode_id)
+    episode_id = _open_episode(user.id, input_wrapper.event, us)
+    intent = intent_surface.run(user.id, input_wrapper.user_state, input_wrapper.event, episode_id)
     if isinstance(intent, IntentResult):
-        _close_episode(intent)
-    return _to_response(intent)
+        _close_episode(user.id, intent)
+    return _with_consolidation_hint(user.id, _to_response(intent))
+
+
+def _with_consolidation_hint(user_id: UUID, response: EventResponse) -> EventResponse:
+    """Tell the phone when it's time to learn from recent activity. Memoised
+    and non-fatal: a turn never waits on, or fails because of, this."""
+    if isinstance(response, EventOut):
+        try:
+            from app.store import consolidation
+
+            response.consolidation_due = consolidation.due(user_id).due
+        except Exception as e:
+            print(f"[consolidation] due check skipped: {e}")
+    return response
 
 
 # --- the turn's Outcome (Sections 5.5, 5.7) ----------------------------------
@@ -223,16 +310,17 @@ class OutcomeIn(BaseModel):
 
 
 @app.post("/event/outcome", status_code=204)
-async def report_outcome(report: OutcomeIn) -> None:
-    """Record the user's verdict on a turn and move the gain of what it did."""
+def report_outcome(report: OutcomeIn, user: AuthUser = Depends(current_user)) -> None:
+    """Record the user's verdict on one of their turns and move the gain of
+    what it did. Another user's episode id changes nothing."""
     try:
-        memory.close(report.episode_id, outcome=report.outcome)
+        memory.close(user.id, report.episode_id, outcome=report.outcome)
     except Exception as e:
         # Non-fatal like every other Memory touch, but the reinforcement below
         # still runs: the gain move is the part the user will actually notice.
         print(f"[memory] outcome write skipped: {e}")
 
-    moved = intent_surface.reinforce_episode(report.episode_id, report.outcome)
+    moved = intent_surface.reinforce_episode(user.id, report.episode_id, report.outcome)
     print(f"[gain] episode {report.episode_id} {report.outcome}: moved {moved}")
 
 
@@ -243,16 +331,18 @@ async def report_outcome(report: OutcomeIn) -> None:
 # wins over whatever reinforcement has learned.
 
 @app.get("/tools/gain", response_model=list[ToolGainOut])
-async def get_tool_gains() -> list[dict[str, Any]]:
-    return intent_surface.GAIN_OVERRIDES.view_all()
+def get_tool_gains(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
+    return intent_surface.gain_overrides(user.id).view_all()
 
 
 # PUT, not POST: setting a tool's override to x is idempotent. A null override
 # clears it, reverting that tool to its learned value.
 @app.put("/tools/gain/{tool_name}", response_model=ToolGainOut)
-async def put_tool_gain(tool_name: str, update: ToolGainUpdate) -> dict[str, Any]:
+def put_tool_gain(
+    tool_name: str, update: ToolGainUpdate, user: AuthUser = Depends(current_user)
+) -> dict[str, Any]:
     try:
-        return intent_surface.GAIN_OVERRIDES.set(tool_name, update.override)
+        return intent_surface.gain_overrides(user.id).set(tool_name, update.override)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown tool: {tool_name!r}")
 
@@ -271,33 +361,138 @@ class FactEdit(BaseModel):
 
 
 @app.get("/persona/graph")
-async def get_persona_graph(
+def get_persona_graph(
+    response: Response,
     min_similarity: float = persona.DEFAULT_MIN_SIMILARITY,
     max_links: int = persona.DEFAULT_MAX_LINKS,
-) -> dict[str, Any]:
+    clusters: bool = False,
+    if_none_match: str | None = Header(default=None),
+    user: AuthUser = Depends(current_user),
+) -> Any:
     """Persona as nodes and edges, for the Knowledge Map tab.
 
     min_similarity is a query parameter because the right density is a taste
     question and will drift as the store grows - see persona/graph.py for the
     measurements behind the default.
+
+    Carries an ETag. The phone keeps the last graph and sends its tag back as
+    If-None-Match; if nothing has changed it gets a bodyless 304, and the server
+    never loads the embeddings or links a single pair (persona.graph_etag).
+
+    `clusters=true` groups facts by meaning (persona/clusters.py) for the map's
+    subheadings; where grouping isn't available the graph comes back grouped
+    by category as before, and the phone groups by that.
+
+    Also says whether NOVA is due to learn from recent activity, in
+    X-Nova-Consolidation (due / running / idle) and X-Nova-Last-Consolidated -
+    on a 304 too, since opening the map is one of the moments the phone
+    triggers a pass.
     """
-    graph = persona.knowledge_graph(min_similarity=min_similarity, max_links=max_links)
+    view = persona.cluster_view(user.id) if clusters else None
+    etag = persona.graph_etag(user.id, min_similarity=min_similarity, max_links=max_links, clusters=view)
+    # private: one person's beliefs, never for a shared cache. no-cache: always ask first.
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache", **_consolidation_headers(user.id)}
+    if _etag_matches(if_none_match, etag):
+        return Response(status_code=304, headers=headers)
+
+    graph = persona.knowledge_graph(user.id, min_similarity=min_similarity, max_links=max_links, clusters=view)
     print(f"[persona] graph {graph.stats()}")
+    response.headers.update(headers)
     return {**graph.model_dump(mode="json"), "stats": graph.stats()}
 
 
+def _consolidation_headers(user_id: UUID) -> dict[str, str]:
+    """The map's view of background learning. Empty where it's unavailable -
+    the phone then just doesn't trigger from here."""
+    try:
+        from app.store import consolidation
+
+        check = consolidation.due(user_id)
+    except Exception as e:
+        print(f"[consolidation] due check skipped: {e}")
+        return {}
+    headers = {"X-Nova-Consolidation": check.status}
+    if check.last_run_at:
+        headers["X-Nova-Last-Consolidated"] = check.last_run_at.isoformat()
+    return headers
+
+
+@app.get("/persona/search")
+def search_persona(
+    q: str = Query(min_length=1, max_length=200),
+    limit: int = Query(default=20, ge=1, le=50),
+    user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    """The Knowledge Map's search bar: this user's beliefs by meaning and by
+    keyword (persona.search - era-memory's hybrid ranking), each with its group,
+    plus the group the hits concentrate in, for the map to fly to.
+
+    A hit is kept if it is close in meaning (cosine >= SEARCH_MIN_SIMILARITY) or
+    shares a word with the query at all - "COMP2100" should find its course
+    even though the embedding barely sees it. `match` says which.
+    """
+    matches = persona.search(user.id, persona.PersonaQuery(text=q, limit=limit))
+    view = persona.cluster_view(user.id)
+    membership = view.membership if view else {}
+    hits = [
+        {
+            "fact_id": m.fact.id,
+            "text": m.fact.text,
+            "similarity": round(m.similarity, 3),
+            "lexical": round(m.lexical, 4),
+            "score": m.score,
+            "cluster_id": membership.get(m.fact.id or ""),
+            "match": "meaning" if m.similarity >= SEARCH_MIN_SIMILARITY else "keyword",
+        }
+        for m in matches
+        if m.similarity >= SEARCH_MIN_SIMILARITY or m.lexical > 0
+    ]
+    weight: dict[str, float] = {}
+    for h in hits:
+        if h["cluster_id"]:
+            weight[h["cluster_id"]] = weight.get(h["cluster_id"], 0.0) + h["score"]
+    target = max(weight, key=lambda c: weight[c]) if weight else None
+    print(f"[persona] search {q[:40]!r}: {len(hits)} hit(s), target={target}")
+    return {"hits": hits, "target_cluster": target}
+
+
+# Query-to-statement cosine runs lower than fact-to-fact (see intent_surface's
+# PERSONA_MIN_SIMILARITY, 0.35, for the measurements), so a search takes hits
+# a fair way below the grouping threshold. A starting point - calibrate on real
+# queries. Keyword hits pass regardless.
+SEARCH_MIN_SIMILARITY = 0.5
+
+
+def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+    """RFC 9110 If-None-Match: a list of tags, compared weakly, or "*"."""
+    if not if_none_match:
+        return False
+    tags = [t.strip().removeprefix("W/") for t in if_none_match.split(",")]
+    return "*" in tags or etag in tags
+
+
 @app.get("/persona")
-async def list_persona() -> list[dict[str, Any]]:
+def list_persona(user: AuthUser = Depends(current_user)) -> list[dict[str, Any]]:
     """Every belief, newest first - the list view behind the map."""
-    return [f.model_dump(mode="json") for f in persona.all_facts()]
+    return [f.model_dump(mode="json") for f in persona.all_facts(user.id)]
 
 
 @app.patch("/persona/{fact_id}")
-async def edit_persona_fact(fact_id: str, edit: FactEdit) -> dict[str, Any]:
+def edit_persona_fact(
+    fact_id: str, edit: FactEdit, user: AuthUser = Depends(current_user)
+) -> dict[str, Any]:
     """Correct a belief in place. Re-embeds, so an edited fact is findable by
-    what it now says rather than what it used to."""
+    what it now says rather than what it used to. Someone else's fact id is a
+    404, the same as one that doesn't exist.
+
+    Through persona.remember(), dated now: the edited belief keeps its id, any
+    other belief it now duplicates is merged into it, and any it contradicts
+    is removed. The response is the fact plus `action` and `superseded` (the
+    beliefs the edit overruled), so the map can drop their nodes."""
+    if not _is_uuid(fact_id):
+        raise HTTPException(status_code=404, detail=f"unknown fact: {fact_id!r}")
     try:
-        current = persona.get(fact_id)
+        current = persona.get(user.id, fact_id)
     except persona.FactNotFound:
         raise HTTPException(status_code=404, detail=f"unknown fact: {fact_id!r}")
 
@@ -308,12 +503,19 @@ async def edit_persona_fact(fact_id: str, edit: FactEdit) -> dict[str, Any]:
         # was before - they have overruled whatever NOVA inferred.
         "metadata": {**(current.metadata or {}), "source": "stated", "edited": True},
     })
-    persona.upsert(updated)
-    return persona.get(fact_id).model_dump(mode="json")
+    try:
+        result = persona.remember(user.id, updated, stated_at=datetime.now(timezone.utc))
+        return {
+            **persona.get(user.id, fact_id).model_dump(mode="json"),
+            "action": result.action.value,
+            "superseded": [s.model_dump(mode="json") for s in result.superseded],
+        }
+    except persona.FactNotFound:  # deleted in between
+        raise HTTPException(status_code=404, detail=f"unknown fact: {fact_id!r}")
 
 
 @app.delete("/persona/{fact_id}", status_code=204)
-async def delete_persona_fact(fact_id: str) -> None:
+def delete_persona_fact(fact_id: str, user: AuthUser = Depends(current_user)) -> None:
     """Forget a belief (Privacy pillar / REQ1). Deliberately unconditional - the
     user does not have to justify it, and it is gone from the vector store as
     well as the list. A tombstone keeps it gone: consolidation would otherwise
@@ -330,7 +532,7 @@ async def delete_persona_fact(fact_id: str) -> None:
             detail=f"not a fact id: {fact_id!r}. Categories are not separately "
                    f"deletable - they disappear with the last fact filed under them.",
         )
-    persona.delete(fact_id)
+    persona.delete(user.id, fact_id)  # a no-op for someone else's id
     print(f"[persona] deleted {fact_id}")
 
 
@@ -343,31 +545,59 @@ def _is_uuid(value: str) -> bool:
 
 
 @app.post("/persona/consolidate")
-async def run_consolidation(preview: bool = False) -> dict[str, Any]:
-    """Turn what has happened repeatedly into what is true about the user.
+def run_consolidation(
+    preview: bool = False, if_due: bool = False, user: AuthUser = Depends(current_user),
+) -> dict[str, Any]:
+    """Turn what has happened into what is true about the user.
 
-    Driven from the Knowledge Map rather than a timer, because this is the one
-    moment the map exists to show: Episodes the user can scroll past becoming
-    beliefs NOVA will act on months later. A background job would do the same
-    work invisibly, and the visibility is the product.
+    There is no button for this any more: it happens on its own. /event and the
+    map's graph fetch say when a pass is due, and the phone's background worker
+    calls this with `if_due=true` - which runs an incremental pass over only
+    the episodes since the last one, or does nothing if none is due. The phone
+    makes the call because Cloud Run keeps a request's CPU only while it's
+    open. What was learned still shows: the map's "Learning…" line while it
+    runs, and a "new" marker on what it added.
 
-    `preview=true` returns exactly what a real run would write without writing
-    it - the same code path, so what is shown is what would land.
+    Without `if_due`, a full pass over the whole log (manual use). `preview=true`
+    returns exactly what a full pass would write without writing it.
     """
-    from app.store.consolidation import consolidate, preview_statements
+    from app.store.consolidation import consolidate, preview_statements, run_if_due
     from app.store.consolidation import preview as preview_trends
 
+    if if_due and not preview:
+        run = run_if_due(user.id)
+        print(f"[consolidation] if-due: ran={run.ran} running={run.running} "
+              f"episodes={run.episodes_read}")
+        return run.model_dump(mode="json")
+
+    reconciled: list[dict[str, Any]] = []
     if preview:
-        derived = [f.model_dump(mode="json") for f in preview_trends()]
-        stated = [f.model_dump(mode="json") for f in preview_statements()]
+        derived = [f.model_dump(mode="json") for f in preview_trends(user.id)]
+        stated = [f.model_dump(mode="json") for f in preview_statements(user.id)]
     else:
-        result = consolidate()
+        result = consolidate(user.id)
         derived = [f.model_dump(mode="json") for f in result["derived"]]
         stated = [f.model_dump(mode="json") for f in result["stated"]]
+        reconciled = [r.model_dump(mode="json") for r in result["reconciled"]]
 
     print(f"[consolidation] {'preview' if preview else 'run'}: "
           f"{len(derived)} derived, {len(stated)} stated")
-    return {"preview": preview, "derived": derived, "stated": stated}
+    return {"preview": preview, "derived": derived, "stated": stated, "reconciled": reconciled}
+
+
+@app.post("/persona/reconcile")
+def run_reconcile(preview: bool = True, user: AuthUser = Depends(current_user)) -> dict[str, Any]:
+    """Sweep this user's whole Persona for duplicates and contradictions and
+    resolve them the way persona.remember() does for each new belief - most
+    recent wins, duplicates merge. For beliefs written before that existed,
+    and anything a failed judge call left unreconciled.
+
+    Previews by default (the sweep runs over an in-memory copy); pass
+    preview=false to apply. Returns only the beliefs something happened to.
+    """
+    results = persona.reconcile_all(user.id, dry_run=preview)
+    print(f"[persona] reconcile {'preview' if preview else 'run'}: {len(results)} change(s)")
+    return {"preview": preview, "changes": [r.model_dump(mode="json") for r in results]}
 
 
 # --- Audit log (Autonomy pillar) ---------------------------------------------
@@ -388,17 +618,18 @@ _AUDIT_DEFAULT_FETCH_CAP = 200
 
 
 @app.get("/audit", response_model=list[AuditEntryOut])
-async def list_audit(
+def list_audit(
     limit: int = 50,
     since: str | None = None,
     until: str | None = None,
     tool: str | None = None,
     q: str | None = None,
+    user: AuthUser = Depends(current_user),
 ) -> list[dict[str, Any]]:
     filtering = bool(tool or q)
     fetch_limit = _AUDIT_FILTERED_FETCH_CAP if filtering else min(limit, _AUDIT_DEFAULT_FETCH_CAP)
     try:
-        episodes = memory.recent_all(fetch_limit, since=since, until=until)
+        episodes = memory.recent_all(user.id, fetch_limit, since=since, until=until)
     except Exception as e:
         print(f"[memory] audit read skipped: {e}")
         return []
@@ -439,14 +670,15 @@ async def list_audit(
 # Android posts here after resolving a need_more request from /event (see
 # intent_surface.py's CLIENT_TOOLS) - resumes the same paused Claude conversation.
 @app.post("/event/continue", response_model=EventResponse)
-async def continue_event(input_wrapper: ContinueWrapper) -> EventResponse:
+def continue_event(input_wrapper: ContinueWrapper, user: AuthUser = Depends(current_user)) -> EventResponse:
     print(f"[/event/continue] session_id={input_wrapper.session_id!r}")
     try:
-        intent = intent_surface.resume(input_wrapper.session_id, input_wrapper.result)
+        # 404 for someone else's session too - see intent_surface.resume.
+        intent = intent_surface.resume(user.id, input_wrapper.session_id, input_wrapper.result)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     # The turn that started at /event may only finish here, so this is the
     # other place an episode can close.
     if isinstance(intent, IntentResult):
-        _close_episode(intent)
-    return _to_response(intent)
+        _close_episode(user.id, intent)
+    return _with_consolidation_hint(user.id, _to_response(intent))

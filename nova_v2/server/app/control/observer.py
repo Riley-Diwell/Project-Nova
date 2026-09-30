@@ -7,9 +7,8 @@ horizon, and how much that prediction is worth.
 
 WHY IT EXISTS
 NOVA was described as a control loop and had no observer. A next-state estimator
-existed early in the project and was deleted before it reached the live path
-(state_estimator/state_estimator.py, still in the tree, marked superseded), and
-nothing replaced it. Without a predicted next state there is no error signal, and
+existed early in the project (V1's state_estimator/) and never reached the live
+path; it was not ported to V2, and nothing replaced it. Without a predicted next state there is no error signal, and
 without an error signal Controller Gain had nothing to multiply - so it multiplied
 the State Estimator's confidence in its own current estimate instead, which
 answers "how sure are we about now" and never "how far off are we".
@@ -47,10 +46,11 @@ from __future__ import annotations
 
 from datetime import timedelta
 from enum import Enum
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
+from app.control.cues import obligation_cue
 from app.control.gain.config import clamp
 from app.schemas.user_state import UserState
 from app.tools.functions.notification_batcher import Mode
@@ -63,8 +63,14 @@ HORIZON_MINUTES = 60
 
 # Hours on the user's own clock during which an interruption is a different kind
 # of event. Named and tunable rather than inline, and applied to the local hour
-# so it means the same thing in every timezone.
+# so it means the same thing in every timezone. The fallback only: a user who
+# gave their sleep window in onboarding gets theirs (priors["in_sleep_window"]).
 QUIET_HOURS = frozenset({23, 0, 1, 2, 3, 4, 5})
+
+# How much being in an event costs interruptibility, before the user's own
+# answer to "in class or focusing, Nova should..." scales it (focus_tolerance:
+# 0 urgent only, 0.5 important - today's value - 1 anything useful).
+IN_EVENT_PENALTY = 0.3
 
 # Activities during which the user's hands and eyes are committed elsewhere.
 HANDS_BUSY_ACTIVITIES = frozenset({"in_vehicle", "driving", "on_bicycle",
@@ -171,6 +177,12 @@ class Observation(BaseModel):
     # --- what Consolidation has counted --------------------------------------
     habitual_places: list[str] = Field(default_factory=list)
 
+    # --- what the user just said ---------------------------------------------
+    # How strongly this turn's words stated an obligation, 0 to 1
+    # (control/cues.py) - set_reminder's error term. 0.0 on every non-voice
+    # event. Additive and backend-only, like everything else here.
+    obligation_cue: float = 0.0
+
 
 # Evidence weights for the prediction confidence. They sum to 1.0, so a fully
 # corroborated prediction is worth 1.0 and a bare one is worth what it had.
@@ -188,6 +200,7 @@ def observe(
     event: Any,
     user_state: UserState,
     trends: Sequence[Trend] = (),
+    priors: Optional[Mapping[str, float]] = None,
 ) -> Observation:
     """The Observation for one pipeline pass.
 
@@ -195,7 +208,16 @@ def observe(
     retrieved for this Event. Passing none is normal and costs only prediction
     confidence - Persona needs Supabase and an embedding model, and a turn has to
     run without either.
+
+    `priors` are this user's onboarding answers as estimator inputs
+    (schemas/profile.OnboardingAnswers.to_features), worked out by the caller
+    for this moment so the Observer stays pure. None, or a missing name, means
+    the behaviour from before onboarding existed. Read here:
+      in_sleep_window       SLEEP mode, in place of QUIET_HOURS
+      focus_tolerance       scales the in-event interruptibility penalty
+      calendar_reliability  scales how much calendar evidence is worth
     """
+    priors = priors or {}
     local_hour = _local_hour(event, user_state)
     commitments = _commitments(user_state)
     in_event = _in_event(user_state)
@@ -203,7 +225,8 @@ def observe(
 
     predicted = _predict(commitments, in_event, _has_calendar_evidence(user_state))
     confidence = _prediction_confidence(
-        predicted, user_state, commitments, habitual
+        predicted, user_state, commitments, habitual,
+        calendar_reliability=priors.get("calendar_reliability", 1.0),
     )
 
     return Observation(
@@ -213,14 +236,16 @@ def observe(
         local_hour=local_hour,
         in_event=in_event,
         state_confidence=_unit(user_state.confidence),
-        interruptibility=_interruptibility(user_state, in_event),
-        mode=_mode(user_state, in_event, local_hour),
+        interruptibility=_interruptibility(
+            user_state, in_event, focus_tolerance=priors.get("focus_tolerance", 0.5)),
+        mode=_mode(user_state, in_event, local_hour, priors.get("in_sleep_window")),
         horizon_minutes=HORIZON_MINUTES,
         commitments=commitments,
         next_commitment=commitments[0] if commitments else None,
         predicted=predicted,
         prediction_confidence=confidence,
         habitual_places=habitual,
+        obligation_cue=obligation_cue(event),
     )
 
 
@@ -293,7 +318,7 @@ def _in_event(user_state: UserState) -> bool:
     )
 
 
-def _interruptibility(user_state: UserState, in_event: bool) -> float:
+def _interruptibility(user_state: UserState, in_event: bool, focus_tolerance: float = 0.5) -> float:
     """How available the user is to be interrupted, 0 to 1.
 
     A budget, not a verdict: the notification error term measures pressure
@@ -321,7 +346,9 @@ def _interruptibility(user_state: UserState, in_event: bool) -> float:
         budget -= 0.1
 
     if in_event:
-        budget -= 0.3
+        # 0.45 for "urgent only", 0.3 for "important" (and unanswered), 0.15 for
+        # "anything useful".
+        budget -= IN_EVENT_PENALTY * (1.5 - _unit(focus_tolerance))
     if _activity(user_state) in HANDS_BUSY_ACTIVITIES:
         budget -= 0.3
     if user_state.call_state in ("offhook", "ringing"):
@@ -333,13 +360,18 @@ def _interruptibility(user_state: UserState, in_event: bool) -> float:
     return _unit(budget)
 
 
-def _mode(user_state: UserState, in_event: bool, local_hour: Optional[int]) -> Mode:
+def _mode(user_state: UserState, in_event: bool, local_hour: Optional[int],
+          in_sleep_window: Optional[float] = None) -> Mode:
     """Which of the batcher's delivery modes this situation is.
 
     Derived here so the batcher stops holding a second copy of something
-    `calendar_ctx` and `dnd` already carry. Most restrictive wins.
+    `calendar_ctx` and `dnd` already carry. Most restrictive wins. The user's
+    own sleep window when they gave one, QUIET_HOURS otherwise.
     """
-    if local_hour is not None and local_hour in QUIET_HOURS:
+    if in_sleep_window is not None:
+        if in_sleep_window >= 0.5:
+            return Mode.SLEEP
+    elif local_hour is not None and local_hour in QUIET_HOURS:
         return Mode.SLEEP
     if in_event:
         return Mode.LECTURE
@@ -433,6 +465,7 @@ def _prediction_confidence(
     user_state: UserState,
     commitments: list[Commitment],
     habitual_places: list[str],
+    calendar_reliability: float = 1.0,
 ) -> float:
     """How much the prediction is worth, 0 to 1.
 
@@ -450,7 +483,8 @@ def _prediction_confidence(
     weights = PREDICTION_EVIDENCE_WEIGHTS
     score = 0.0
     if _has_calendar_evidence(user_state):
-        score += weights["calendar"]
+        # A user whose timetable isn't in their calendar gets less from it.
+        score += weights["calendar"] * _unit(calendar_reliability)
     if _activity(user_state):
         score += weights["activity"]
     if user_state.location_ctx:

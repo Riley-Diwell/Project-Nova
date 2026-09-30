@@ -48,4 +48,10 @@ object NovaBleProtocol {
      * flags, bytes 2+ are the ADPCM block itself. */
     const val AUDIO_FLAG_START = 0x01
     const val AUDIO_FLAG_END = 0x02
+    /** START frame only: a dictated note. Defined for the protocol; the firmware doesn't send it yet. */
+    const val AUDIO_FLAG_NOTE = 0x04
+
+    /** Samples per ADPCM block (firmware bufferLen) and the mic's rate - one block is 32 ms. */
+    const val SAMPLES_PER_BLOCK = 512
+    const val SAMPLE_RATE_HZ = 16_000
 }

@@ -1,6 +1,10 @@
 package com.example.novav2.ui.screens
 
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -14,8 +18,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.DateRangePicker
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -37,13 +45,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.novav2.network.NovaApiClient
+import com.example.novav2.ui.components.Tag
+import com.example.novav2.ui.theme.NovaOk
 import kotlinx.coroutines.delay
 import java.io.IOException
 import java.time.Instant
@@ -62,7 +75,7 @@ private enum class DatePreset(val label: String) {
     ALL("All time"),
     TODAY("Today"),
     LAST_7("Last 7 days"),
-    CUSTOM("Date Range"),
+    CUSTOM("Custom range"),
 }
 
 /** Excludes any day after today (UTC, matching the picker's own calendar semantics) - the
@@ -140,15 +153,10 @@ fun AuditLogScreen() {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        Text(
-            text = "Audit log",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(start = 20.dp, top = 20.dp, end = 20.dp)
-        )
+        // The top bar already says "Audit log" - just the explainer here.
         Text(
             text = "Every automated and AI action Nova has taken, and why.",
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(start = 20.dp, top = 4.dp, end = 20.dp, bottom = 12.dp)
         )
@@ -161,16 +169,24 @@ fun AuditLogScreen() {
                 .padding(horizontal = 20.dp),
             placeholder = { Text("Search actions, notes, replies…") },
             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            trailingIcon = {
+                if (searchText.isNotEmpty()) IconButton(onClick = { searchText = "" }) {
+                    Icon(Icons.Default.Close, contentDescription = "Clear search")
+                }
+            },
+            shape = RoundedCornerShape(28.dp),
             singleLine = true,
         )
 
         Spacer(Modifier.height(12.dp))
 
+        // Scrolls sideways rather than squeezing four chips into a narrow screen.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             DatePreset.entries.forEach { option ->
                 val label = if (option == DatePreset.CUSTOM) {
@@ -183,7 +199,7 @@ fun AuditLogScreen() {
                     onClick = {
                         if (option == DatePreset.CUSTOM) showRangePicker = true else preset = option
                     },
-                    label = { Text(label) },
+                    label = { Text(label, maxLines = 1) },
                 )
             }
         }
@@ -225,15 +241,21 @@ fun AuditLogScreen() {
         Spacer(Modifier.height(8.dp))
 
         if (status.isNotBlank()) {
-            Text(
-                text = status,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp),
-                textAlign = TextAlign.Center
-            )
+            if (status.startsWith("Loading")) {
+                Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else {
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    textAlign = TextAlign.Center
+                )
+            }
         }
 
         LazyColumn(
@@ -312,27 +334,25 @@ fun AuditLogScreen() {
 
 @Composable
 private fun AuditCard(entry: NovaApiClient.AuditEntry) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                verticalAlignment = Alignment.Top,
             ) {
                 Text(
                     text = entry.summary,
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.width(8.dp))
-                Text(
+                Tag(
                     text = if (entry.ran) "Ran" else "Refused",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (entry.ran) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.error
-                    }
+                    color = if (entry.ran) NovaOk else MaterialTheme.colorScheme.error,
                 )
             }
 
@@ -348,7 +368,9 @@ private fun AuditCard(entry: NovaApiClient.AuditEntry) {
 
             Text(
                 text = triggerLine(entry),
-                style = MaterialTheme.typography.bodyMedium
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
             )
 
             entry.reason?.let { reason ->
@@ -362,8 +384,8 @@ private fun AuditCard(entry: NovaApiClient.AuditEntry) {
             entry.speech?.takeIf { it.isNotBlank() }?.let { speech ->
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "\"$speech\"",
-                    style = MaterialTheme.typography.bodySmall,
+                    text = "\u201C$speech\u201D",
+                    style = MaterialTheme.typography.bodySmall.copy(fontStyle = FontStyle.Italic),
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }

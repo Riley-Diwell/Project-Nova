@@ -46,8 +46,18 @@ enum NovaCommandType : uint8_t {
 // docs/ble-protocol.md. Byte 0 of every notification is a wrapping sequence
 // number, byte 1 is these flags, bytes 2+ are the existing ADPCM block
 // (empty for the dedicated end-of-utterance notification below).
-const uint8_t AUDIO_FLAG_START = 0x01;
-const uint8_t AUDIO_FLAG_END   = 0x02;
+const uint8_t AUDIO_FLAG_START     = 0x01;
+const uint8_t AUDIO_FLAG_END       = 0x02;
+
+// Every audio block was hex-dumped to Serial inside the ~32 ms capture loop,
+// for copy-pasting into firmware/audio_playback_test.py. That is ~520 chars
+// per block at 115200 baud - enough to stall the loop and drop audio.
+// Set to 1 only for that bench test.
+#define AUDIO_DEBUG_HEX 0
+
+// How long setupBLE() waits for a USB serial monitor before carrying on. It
+// used to wait forever, which blocks boot on battery with no USB host.
+const uint32_t SERIAL_WAIT_MS = 2000;
 
 const uint32_t HEARTBEAT_INTERVAL_MS = 5000; // keeps the phone able to tell
                                               // "connected, quiet" from "gone"
@@ -131,8 +141,8 @@ uint8_t adpcmOut[4 + bufferLen / 2];
 static unsigned int haptic_level = 0;
 
 // --- leds
-#define LED_RED   D3   
-#define LED_GREEN D6   
+#define LED_RED   D3
+#define LED_GREEN D6
 // Both LED pins are driven with PWM (0-255) so the colour can fade red -> orange -> green.
 const int LED_PWM_FREQ = 5000;
 const int LED_PWM_BITS = 8;
@@ -147,6 +157,19 @@ struct PulseState {
 };
 PulseState greenPulse;
 PulseState hapticPulse;
+PulseState led2Pulse;
+
+// Haptic patterns: alternating on/off durations in ms, starting with on. A
+// phone-commanded COMMAND_HAPTIC_PULSE is a one-step pattern through this
+// player, so pulses can't fight over the pin.
+struct HapticPattern {
+  uint16_t steps[6];
+  uint8_t count = 0;
+  uint8_t index = 0;
+  uint32_t stepStartedAt = 0;
+  bool active = false;
+};
+HapticPattern haptic;
 
 // --- battery
 # define battPin A0
@@ -204,15 +227,7 @@ void checkButton() {
   // button stopped being pressed
   else if (debouncedButtonStatus == LOW && prevDebouncedButtonStatus == HIGH) {
     if (isRecording == 1){
-      isRecording = 0;
-      Serial.println("Stop recording audio");
-     // digitalWrite(led1, LOW);
-
-     // startPulse(led2, led2Pulse, 500); // quick pulse
-
-      //pulseStartTime = millis();
-      //startPulse(led2); // quick pulse
-
+      stopRecording();
       clickCount = 0; // if we were recording audio, we don't want this to influence future single or double clicks
     } else {
       if (clickCount == 0) {
@@ -226,9 +241,7 @@ void checkButton() {
   else if (debouncedButtonStatus == HIGH) {
     if ((millis() - pressedAt) > audioStartTime) {
       if (isRecording == 0) { // if not recording already
-      isRecording = 1;
-      Serial.println("Begin audio recording!");
-    //  digitalWrite(led1, HIGH);
+        startRecording();
       }
     }
   }
@@ -253,6 +266,20 @@ void checkButton() {
   }
   clickCount = 0; // reset
 }
+}
+
+void startRecording() {
+  isRecording = 1;
+  digitalWrite(led1, HIGH);
+  Serial.println("Begin audio recording!");
+}
+
+void stopRecording() {
+  if (!isRecording) return;
+  isRecording = 0;
+  Serial.println("Stop recording audio");
+  digitalWrite(led1, LOW);
+  startPulse(led2, led2Pulse, 500); // quick pulse
 }
 
 // --- microphone
@@ -374,7 +401,8 @@ class NovaCommandsCallbacks : public NimBLECharacteristicCallbacks {
       case COMMAND_HAPTIC_PULSE: {
         uint32_t durationMs = (value.size() > 1) ? (uint8_t)value[1] * 10 : 100;
         Serial.printf("[BLE] command: haptic pulse (%lums)\n", durationMs);
-        startPulse(HAPTIC, hapticPulse, durationMs);
+        uint16_t step[] = {(uint16_t)durationMs};
+        playHaptic(step, 1);
         break;
       }
       case COMMAND_LED_PULSE: {
@@ -394,7 +422,10 @@ class NovaCommandsCallbacks : public NimBLECharacteristicCallbacks {
 };
 
 void setupBLE() {
-  while (!Serial) { /* wait for USB serial */ }
+  // Wait for a USB serial monitor, but not forever: on battery there is no
+  // USB host and `Serial` never becomes true.
+  uint32_t serialWaitStart = millis();
+  while (!Serial && (millis() - serialWaitStart) < SERIAL_WAIT_MS) { /* wait for USB serial */ }
 
   NimBLEDevice::init("NovaDevice"); // was "georgias_esp32" - a real,
                                      // filterable product name so the phone
@@ -544,6 +575,27 @@ void updateLed() {
   float closeness = 1.0 - (error / FULL_RED_ANGLE); // 0 = way off, 1 = on target
   uint8_t green = (uint8_t)(closeness * 255);
   setLedColour(255 - green, green);
+// Starts `pattern` (see HapticPattern), replacing whatever was playing.
+void playHaptic(const uint16_t* pattern, uint8_t count) {
+  haptic.count = min((int)count, (int)(sizeof(haptic.steps) / sizeof(haptic.steps[0])));
+  for (uint8_t i = 0; i < haptic.count; i++) haptic.steps[i] = pattern[i];
+  haptic.index = 0;
+  haptic.stepStartedAt = millis();
+  haptic.active = haptic.count > 0;
+  digitalWrite(HAPTIC, haptic.active ? HIGH : LOW);
+}
+
+void updateHaptic() {
+  if (!haptic.active) return;
+  if (millis() - haptic.stepStartedAt < haptic.steps[haptic.index]) return;
+  haptic.index++;
+  if (haptic.index >= haptic.count) {
+    haptic.active = false;
+    digitalWrite(HAPTIC, LOW);
+    return;
+  }
+  haptic.stepStartedAt = millis();
+  digitalWrite(HAPTIC, haptic.index % 2 == 0 ? HIGH : LOW); // even steps buzz, odd steps rest
 }
 
 // --- battery
@@ -551,7 +603,7 @@ void updateLed() {
 void checkBatteryLevel(){
   uint32_t Vbatt = 0;
   for(int i = 0; i < 16; i++) {
-    Vbatt = Vbatt + analogReadMilliVolts(A0); // ADC with correction   
+    Vbatt = Vbatt + analogReadMilliVolts(A0); // ADC with correction
   }
   float Vbattf = 2 * Vbatt / 16 / 1000.0;     // attenuation ratio 1/2, mV --> V
   Serial.println(Vbattf, 3);
@@ -568,7 +620,7 @@ void displaySensorDetails()
   Serial.print  ("Unique ID:    "); Serial.println(sensor.sensor_id);
   Serial.print  ("Max Value:    "); Serial.print(sensor.max_value); Serial.println(" uT");
   Serial.print  ("Min Value:    "); Serial.print(sensor.min_value); Serial.println(" uT");
-  Serial.print  ("Resolution:   "); Serial.print(sensor.resolution); Serial.println(" uT");  
+  Serial.print  ("Resolution:   "); Serial.print(sensor.resolution); Serial.println(" uT");
   Serial.println("------------------------------------");
   Serial.println("");
   //delay(500);
@@ -577,7 +629,7 @@ void displaySensorDetails()
 void setupCompass(){
   {
   Serial.println("HMC5883 Magnetometer Test"); Serial.println("");
-  
+
   /* Initialise the sensor */
   if(!mag.begin())
   {
@@ -585,7 +637,7 @@ void setupCompass(){
     Serial.println("Ooops, no HMC5883 detected ... Check your wiring!");
     while(1);
   }
-  
+
   /* Display some basic information on this sensor */
   displaySensorDetails();
 }
@@ -601,10 +653,10 @@ float directionToDegrees(const String& dir) {
 }
 
 void compassDetectionLoop(){
-  /* Get a new sensor event */ 
-  sensors_event_t event; 
+  /* Get a new sensor event */
+  sensors_event_t event;
   mag.getEvent(&event);
- 
+
   /* Display the results (magnetic vector values are in micro-Tesla (uT)) */
   Serial.print("X: "); Serial.print(event.magnetic.x); Serial.print("  ");
   Serial.print("Y: "); Serial.print(event.magnetic.y); Serial.print("  ");
@@ -613,25 +665,25 @@ void compassDetectionLoop(){
   // Hold the module so that Z is pointing 'up' and you can measure the heading with x&y
   // Calculate heading when the magnetometer is level, then correct for signs of axis.
   float heading = atan2(event.magnetic.y, event.magnetic.x);
-  
+
   // Once you have your heading, you must then add your 'Declination Angle', which is the 'Error' of the magnetic field in your location.
   // Find yours here: http://www.magnetic-declination.com/
   // Mine is: -13* 2' W, which is ~13 Degrees, or (which we need) 0.22 radians
   // If you cannot find your Declination, comment out these two lines, your compass will be slightly off.
   float declinationAngle = 0.22;
   heading += declinationAngle;
-  
+
   // Correct for when signs are reversed.
   if(heading < 0)
     heading += 2*PI;
-    
+
   // Check for wrap due to addition of declination.
   if(heading > 2*PI)
     heading -= 2*PI;
-   
+
   // Convert radians to degrees for readability.
-  float headingDegrees = heading * 180/M_PI; 
-  
+  float headingDegrees = heading * 180/M_PI;
+
   Serial.print("Heading (degrees): "); Serial.println(headingDegrees);
 
   // convert to 8 point compass interpretation
@@ -662,7 +714,7 @@ void compassDetectionLoop(){
   if (!isRecording && (millis() - lastPrint) > 1000) {
     lastPrint = millis();
     Serial.printf("Heading %.0f deg (%s) | target %s | off by %.0f deg\n",
-                  headingDegrees, 
+                  headingDegrees,
                   desiredDirection.c_str(), headingError);
   }
 }
@@ -713,7 +765,7 @@ void loop() {
   updateLed();
 
   // --- BLE feedback stuff (RX is callback-driven now, not polled here)
-  updatePulse(HAPTIC, hapticPulse);
+  updateHaptic();
   if (bleConnected && (millis() - lastHeartbeatSent) > HEARTBEAT_INTERVAL_MS) {
     sendHeartbeat();
   }
@@ -729,11 +781,18 @@ void loop() {
 
   // --- microphone stuff
   static bool wasRecording = false;
+  // START used to be "audioSeq == 0", but audioSeq is a uint8_t that
+  // wraps every 256 blocks (~8.2 s), so every long recording sent a false
+  // START and the phone threw away everything before it. The first chunk of
+  // a recording is now tracked explicitly.
+  static bool firstChunk = false;
+  static uint8_t startFlags = 0;
 
   if (!isRecording) {
     if (wasRecording) {
       wasRecording = false;
-      sendAudioChunk(AUDIO_FLAG_END, nullptr, 0); // explicit end-of-utterance marker
+      // explicit end-of-utterance marker
+      sendAudioChunk(AUDIO_FLAG_END, nullptr, 0);
     }
     // Non-blocking drain so the DMA ring doesn't hand us stale data next time.
     size_t bytesIn = 0;
@@ -747,6 +806,8 @@ void loop() {
     resetADPCM();
     audioSeq = 0;
     wasRecording = true;
+    firstChunk = true;
+    startFlags = AUDIO_FLAG_START;
   }
 
   // Blocks up to ~32 ms while the DMA fills — fine, button poll resumes after.
@@ -768,14 +829,17 @@ void loop() {
   }
 
   size_t outBytes = encodeADPCMBlock(pcmBuffer, samplesRead, adpcmOut, adpcmState);
-  uint8_t flags = (audioSeq == 0) ? AUDIO_FLAG_START : 0x00;
+  uint8_t flags = firstChunk ? startFlags : 0x00;
+  firstChunk = false;
   sendAudioChunk(flags, adpcmOut, outBytes);
-  // Also dump the block as hex to Serial so you can copy-paste into the decoder.
+#if AUDIO_DEBUG_HEX
+  // Dump the block as hex to Serial so you can copy-paste into
+  // audio_playback_test.py. Bench use only - see AUDIO_DEBUG_HEX.
   for (size_t i = 0; i < outBytes; i++) {
     Serial.printf("%02X", adpcmOut[i]);
   }
   Serial.println();
-
+#endif
 }
 
 // ------------- references -------------

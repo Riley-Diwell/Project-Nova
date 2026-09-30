@@ -1,5 +1,6 @@
 package com.example.novav2.state
 
+import com.example.novav2.auth.AuthRepository
 import android.content.Context
 import com.example.novav2.model.UserState
 import com.example.novav2.network.NovaApiClient
@@ -30,6 +31,8 @@ object AmbientCheckRunner {
         }
 
     suspend fun run(context: Context, userState: UserState) {
+        // Nobody to ask on behalf of - e.g. the session died while the service kept running.
+        if (!AuthRepository.isSignedIn) return
         val result = try {
             val response = NovaApiClient.postAmbientEvent(userState)
             if (response is NovaApiClient.EventResult.Final) {

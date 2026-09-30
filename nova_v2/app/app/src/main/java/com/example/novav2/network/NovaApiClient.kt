@@ -1,13 +1,17 @@
 package com.example.novav2.network
 
 import com.example.novav2.BuildConfig
+
+import com.example.novav2.knowledge.KnowledgeRepository
 import com.example.novav2.model.CalendarEventInfo
+import com.example.novav2.model.ReminderSummary
 import com.example.novav2.model.UserState
 import org.json.JSONArray
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
+import com.example.novav2.network.NovaHttp.withNovaAuth
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -27,25 +31,28 @@ import java.util.concurrent.TimeUnit
  * {event, user_state} -> {speech, actions[]}). [BASE_URL] points at the deployed
  * `nova-v2` Cloud Run service (nova_v2/server, region australia-southeast1) -
  * swap back to "http://10.0.2.2:8000" (emulator host-loopback) or a LAN IP for
- * local dev against `uvicorn --reload` instead. [API_KEY] must match that
+ * local dev against `uvicorn --reload` instead. The client key ([NovaHttp]) must match that
  * service's NOVA_API_KEY secret (main.py's _require_api_key) - set via
  * local.properties' NOVA_API_KEY (gitignored, machine-local; blank there means
  * no header is sent, fine only for a backend with no key configured, i.e. bare
  * local dev).
  */
 object NovaApiClient {
-    private const val BASE_URL = "https://nova-v2-1021689546881.australia-southeast1.run.app"
-    private val API_KEY = BuildConfig.NOVA_API_KEY
+    /**
+     * The backend, from NOVA_BASE_URL in local.properties (gitignored - this repo is public and
+     * the server is a private tailnet machine). Self-hosted, see nova_v2/deploy: reachable only
+     * over the tailnet, so the phone needs the Tailscale app signed in. `tailscale serve` gives
+     * it a real certificate, so this is ordinary HTTPS.
+     *
+     * Not private: NotesApiClient and friends talk to the same server.
+     */
+    const val BASE_URL = BuildConfig.NOVA_BASE_URL
     private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
-        .addInterceptor { chain ->
-            val request = if (API_KEY.isEmpty()) chain.request()
-                else chain.request().newBuilder().addHeader("X-Nova-Api-Key", API_KEY).build()
-            chain.proceed(request)
-        }
+        .withNovaAuth()
         .build()
 
     /**
@@ -83,12 +90,23 @@ object NovaApiClient {
              * present even when [speech] is empty (an ambient check that isn't urgent yet, but now
              * knows exactly when it will be). See [com.example.novav2.state.DepartureAlarmScheduler]. */
             val scheduledDeparture: ScheduledDeparture?,
+            /** set_reminder Actions this turn - stored and scheduled via
+             * [com.example.novav2.state.TurnActionApplier], no confirmation needed. */
+            val reminderActions: List<ReminderAction> = emptyList(),
+            /** update_reminder Actions this turn (complete / snooze / edit / delete) - applied
+             * immediately; a delete is a soft delete with an Undo notice. */
+            val updateReminderActions: List<UpdateReminderAction> = emptyList(),
+            /** memory-tool recalls this turn - the Voice tab shows the notes they found as
+             * chips (see NoteRecallActions.kt). */
+            val recallActions: List<RecallAction> = emptyList(),
         ) : EventResult()
         data class NeedMore(
             val sessionId: String,
             val requestType: String,
             val fromIso: String,
             val toIso: String,
+            /** get_reminders only - whether to include completed reminders. */
+            val includeDone: Boolean = false,
         ) : EventResult()
     }
 
@@ -218,12 +236,20 @@ object NovaApiClient {
      * range). May itself return another [EventResult.NeedMore] if the model needs a further hop.
      */
     suspend fun postContinueEvent(sessionId: String, events: List<CalendarEventInfo>): EventResult =
+        postContinueResult(sessionId, JSONObject().apply { put("events", events.toJsonArray()) })
+
+    /** The get_reminders side of [postContinueEvent]: {"reminders": [...]} in the same
+     * ReminderInfo shape the voice window uses. */
+    suspend fun postContinueReminders(sessionId: String, reminders: List<ReminderSummary>): EventResult =
+        postContinueResult(sessionId, JSONObject().apply { put("reminders", reminders.toReminderJsonArray()) })
+
+    /** /event/continue with whatever [result] shape the paused client tool calls for - the
+     * backend feeds it straight back to the model as that tool's result. */
+    suspend fun postContinueResult(sessionId: String, result: JSONObject): EventResult =
         withContext(Dispatchers.IO) {
             val body = JSONObject().apply {
                 put("session_id", sessionId)
-                put("result", JSONObject().apply {
-                    put("events", events.toJsonArray())
-                })
+                put("result", result)
             }
 
             val request = Request.Builder()
@@ -317,10 +343,13 @@ object NovaApiClient {
 
     /**
      * One belief in the Persona store, as a node of the Knowledge Map.
-     * [kind] is "fact" or "category": category nodes are the ontology skeleton
-     * (opinions -> likes -> food) and carry only a label. [source] tells a fact
-     * the user stated from one NOVA derived from their behaviour, which is the
-     * distinction the map exists to make visible.
+     * [kind] is "fact", "category" or "cluster":
+     *  - category nodes are the ontology skeleton (opinions -> likes -> food), sent by servers
+     *    that don't group by meaning yet;
+     *  - cluster nodes are the server's meaning groups - [label] is the group's heading, [size]
+     *    how many facts it holds - and each fact names its group in [clusterId].
+     * [source] tells a fact the user stated from one NOVA derived from their behaviour, which is
+     * the distinction the map exists to make visible. Fields a server doesn't send are null.
      */
     data class GraphNode(
         val id: String,
@@ -331,13 +360,23 @@ object NovaApiClient {
         val category: List<String> = emptyList(),
         val support: Int? = null,
         val detail: String? = null,
+        /** The note this belief was promoted from, if any. */
+        val noteId: String? = null,
+        /** The meaning group this fact belongs to (a "cluster:<id>" node's id). */
+        val clusterId: String? = null,
+        /** A cluster node's member count. */
+        val size: Int? = null,
+        /** When the belief was last said or seen, ISO 8601. */
+        val statedAt: String? = null,
     ) {
         val isFact: Boolean get() = kind == "fact"
+        val isCluster: Boolean get() = kind == "cluster"
         val isDerived: Boolean get() = source == "derived"
     }
 
-    /** [kind] is "category" (the declared ontology) or "similar" (discovered by
-     *  vector proximity, with [weight] as the cosine similarity). */
+    /** [kind] is "category" (the declared ontology), "similar" (fact to fact, discovered by
+     *  vector proximity) or "topic" (a fact to a topic it is also about, beyond its own - target
+     *  is the topic's node id). [weight] is the cosine similarity for the last two. */
     data class GraphEdge(
         val source: String,
         val target: String,
@@ -345,6 +384,7 @@ object NovaApiClient {
         val weight: Float,
     ) {
         val isSimilarity: Boolean get() = kind == "similar"
+        val isTopicLink: Boolean get() = kind == "topic"
     }
 
     data class KnowledgeGraph(
@@ -352,52 +392,114 @@ object NovaApiClient {
         val edges: List<GraphEdge> = emptyList(),
     )
 
+    /** A graph and the server's ETag for it, to send back as If-None-Match next time. */
+    data class TaggedGraph(val graph: KnowledgeGraph, val etag: String?)
+
+    /**
+     * What the server says about background learning, from GET /persona/graph's headers:
+     * [status] is "due" (the phone should start a run), "running" or "idle"; [lastRunAt] is ISO.
+     * Servers that don't consolidate automatically send neither, and the hint is null.
+     */
+    data class ConsolidationHint(val status: String, val lastRunAt: String?)
+
+    /** A graph fetch: [tagged] is null when the held graph is still current (a 304). */
+    data class GraphFetch(val tagged: TaggedGraph?, val hint: ConsolidationHint?)
+
     /**
      * The whole Persona as a graph. [minSimilarity] controls how densely facts
      * are linked - the backend's default sits in the gap measured between
-     * related and unrelated pairs (backend/app/persona/graph.py), and the slider
-     * on the map lets the user trade recall for legibility.
+     * related and unrelated pairs (server/app/store/persona/graph.py). [clusters] asks for meaning
+     * groups instead of the category skeleton; servers without them ignore it.
+     *
+     * Pass the [TaggedGraph.etag] of the graph already held as [ifNoneMatch]: [GraphFetch.tagged]
+     * comes back null (a 304, no body) when it is still current.
      */
-    suspend fun getKnowledgeGraph(minSimilarity: Float? = null): KnowledgeGraph =
-        withContext(Dispatchers.IO) {
-            val url = StringBuilder("$BASE_URL/persona/graph")
-            if (minSimilarity != null) url.append("?min_similarity=$minSimilarity")
-
-            val request = Request.Builder().url(url.toString()).get().build()
-            client.newCall(request).execute().use { response ->
-                val json = JSONObject(response.requireBody())
-                KnowledgeGraph(
-                    nodes = json.optJSONArray("nodes").mapObjects { it.toGraphNode() },
-                    edges = json.optJSONArray("edges").mapObjects { it.toGraphEdge() },
-                )
+    suspend fun getKnowledgeGraph(
+        minSimilarity: Float? = null,
+        ifNoneMatch: String? = null,
+        clusters: Boolean = true,
+    ): GraphFetch = withContext(Dispatchers.IO) {
+        val url = "$BASE_URL/persona/graph".toHttpUrl().newBuilder()
+            .apply {
+                if (minSimilarity != null) addQueryParameter("min_similarity", minSimilarity.toString())
+                if (clusters) addQueryParameter("clusters", "true")
             }
+            .build()
+        val request = Request.Builder().url(url).get()
+            .apply { if (ifNoneMatch != null) header("If-None-Match", ifNoneMatch) }
+            .build()
+        client.newCall(request).execute().use { response ->
+            val hint = response.header("X-Nova-Consolidation")?.let {
+                ConsolidationHint(it, response.header("X-Nova-Last-Consolidated"))
+            }
+            if (response.code == 304) return@withContext GraphFetch(null, hint)
+            val json = JSONObject(response.requireBody())
+            GraphFetch(TaggedGraph(graph = parseKnowledgeGraph(json), etag = response.header("ETag")), hint)
         }
+    }
+
+    /** One search hit: [keyword] when it matched the query's words rather than its meaning. */
+    data class SearchHit(
+        val factId: String,
+        val score: Float,
+        val similarity: Float,
+        val keyword: Boolean,
+        val clusterId: String?,
+    )
+
+    /** GET /persona/search's answer. [targetCluster] is the group the hits concentrate in. */
+    data class PersonaSearch(val hits: List<SearchHit>, val targetCluster: String?)
 
     /**
-     * Runs consolidation: turns what the user has done repeatedly into durable beliefs. Returns
-     * how many of each kind were written, for the confirmation the map shows afterwards.
-     *
-     * Slow by nature - it reads the whole Episode log and makes a Claude call - so callers should
-     * show progress rather than assume this returns promptly.
+     * Searches beliefs by meaning and by keyword (the server's hybrid search). Null when the
+     * server has no search endpoint yet - the caller falls back to matching on the phone. On
+     * such a server the path lands on PATCH/DELETE /persona/{id}, so that's a 405, not a 404.
      */
-    suspend fun consolidate(): Pair<Int, Int> = withContext(Dispatchers.IO) {
+    suspend fun searchPersona(query: String, limit: Int = 20): PersonaSearch? = withContext(Dispatchers.IO) {
+        val url = "$BASE_URL/persona/search".toHttpUrl().newBuilder()
+            .addQueryParameter("q", query)
+            .addQueryParameter("limit", limit.toString())
+            .build()
+        client.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
+            if (response.code == 404 || response.code == 405) return@withContext null
+            parsePersonaSearch(JSONObject(response.requireBody()))
+        }
+    }
+
+    /** What an automatic consolidation run did. [ran] is false when the server said it wasn't due. */
+    data class ConsolidationRun(val ran: Boolean, val derived: Int, val stated: Int)
+
+    // A run reads new episodes, phrases trends and judges each new belief: minutes, not seconds.
+    private val slowClient by lazy { client.newBuilder().readTimeout(120, TimeUnit.SECONDS).build() }
+
+    /**
+     * Asks the server to learn from recent activity if it's due. Called by the background worker
+     * (knowledge/ConsolidationWorker), never from the UI - there is no button any more. A server
+     * that predates automatic consolidation ignores `if_due` and runs a full pass, which is what
+     * the old button did.
+     */
+    suspend fun consolidateIfDue(): ConsolidationRun = withContext(Dispatchers.IO) {
         val request = Request.Builder()
-            .url("$BASE_URL/persona/consolidate")
+            .url("$BASE_URL/persona/consolidate?if_due=true")
             .post(JSONObject().toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
-
-        client.newCall(request).execute().use { response ->
+        slowClient.newCall(request).execute().use { response ->
             val json = JSONObject(response.requireBody())
-            Pair(
-                json.optJSONArray("derived")?.length() ?: 0,
-                json.optJSONArray("stated")?.length() ?: 0,
+            ConsolidationRun(
+                ran = json.optBoolean("ran", true),
+                derived = json.optJSONArray("derived")?.length() ?: 0,
+                stated = json.optJSONArray("stated")?.length() ?: 0,
             )
         }
     }
 
-    /** Correct a belief. Re-embeds server-side, so it becomes findable by what
-     *  it now says. Passing null for a field leaves it unchanged. */
-    suspend fun editFact(id: String, text: String?, category: List<String>?): Unit =
+    /**
+     * Correct a belief. Re-embeds server-side, so it becomes findable by what it now says.
+     * Passing null for a field leaves it unchanged. Returns the ids of other beliefs the edit
+     * overruled (the server removes a contradicted belief when the edit is newer) - empty from
+     * servers that don't report them.
+     */
+    suspend fun editFact(id: String, text: String?, category: List<String>?): List<String> =
         withContext(Dispatchers.IO) {
             val body = JSONObject().apply {
                 if (text != null) put("text", text)
@@ -407,7 +509,11 @@ object NovaApiClient {
                 .url("$BASE_URL/persona/$id")
                 .patch(body.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .build()
-            client.newCall(request).execute().use { it.requireBody() }
+            client.newCall(request).execute().use { response ->
+                val json = JSONObject(response.requireBody())
+                json.optJSONArray("superseded").mapObjects { it.optString("id") }
+                    .filter { it.isNotEmpty() && it != id }
+            }
         }
 
     /** Forget a belief entirely (Privacy pillar / REQ1). */
@@ -490,6 +596,40 @@ object NovaApiClient {
         if (this == null) emptyList()
         else (0 until length()).map { transform(getJSONObject(it)) }
 
+    /** GET /persona/graph's body. Also how the phone's saved copy is read back (KnowledgeRepository). */
+    internal fun parseKnowledgeGraph(json: JSONObject): KnowledgeGraph = KnowledgeGraph(
+        nodes = json.optJSONArray("nodes").mapObjects { it.toGraphNode() },
+        edges = json.optJSONArray("edges").mapObjects { it.toGraphEdge() },
+    )
+
+    /** The inverse of [parseKnowledgeGraph]: the server's own shape, so one parser reads both. */
+    internal fun KnowledgeGraph.toJson(): JSONObject = JSONObject().apply {
+        put("nodes", JSONArray(nodes.map { n ->
+            JSONObject().apply {
+                put("id", n.id)
+                put("label", n.label)
+                put("kind", n.kind)
+                put("source", n.source ?: JSONObject.NULL)
+                put("confidence", n.confidence?.toDouble() ?: JSONObject.NULL)
+                put("category", JSONArray(n.category))
+                put("support", n.support ?: JSONObject.NULL)
+                put("detail", n.detail ?: JSONObject.NULL)
+                put("note_id", n.noteId ?: JSONObject.NULL)
+                put("cluster", n.clusterId ?: JSONObject.NULL)
+                put("size", n.size ?: JSONObject.NULL)
+                put("stated_at", n.statedAt ?: JSONObject.NULL)
+            }
+        }))
+        put("edges", JSONArray(edges.map { e ->
+            JSONObject().apply {
+                put("source", e.source)
+                put("target", e.target)
+                put("kind", e.kind)
+                put("weight", e.weight.toDouble())
+            }
+        }))
+    }
+
     private fun JSONObject.toGraphNode(): GraphNode = GraphNode(
         id = getString("id"),
         label = optString("label"),
@@ -501,6 +641,24 @@ object NovaApiClient {
         },
         support = if (isNull("support")) null else optInt("support"),
         detail = if (isNull("detail")) null else optString("detail"),
+        noteId = if (isNull("note_id")) null else optString("note_id").takeIf { it.isNotEmpty() },
+        // isNull is also true for a missing key, so a server without these reads as null.
+        clusterId = if (isNull("cluster")) null else optString("cluster").takeIf { it.isNotEmpty() },
+        size = if (isNull("size")) null else optInt("size"),
+        statedAt = if (isNull("stated_at")) null else optString("stated_at").takeIf { it.isNotEmpty() },
+    )
+
+    internal fun parsePersonaSearch(json: JSONObject): PersonaSearch = PersonaSearch(
+        hits = json.optJSONArray("hits").mapObjects {
+            SearchHit(
+                factId = it.getString("fact_id"),
+                score = it.optDouble("score", 0.0).toFloat(),
+                similarity = it.optDouble("similarity", 0.0).toFloat(),
+                keyword = it.optString("match") == "keyword",
+                clusterId = if (it.isNull("cluster_id")) null else "cluster:" + it.getString("cluster_id"),
+            )
+        },
+        targetCluster = if (json.isNull("target_cluster")) null else "cluster:" + json.getString("target_cluster"),
     )
 
     private fun JSONObject.toGraphEdge(): GraphEdge = GraphEdge(
@@ -530,6 +688,10 @@ object NovaApiClient {
             throw IOException("Backend returned ${response.code}: $responseBody")
         }
         val json = JSONObject(responseBody)
+        // The server's cheap "time to learn from recent activity" check (EventOut.consolidation_due).
+        // The phone does the run, in the background, because Cloud Run starves work that
+        // outlives a response.
+        if (json.optBoolean("consolidation_due", false)) KnowledgeRepository.consolidationDue()
         return when (json.optString("status", "final")) {
             "need_more" -> {
                 val req = json.optJSONObject("request") ?: JSONObject()
@@ -538,6 +700,7 @@ object NovaApiClient {
                     requestType = req.optString("type"),
                     fromIso = req.optString("from"),
                     toIso = req.optString("to"),
+                    includeDone = req.optBoolean("include_done", false),
                 )
             }
             else -> EventResult.Final(
@@ -561,6 +724,9 @@ object NovaApiClient {
                         eventTitle = it.optString("event_title").takeIf { t -> t.isNotBlank() },
                     )
                 },
+                reminderActions = parseReminderActions(json.optJSONArray("actions")),
+                updateReminderActions = parseUpdateReminderActions(json.optJSONArray("actions")),
+                recallActions = parseRecallActions(json.optJSONArray("actions")),
             )
         }
     }
@@ -715,6 +881,12 @@ object NovaApiClient {
         put("current_events", currentEvents.toJsonArray())
         put("upcoming_events", upcomingEvents.toJsonArray())
         put("preferred_travel_mode", preferredTravelMode)
+        // Voice turns only (ReminderRepository.attachWindow) - an ambient snapshot has no
+        // total and so sends no reminder text at all.
+        if (remindersPendingTotal != null) {
+            put("reminders", reminders.toReminderJsonArray())
+            put("reminders_pending_total", remindersPendingTotal)
+        }
     }
 
     private fun List<CalendarEventInfo>.toJsonArray(): JSONArray =

@@ -1,5 +1,6 @@
 package com.example.novav2.service
 
+import com.example.novav2.auth.AuthRepository
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
@@ -25,9 +26,9 @@ import com.example.novav2.model.ChatMessage
 import com.example.novav2.network.NovaApiClient
 import com.example.novav2.state.AmbientNotifier
 import com.example.novav2.state.AppForegroundState
-import com.example.novav2.state.CalendarSignal
 import com.example.novav2.state.CalendarWriter
-import com.example.novav2.state.DepartureAlarmScheduler
+import com.example.novav2.state.ReminderRepository
+import com.example.novav2.state.TurnActionApplier
 import com.example.novav2.state.UserStateCollector
 import com.example.novav2.state.parseIsoToEpochMillis
 import kotlinx.coroutines.CoroutineScope
@@ -73,6 +74,15 @@ class AssistVoiceService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!AuthRepository.isSignedIn) {
+            // Started with startForegroundService, so it must still go foreground before it stops.
+            startForegroundWithType(
+                buildStatusNotification("Sign in to use Nova", alerting = false),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+            finishTurn("Open Nova and sign in first, then I can help.", episodeId = null)
+            return START_NOT_STICKY
+        }
         val transcript = intent?.getStringExtra(EXTRA_TRANSCRIPT)
         if (transcript != null) {
             // Skips the "listening" wording entirely - a BLE transcript arrives already
@@ -176,31 +186,21 @@ class AssistVoiceService : Service() {
         scope.launch {
             dao.insert(ChatMessage(text = text, fromUser = true).toEntity(System.currentTimeMillis()))
             try {
-                val userState = UserStateCollector.snapshot(applicationContext)
-                var result: NovaApiClient.EventResult = NovaApiClient.postVoiceEvent(text, userState)
-                var hops = 0
-                while (result is NovaApiClient.EventResult.NeedMore && hops < 3) {
-                    val need = result as NovaApiClient.EventResult.NeedMore
-                    val events = when (need.requestType) {
-                        "get_calendar_range" -> {
-                            val from = parseIsoToEpochMillis(need.fromIso)
-                            val to = parseIsoToEpochMillis(need.toIso)
-                            CalendarSignal.rangeSnapshot(applicationContext, from, to).orEmpty()
-                        }
-                        else -> emptyList()
-                    }
-                    result = NovaApiClient.postContinueEvent(need.sessionId, events)
-                    hops++
-                }
+                val userState = ReminderRepository.attachWindow(
+                    applicationContext, UserStateCollector.snapshot(applicationContext),
+                )
+                val result = TurnActionApplier.resolveNeedMore(
+                    applicationContext, NovaApiClient.postVoiceEvent(text, userState),
+                )
 
                 val finalResult = result as? NovaApiClient.EventResult.Final
                 if (CalendarWriter.hasPermission(applicationContext)) {
                     finalResult?.actions?.forEach { applyCalendarAdd(it) }
                     finalResult?.editActions?.forEach { applyCalendarEdit(it) }
                 }
-                finalResult?.scheduledDeparture?.let {
-                    DepartureAlarmScheduler.schedule(applicationContext, it)
-                }
+                // Timers, alarms, reminders and the departure alarm - the same code
+                // VoiceScreen uses, so the wearable's voice path can't drift from it again.
+                finalResult?.let { TurnActionApplier.applyHeadless(applicationContext, it) }
 
                 val reply = finalResult?.speech?.takeIf { it.isNotBlank() }
                     ?: "Sorry, I couldn't finish that - try again from the app."

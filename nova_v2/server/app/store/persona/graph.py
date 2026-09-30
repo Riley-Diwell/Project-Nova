@@ -13,7 +13,7 @@ different things:
     the map is worth looking at rather than just a folder tree.
 
 WHY A THRESHOLD WORKS HERE AND NOT IN RETRIEVAL
-loop.py's PERSONA_MIN_SIMILARITY has to be near-useless (0.35) because it
+intent_surface.py's PERSONA_MIN_SIMILARITY has to be near-useless (0.35) because it
 compares a *question* to a *statement*, and those two bands overlap. Here both
 sides are stored facts - same voice, same shape, no query instruction - and the
 distribution separates cleanly. Measured on real facts:
@@ -31,7 +31,7 @@ right value will drift as the store grows.
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -46,8 +46,17 @@ DEFAULT_MIN_SIMILARITY = 0.65
 # hairball that hides the structure it was meant to show.
 DEFAULT_MAX_LINKS = 4
 
-NodeKind = Literal["fact", "category"]
-EdgeKind = Literal["category", "similar"]
+# A fact that is also about another topic is linked to that topic's hub too
+# ("Likes watermelon before bed" is Food & drink, and close to Sleep). Measured
+# on a real Persona: genuine crossovers score 0.66-0.69 against the other
+# topic's centre, the rest 0.55-0.63 - so this sits in the gap. At most this
+# many per fact, strongest first.
+TOPIC_LINK_MIN = 0.65
+TOPIC_LINKS_PER_FACT = 2
+
+NodeKind = Literal["fact", "category", "cluster"]
+# "topic" links a fact to a topic it is also about, beyond its own (clusters).
+EdgeKind = Literal["category", "similar", "topic"]
 
 
 class GraphNode(BaseModel):
@@ -63,6 +72,15 @@ class GraphNode(BaseModel):
     category: list[str] = Field(default_factory=list)
     support: Optional[int] = None
     detail: Optional[str] = None
+    # The note a belief was promoted from, if any - the Knowledge Map's
+    # "From your note" link.
+    note_id: Optional[str] = None
+    # When the belief was last said or seen (Fact.stated_at), ISO 8601.
+    stated_at: Optional[str] = None
+    # A fact's meaning group ("cluster:<id>") - the map's subheading for it.
+    cluster: Optional[str] = None
+    # A cluster node's member count.
+    size: Optional[int] = None
 
 
 class GraphEdge(BaseModel):
@@ -80,8 +98,10 @@ class KnowledgeGraph(BaseModel):
         return {
             "facts": sum(1 for n in self.nodes if n.kind == "fact"),
             "categories": sum(1 for n in self.nodes if n.kind == "category"),
+            "clusters": sum(1 for n in self.nodes if n.kind == "cluster"),
             "category_links": sum(1 for e in self.edges if e.kind == "category"),
             "similar_links": sum(1 for e in self.edges if e.kind == "similar"),
+            "topic_links": sum(1 for e in self.edges if e.kind == "topic"),
         }
 
 
@@ -90,11 +110,19 @@ def build_graph(
     vectors: dict[str, list[float]],
     min_similarity: float = DEFAULT_MIN_SIMILARITY,
     max_links: int = DEFAULT_MAX_LINKS,
+    clusters: Optional[Any] = None,
 ) -> KnowledgeGraph:
-    """Nodes and edges for the Knowledge Map."""
+    """Nodes and edges for the Knowledge Map.
+
+    With `clusters` (a clusters.ClusterView), facts are grouped by meaning:
+    one "cluster:<id>" node per group, headed and sized, each fact naming its
+    group - and no category skeleton, which the groups replace on the map.
+    Facts still carry their category path for their detail card.
+    """
     nodes: list[GraphNode] = []
     edges: list[GraphEdge] = []
     category_ids: set[str] = set()
+    membership = clusters.membership if clusters is not None else {}
 
     for fact in facts:
         if not fact.id:
@@ -109,11 +137,65 @@ def build_graph(
             category=list(fact.category),
             support=meta.get("support"),
             detail=meta.get("quote") or meta.get("value"),
+            note_id=str(meta["note_id"]) if meta.get("note_id") else None,
+            stated_at=fact.stated_at.isoformat() if fact.stated_at else None,
+            cluster=f"cluster:{membership[fact.id]}" if fact.id in membership else None,
         ))
-        edges.extend(_category_chain(fact, category_ids, nodes))
+        if clusters is None:
+            edges.extend(_category_chain(fact, category_ids, nodes))
+
+    if clusters is not None:
+        present = {f.id for f in facts if f.id}
+        sizes: dict[str, int] = {}
+        for fact_id, cluster_id in membership.items():
+            if fact_id in present:
+                sizes[cluster_id] = sizes.get(cluster_id, 0) + 1
+        nodes.extend(
+            GraphNode(id=f"cluster:{c.id}", label=c.title, kind="cluster", size=sizes[c.id])
+            for c in sorted(clusters.clusters, key=lambda c: c.created_at)
+            if sizes.get(c.id)
+        )
 
     edges.extend(_similarity_edges(facts, vectors, min_similarity, max_links))
+    if clusters is not None:
+        edges.extend(_topic_edges(facts, vectors, membership))
     return KnowledgeGraph(nodes=nodes, edges=edges)
+
+
+def _topic_edges(
+    facts: list[Fact],
+    vectors: dict[str, list[float]],
+    membership: dict[str, str],
+) -> list[GraphEdge]:
+    """A fact's links to the other topics it is close to: its cosine to each
+    topic's centre - the mean of the facts filed there, measured here so it is
+    never stale. A fact is compared only with topics it isn't in, so a topic's
+    own members never pull its centre towards themselves."""
+    members: dict[str, list[str]] = {}
+    for fact_id, cluster_id in membership.items():
+        if fact_id in vectors:
+            members.setdefault(cluster_id, []).append(fact_id)
+    centres: dict[str, list[float]] = {}
+    for cluster_id, ids in members.items():
+        mean = [sum(col) / len(ids) for col in zip(*(vectors[i] for i in ids))]
+        norm = sum(x * x for x in mean) ** 0.5 or 1.0
+        centres[cluster_id] = [x / norm for x in mean]
+
+    edges: list[GraphEdge] = []
+    for fact in facts:
+        vec = vectors.get(fact.id or "")
+        if vec is None:
+            continue
+        own = membership.get(fact.id)
+        close = sorted(
+            ((_cosine(vec, centre), cluster_id) for cluster_id, centre in centres.items() if cluster_id != own),
+            reverse=True,
+        )
+        for score, cluster_id in close[:TOPIC_LINKS_PER_FACT]:
+            if score >= TOPIC_LINK_MIN:
+                edges.append(GraphEdge(source=fact.id, target=f"cluster:{cluster_id}", kind="topic",
+                                       weight=round(score, 3)))
+    return edges
 
 
 def _category_chain(

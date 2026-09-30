@@ -23,7 +23,7 @@ class EventOut(BaseModel):
     speech: str
     actions: list[dict[str, Any]] = []
     episode_id: str | None = None
-    # Set only when speech leaves a question dangling (intent_surface/loop.py's
+    # Set only when speech leaves a question dangling (intent_surface.py's
     # _classify_confirmation): "yes_no" if Android should offer Yes/No quick
     # replies alongside its usual text/voice input, "open" if it's a question
     # but not one a Yes/No answer fits, None otherwise.
@@ -37,6 +37,12 @@ class EventOut(BaseModel):
     # these fields - the model's speech is never used for it (see
     # AmbientCheckRunner.kt).
     scheduled_departure: dict[str, Any] | None = None
+    # True when enough has happened since NOVA last learned from this user's
+    # activity (store/consolidation.due). The phone then asks for the pass in
+    # the background (POST /persona/consolidate?if_due=true) - a request it
+    # makes keeps its CPU on Cloud Run, where work the server started after
+    # replying may never finish.
+    consolidation_due: bool = False
 
 
 class NeedMoreOut(BaseModel):
