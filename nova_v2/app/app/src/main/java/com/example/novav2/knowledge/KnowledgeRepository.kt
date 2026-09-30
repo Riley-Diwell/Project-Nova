@@ -141,7 +141,9 @@ object KnowledgeRepository {
 
     /**
      * Correct a belief. Shown at once; throws (and puts the old text back) if the server refuses.
-     * A belief the edit contradicted is removed by the server - and here, straight away.
+     * A belief the edit contradicted is removed by the server - and here, straight away. Then the
+     * whole map is fetched again: an edit can move a fact to another topic or change what it links
+     * to, which only the server works out.
      */
     suspend fun edit(factId: String, text: String) {
         relabelled[factId] = text
@@ -154,9 +156,13 @@ object KnowledgeRepository {
             relabelled.remove(factId)
             publish()
         }
+        refresh()
     }
 
-    /** Forget a belief. Gone at once; throws (and shows it again) if the server refuses. */
+    /**
+     * Forget a belief. Gone at once; throws (and shows it again) if the server refuses. Then the
+     * map is fetched again, so topic sizes and links match what the server now holds.
+     */
     suspend fun forget(factId: String) {
         forgetting += factId
         publish()
@@ -168,6 +174,7 @@ object KnowledgeRepository {
             forgetting -= factId
             publish()
         }
+        refresh()
     }
 
     /** Deleting a note deletes every belief promoted from it (server-side); mirror that here. */

@@ -243,7 +243,11 @@ SYSTEM_PROMPT = (
     "turns where nothing was saved to memory or persona for them. "
     "standing_instructions, when present, are what the user has told you about "
     "how to behave and talk to them - they apply to every reply, whatever it is "
-    "about, including how you phrase your speech. "
+    "about, including how you phrase your speech. They are also the only place "
+    "a way of talking comes from: recent_episodes tell you what was said and "
+    "done, not how to say things now, so never carry on a tone, language or "
+    "style from an earlier reply or request that isn't in standing_instructions "
+    "- if it isn't there, the user has dropped it. "
     "The memory tool is the notebook of what the user has told you: save when "
     "they ask you to remember or note something, and recall when they ask what "
     "they told you. A lasting instruction about how you should behave or talk "
@@ -937,8 +941,49 @@ def _recent_episodes(user_id: UUID | str, event: Event) -> list[dict[str, Any]]:
 
     current_id = str(event.id)
     past = [r for r in rows if (r.get("event") or {}).get("id") != current_id]
+    # Nothing from before the user last changed what NOVA knows - see
+    # memory.reset_context. "Always reply in pirate speak", deleted from the
+    # map, must not live on in the replies that followed it.
+    start = _context_start(user_id) if past else None
+    if start is not None:
+        past = [r for r in past if _after(r.get("created_at"), start)]
     print(f"[memory] {len(past)} past {event.type!r} episodes, using last {RECENT_EPISODES}")
     return [_for_model_episode(r) for r in past[-RECENT_EPISODES:]]
+
+
+def _context_start(user_id: UUID | str) -> datetime | None:
+    try:
+        start = memory.context_start(user_id)
+    except Exception as e:
+        print(f"[memory] context start unknown: {e}")
+        return None
+    return _parse_time(start)
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _after(created_at: Any, start: datetime) -> bool:
+    when = _parse_time(created_at)
+    return when is None or when > start   # an undated row is kept, as before
+
+
+def reset_context(user_id: UUID | str) -> None:
+    """The user changed what NOVA knows by hand: stop handing the model the
+    conversation from before, and drop any question left hanging in it.
+    Non-fatal - the edit itself has already happened."""
+    _clear_pending_confirmation(user_id)
+    try:
+        memory.reset_context(user_id)
+    except Exception as e:
+        print(f"[memory] context reset skipped: {e}")
 
 
 def _for_model_episode(row: dict[str, Any]) -> dict[str, Any]:

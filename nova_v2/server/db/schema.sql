@@ -25,6 +25,8 @@
 --   8. profiles        - display name and onboarding answers (app/store/profile.py).
 --   9. canvas_connections - each account's Canvas address and encrypted access
 --                         token (app/store/canvas.py). Server-only: no policy.
+--  10. context_resets  - when each account last changed what NOVA knows by hand,
+--                         so older conversation stops being context (app/store/memory.py).
 --
 -- Every table is per-account: a user_id referencing Supabase Auth's auth.users
 -- with on delete cascade, and an owner RLS policy as a backstop to the server's
@@ -780,3 +782,22 @@ alter table public.canvas_connections enable row level security;
 
 comment on table public.canvas_connections is
     'One per account: Canvas address and Fernet-encrypted access token. Server-only.';
+
+
+-- ---------------------------------------------------------------------------
+-- 10. Context resets
+-- ---------------------------------------------------------------------------
+-- The last time the user edited or deleted something on the Knowledge Map.
+-- Conversation from before it is no longer handed to the model as recent
+-- context, so a behaviour the user just deleted ("always reply in pirate
+-- speak") can't carry on by the model copying its own recent replies.
+
+create table if not exists public.context_resets (
+    user_id  uuid        primary key references auth.users (id) on delete cascade,
+    reset_at timestamptz not null default now()
+);
+
+alter table public.context_resets enable row level security;
+drop policy if exists context_resets_owner on public.context_resets;
+create policy context_resets_owner on public.context_resets for all to authenticated
+    using (user_id = auth.uid()) with check (user_id = auth.uid());

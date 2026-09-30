@@ -505,6 +505,9 @@ def edit_persona_fact(
     })
     try:
         result = persona.remember(user.id, updated, stated_at=datetime.now(timezone.utc))
+        # What NOVA knows just changed by hand: older conversation stops being
+        # context, so the old version can't be picked back up from it.
+        intent_surface.reset_context(user.id)
         return {
             **persona.get(user.id, fact_id).model_dump(mode="json"),
             "action": result.action.value,
@@ -533,6 +536,9 @@ def delete_persona_fact(fact_id: str, user: AuthUser = Depends(current_user)) ->
                    f"deletable - they disappear with the last fact filed under them.",
         )
     persona.delete(user.id, fact_id)  # a no-op for someone else's id
+    # "Always reply in pirate speak", deleted, must not carry on through the
+    # pirate replies still sitting in recent conversation.
+    intent_surface.reset_context(user.id)
     print(f"[persona] deleted {fact_id}")
 
 

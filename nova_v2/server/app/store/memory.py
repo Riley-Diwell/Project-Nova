@@ -14,6 +14,8 @@ The episodic Memory store: an append-only log of Episodes, backed by the
     all(user_id)                       -> every Episode, oldest first
     close(user_id, episode_id, ...)    -> fill in what happened
     ping()                             -> reach the table (start-up warm-up)
+    reset_context(user_id)             -> older Episodes stop being context
+    context_start(user_id)             -> when that last happened, or None
 
 Every Episode belongs to one account, and every function takes that account
 first: a read only ever sees the caller's rows, and
@@ -41,6 +43,7 @@ app/store/persona (Section 5.4).
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Union
 from uuid import UUID
 
@@ -54,6 +57,7 @@ _ORDER_COLUMN = "created_at"
 _USER_COLUMN = "user_id"
 # At or below PostgREST's max-rows, so a short page always means the end.
 _PAGE_SIZE = 1000
+_RESET_TABLE = "context_resets"
 
 UserId = Union[UUID, str]
 
@@ -88,6 +92,27 @@ def get(user_id: UserId, episode_id: str) -> dict[str, Any] | None:
     """
     rows = _mine(user_id).eq("id", episode_id).limit(1).execute().data
     return rows[0] if rows else None
+
+
+def reset_context(user_id: UserId) -> None:
+    """From now on, this user's earlier Episodes are history but not context.
+
+    Set when the user edits or deletes something NOVA knows (the Knowledge
+    Map). The log keeps every row - nothing here is ever removed - but the
+    Intent Surface stops showing the model conversation from before this
+    moment, so what was changed can't be picked back up from it.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    get_client().table(_RESET_TABLE).upsert(
+        {_USER_COLUMN: str(user_id), "reset_at": now}, on_conflict=_USER_COLUMN,
+    ).execute()
+
+
+def context_start(user_id: UserId) -> str | None:
+    """When reset_context() last ran for this user (ISO 8601), or None."""
+    rows = (get_client().table(_RESET_TABLE).select("reset_at")
+            .eq(_USER_COLUMN, str(user_id)).limit(1).execute().data)
+    return rows[0]["reset_at"] if rows else None
 
 
 def recent(user_id: UserId, event_type: str, limit: int) -> list[dict[str, Any]]:

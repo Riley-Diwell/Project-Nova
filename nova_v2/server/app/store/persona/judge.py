@@ -85,6 +85,17 @@ More examples:
 - "Wants Nova to interrupt only for urgent things" / "Is happy for Nova to \
 suggest things proactively" -> contradicts
 
+Instructions about how Nova should talk stack: several can apply to the same \
+reply, so two different ones are "unrelated" - even when both say "always" or \
+"only". They contradict only when one reply can't follow both: a different \
+language, opposite lengths or opposite tones.
+- "Always respond in rhymes" / "Always respond in pirate speak" -> unrelated
+- "Respond only in rhymes" / "Start every reply with the letter a" -> unrelated
+- "Keep replies short" / "Be friendly and casual" -> unrelated
+- "Always reply in French" / "Always reply in English" -> contradicts
+- "Keep replies short" / "Give long, detailed answers" -> contradicts
+- "Respond in rhymes" / "Stop rhyming" -> contradicts
+
 Ignore wording style and grammatical person. When unsure between duplicate \
 and unrelated, choose unrelated; when unsure between contradicts and \
 unrelated, choose unrelated.
