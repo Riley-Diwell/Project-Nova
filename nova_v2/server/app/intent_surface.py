@@ -57,6 +57,11 @@ MAX_ITERATIONS = 5
 # A voice turn waits on this; the model is local, so a generous timeout still
 # fails fast when the box is down.
 LOOP_TIMEOUT_S = 45.0
+# Thinking plus answer, per model call in the loop. The model generates about
+# 130 tokens a second, so this bounds one step at ~12 s; most think for a few
+# hundred tokens. One that runs out is made to answer (_force_answer) rather
+# than given more - a voice turn is better quick than exhaustively considered.
+LOOP_MAX_TOKENS = 1536
 
 # web_search runs locally now (tools/web_search.py), so its cap is ours to
 # enforce - the hosted tool's max_uses did this before.
@@ -100,6 +105,9 @@ MOCK_LLM = os.environ.get("NOVA_MOCK_LLM", "").strip().lower() in ("1", "true", 
 # only the tools the Controller authorised, so an unauthorised call is
 # structurally impossible rather than prose-discouraged.
 SYSTEM_PROMPT = (
+    "THINK BRIEFLY: this is a spoken conversation and the user is waiting while "
+    "you think - keep your private reasoning to a few short sentences, then act "
+    "or answer. "
     "You are NOVA, an ambient assistant. You receive the triggering event "
     "(e.g. what the user said) and their current state, both as JSON. "
     "Decide what to say - short, natural speech, or an empty string if nothing "
@@ -238,7 +246,11 @@ SYSTEM_PROMPT = (
     "about, including how you phrase your speech. "
     "The memory tool is the notebook of what the user has told you: save when "
     "they ask you to remember or note something, and recall when they ask what "
-    "they told you. "
+    "they told you. A lasting instruction about how you should behave or talk "
+    "- 'always reply in Pig Latin', 'from now on keep it short', 'stop calling "
+    "me mate' - is itself a request to remember it: save it (category "
+    "preferences, nova) as well as following it, so it becomes one of the "
+    "standing_instructions. "
     "persona is the long-term one: durable facts about who this user is, "
     "retrieved by meaning for this event. These are how you answer about "
     "habits, usuals and preferences - established background rather than "
@@ -302,11 +314,16 @@ def _as_function(name: str, description: str, parameters: dict[str, Any]) -> dic
         "function": {"name": name, "description": description, "parameters": parameters},
     }
 
-def _build_tools(authorised: list[str], canvas: bool = False) -> list[dict[str, Any]]:
+def _build_tools(authorised: list[str]) -> list[dict[str, Any]]:
     """
     The tool list for one turn: exactly what the Controller authorised, plus the
-    context tools - canvas only for a user who has connected it, so nobody else's
-    prompt grows by a tool they can't use.
+    context tools.
+
+    canvas is offered to everyone, connected or not (an unconnected user's call
+    says how to connect it). The tools sit near the front of every prompt, so a
+    list that differed by account made the model server re-read ~13k tokens
+    whenever two people's turns alternated - about 11 s each time. One list for
+    everyone keeps that part cached.
 
     A Function tool with no authority this
     turn is simply absent, so calling it is structurally impossible rather than
@@ -319,11 +336,8 @@ def _build_tools(authorised: list[str], canvas: bool = False) -> list[dict[str, 
     """
     return [
         *(_as_function(t["name"], t["description"], t["input_schema"])
-          for t in (WEB_SEARCH_TOOL, GET_CURRENT_ADDRESS_TOOL)),
+          for t in (WEB_SEARCH_TOOL, GET_CURRENT_ADDRESS_TOOL, CANVAS_TOOL)),
         *(_tool_definition(name) for name in authorised),
-        # Last, so the shared prefix above stays identical for every user.
-        *([_as_function(CANVAS_TOOL["name"], CANVAS_TOOL["description"], CANVAS_TOOL["input_schema"])]
-          if canvas else []),
     ]
 
 # The registry is built here, so this is where the gain package gets pointed at
@@ -453,8 +467,8 @@ class TurnContext:
     # web_search calls so far this turn, against WEB_SEARCH_MAX_USES.
     web_searches: int = 0
 
-    # Whether this user has connected Canvas (store/canvas.py), which is what
-    # puts the canvas tool on offer; and its calls so far, against CANVAS_MAX_USES.
+    # Whether this user has connected Canvas (store/canvas.py) - the tool is on
+    # offer either way (_build_tools) - and its calls so far, against CANVAS_MAX_USES.
     canvas: bool = False
     canvas_calls: int = 0
 
@@ -614,7 +628,9 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
         return web_search(str(tool_input.get("query", "")))
     if name == "canvas":
         if not ctx.canvas:
-            return {"success": False, "error": "Canvas isn't connected"}
+            return {"success": False, "error": (
+                "Canvas isn't connected for this user - tell them they can connect "
+                "it in Settings, under Canvas")}
         if ctx.canvas_calls >= CANVAS_MAX_USES:
             return {"success": False, "error": (
                 "Canvas limit reached this turn - answer from what you have")}
@@ -1315,7 +1331,7 @@ def _run_loop(
     is_voice: bool = False,
 ) -> IntentResult | NeedMoreResult:
     # Read off the Turn rather than passed in.
-    tools = _build_tools(ctx.turn.authorised(), canvas=ctx.canvas)
+    tools = _build_tools(ctx.turn.authorised())
 
     # The last line a tool offered for the user to hear. Spoken if the model
     # ends the turn saying nothing - after a save it sometimes returns no text
@@ -1335,7 +1351,7 @@ def _run_loop(
             messages=[{"role": "system", "content": SYSTEM_PROMPT}, *messages],
             tools=tools,
             tool_choice="auto",
-            max_tokens=1024 + llm.THINKING_TOKENS,
+            max_tokens=LOOP_MAX_TOKENS,
             temperature=0.3,
             # Thinking on: the server hands it back apart from the answer
             # (see llm.THINKING). It is not kept in the thread.
@@ -1351,9 +1367,15 @@ def _run_loop(
               f"prompt={getattr(usage, 'prompt_tokens', None)} cached={cached} "
               f"completion={getattr(usage, 'completion_tokens', None)}")
 
-        # Thinking used the whole budget and nothing came out: make it stop
-        # thinking and answer, rather than end the turn in silence.
-        if finish == "length" and not calls and not assistant["content"]:
+        # Thinking used the budget before a whole answer came out: make it stop
+        # thinking and answer, rather than end the turn in silence or speak
+        # half a sentence. A reply that used every token may also have been cut
+        # off inside a tool call - the server still says "tool_calls", with
+        # the arguments missing - so that counts too, and the call is dropped.
+        hit_cap = (getattr(usage, "completion_tokens", 0) or 0) >= LOOP_MAX_TOKENS
+        if hit_cap or (finish == "length" and not calls):
+            if calls:
+                print(f"[loop] cut off inside {[c['function']['name'] for c in calls]!r} - dropping it")
             assistant, calls, finish = _force_answer(messages, tools, llm.reasoning_of(choice.message))
 
         # if a tool is called. Checked before finish_reason: some servers
