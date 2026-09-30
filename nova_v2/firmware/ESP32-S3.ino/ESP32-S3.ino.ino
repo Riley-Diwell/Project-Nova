@@ -74,6 +74,11 @@ uint32_t lastHeartbeatSent = 0;
 const uint32_t CENTRAL_STALE_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3;
 uint32_t lastCentralActivityMs = 0;
 
+#include "BLESerial.h"
+#include "Linereader.h"
+#include <Adafruit_Sensor.h>
+#include <Adafruit_HMC5883_U.h>
+
 // ------------- define pins and variables -------------
 
 // --- button
@@ -136,8 +141,11 @@ uint8_t adpcmOut[4 + bufferLen / 2];
 static unsigned int haptic_level = 0;
 
 // --- leds
-# define led1 D3
-# define led2 D4
+#define LED_RED   D3
+#define LED_GREEN D6
+// Both LED pins are driven with PWM (0-255) so the colour can fade red -> orange -> green.
+const int LED_PWM_FREQ = 5000;
+const int LED_PWM_BITS = 8;
 
 // Per-pin pulse state, so the led2 confirmation flash and a haptic pulse
 // (driven by the phone over BLE) can run independently instead of sharing
@@ -147,6 +155,8 @@ struct PulseState {
   uint32_t durationMs = 500;
   bool active = false;
 };
+PulseState greenPulse;
+PulseState hapticPulse;
 PulseState led2Pulse;
 
 // Haptic patterns: alternating on/off durations in ms, starting with on. A
@@ -173,6 +183,20 @@ volatile bool bleConnected = false;
 uint16_t bleConnHandle = 0; // set on connect, used by the stale-connection watchdog to disconnect
 uint8_t audioSeq = 0;
 
+
+// --- compass
+/* Assign a unique ID to this sensor at the same time */
+Adafruit_HMC5883_Unified mag = Adafruit_HMC5883_Unified(12345);
+
+String desiredDirection = "NE"; // debug this is just a placeholder to test, we will need to replace this with some incoming ble signal
+const float FULL_RED_ANGLE = 180.0;
+const uint32_t COMPASS_INTERVAL_MS = 100; // read the compass 10x per second
+uint32_t lastCompassRead = 0;
+float targetHeading = 0;    // desiredDirection converted to degrees in setup()
+float currentHeading = 0;   // latest compass heading, degrees 0-360
+float headingError = 180;   // how far off target we are, degrees 0-180
+
+
 // ------------- define functions -------------
 // --- button
 void debounceButton() {
@@ -190,7 +214,11 @@ void debounceButton() {
 }
 
 void checkButton() {
-  updatePulse(led2, led2Pulse);
+
+ // updatePulse(led2, led2Pulse);
+
+  //updatePulse(led2);
+
   if (debouncedButtonStatus == HIGH && prevDebouncedButtonStatus == LOW) {
     // just pressed
     pressedAt = millis();
@@ -380,7 +408,7 @@ class NovaCommandsCallbacks : public NimBLECharacteristicCallbacks {
       case COMMAND_LED_PULSE: {
         uint32_t durationMs = (value.size() > 1) ? (uint8_t)value[1] * 10 : 500;
         Serial.printf("[BLE] command: LED pulse (%lums)\n", durationMs);
-        startPulse(led2, led2Pulse, durationMs);
+       // startPulse(led2, led2Pulse, durationMs);
         break;
       }
       case COMMAND_PING:
@@ -520,6 +548,33 @@ void updatePulse(int pinNum, PulseState& state) {
   }
 }
 
+void setLedColour(uint8_t red, uint8_t green) {
+  ledcWrite(LED_RED, red);
+  ledcWrite(LED_GREEN, green);
+}
+
+void updateLed() {
+  // turn red if recording
+  if (isRecording) {
+    setLedColour(255, 0);
+    return;
+  }
+
+  // pulse green when stopped recording
+  if (greenPulse.active) {
+    if ((millis() - greenPulse.startTime) > greenPulse.durationMs) {
+      greenPulse.active = false;
+    } else {
+      setLedColour(0, 255);
+      return;
+    }
+  }
+
+  // green if compass is in desired direction, fades to red if not
+  float error = min(headingError, FULL_RED_ANGLE);
+  float closeness = 1.0 - (error / FULL_RED_ANGLE); // 0 = way off, 1 = on target
+  uint8_t green = (uint8_t)(closeness * 255);
+  setLedColour(255 - green, green);
 // Starts `pattern` (see HapticPattern), replacing whatever was playing.
 void playHaptic(const uint16_t* pattern, uint8_t count) {
   haptic.count = min((int)count, (int)(sizeof(haptic.steps) / sizeof(haptic.steps[0])));
@@ -548,10 +603,120 @@ void updateHaptic() {
 void checkBatteryLevel(){
   uint32_t Vbatt = 0;
   for(int i = 0; i < 16; i++) {
-    Vbatt = Vbatt + analogReadMilliVolts(A0); // ADC with correction   
+    Vbatt = Vbatt + analogReadMilliVolts(A0); // ADC with correction
   }
   float Vbattf = 2 * Vbatt / 16 / 1000.0;     // attenuation ratio 1/2, mV --> V
   Serial.println(Vbattf, 3);
+}
+
+// --- compass
+void displaySensorDetails()
+{
+  sensor_t sensor;
+  mag.getSensor(&sensor);
+  Serial.println("------------------------------------");
+  Serial.print  ("Sensor:       "); Serial.println(sensor.name);
+  Serial.print  ("Driver Ver:   "); Serial.println(sensor.version);
+  Serial.print  ("Unique ID:    "); Serial.println(sensor.sensor_id);
+  Serial.print  ("Max Value:    "); Serial.print(sensor.max_value); Serial.println(" uT");
+  Serial.print  ("Min Value:    "); Serial.print(sensor.min_value); Serial.println(" uT");
+  Serial.print  ("Resolution:   "); Serial.print(sensor.resolution); Serial.println(" uT");
+  Serial.println("------------------------------------");
+  Serial.println("");
+  //delay(500);
+}
+
+void setupCompass(){
+  {
+  Serial.println("HMC5883 Magnetometer Test"); Serial.println("");
+
+  /* Initialise the sensor */
+  if(!mag.begin())
+  {
+    /* There was a problem detecting the HMC5883 ... check your connections */
+    Serial.println("Ooops, no HMC5883 detected ... Check your wiring!");
+    while(1);
+  }
+
+  /* Display some basic information on this sensor */
+  displaySensorDetails();
+}
+}
+
+// Converts an 8-point compass name ("N", "NE", ...) to degrees. Returns -1 if unknown.
+float directionToDegrees(const String& dir) {
+  const char* names[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+  for (int i = 0; i < 8; i++) {
+    if (dir.equalsIgnoreCase(names[i])) return i * 45.0;
+  }
+  return -1;
+}
+
+void compassDetectionLoop(){
+  /* Get a new sensor event */
+  sensors_event_t event;
+  mag.getEvent(&event);
+
+  /* Display the results (magnetic vector values are in micro-Tesla (uT)) */
+  Serial.print("X: "); Serial.print(event.magnetic.x); Serial.print("  ");
+  Serial.print("Y: "); Serial.print(event.magnetic.y); Serial.print("  ");
+  Serial.print("Z: "); Serial.print(event.magnetic.z); Serial.print("  ");Serial.println("uT");
+
+  // Hold the module so that Z is pointing 'up' and you can measure the heading with x&y
+  // Calculate heading when the magnetometer is level, then correct for signs of axis.
+  float heading = atan2(event.magnetic.y, event.magnetic.x);
+
+  // Once you have your heading, you must then add your 'Declination Angle', which is the 'Error' of the magnetic field in your location.
+  // Find yours here: http://www.magnetic-declination.com/
+  // Mine is: -13* 2' W, which is ~13 Degrees, or (which we need) 0.22 radians
+  // If you cannot find your Declination, comment out these two lines, your compass will be slightly off.
+  float declinationAngle = 0.22;
+  heading += declinationAngle;
+
+  // Correct for when signs are reversed.
+  if(heading < 0)
+    heading += 2*PI;
+
+  // Check for wrap due to addition of declination.
+  if(heading > 2*PI)
+    heading -= 2*PI;
+
+  // Convert radians to degrees for readability.
+  float headingDegrees = heading * 180/M_PI;
+
+  Serial.print("Heading (degrees): "); Serial.println(headingDegrees);
+
+  // convert to 8 point compass interpretation
+  if (headingDegrees >= 337.5 || headingDegrees < 22.5) {
+  Serial.println("N");
+} else if (headingDegrees < 67.5) {
+  Serial.println("NE");
+} else if (headingDegrees < 112.5) {
+  Serial.println("E");
+} else if (headingDegrees < 157.5) {
+  Serial.println("SE");
+} else if (headingDegrees < 202.5) {
+  Serial.println("S");
+} else if (headingDegrees < 247.5) {
+  Serial.println("SW");
+} else if (headingDegrees < 292.5) {
+  Serial.println("W");
+} else {
+  Serial.println("NW");
+}
+
+    // Shortest angle between where we're facing and where we want to face: 0-180 deg.
+  float diff = fmod(headingDegrees - targetHeading + 540.0, 360.0) - 180.0;
+  headingError = fabs(diff);
+
+  // Print about once a second, and not while recording (would mix into the audio hex dump).
+  static uint32_t lastPrint = 0;
+  if (!isRecording && (millis() - lastPrint) > 1000) {
+    lastPrint = millis();
+    Serial.printf("Heading %.0f deg (%s) | target %s | off by %.0f deg\n",
+                  headingDegrees,
+                  desiredDirection.c_str(), headingError);
+  }
 }
 
 // ------------- setup -------------
@@ -560,8 +725,8 @@ void setup() {
   pinMode(buttonPin, INPUT_PULLUP);
   pinMode(HAPTIC, OUTPUT);
 
-  pinMode(led1, OUTPUT);
-  pinMode(led2, OUTPUT);
+  //pinMode(led1, OUTPUT);
+  //pinMode(led2, OUTPUT);
 
   pinMode(battPin, INPUT);
 
@@ -576,7 +741,18 @@ void setup() {
   i2s_start(I2S_PORT); // Start the I2S receiver
   delay(1000);           // give USB serial a moment to come up
   Serial.println("Ready. Press the button.");
+
+  setupCompass();
+
+  targetHeading = directionToDegrees(desiredDirection);
+  if (targetHeading < 0) {
+    Serial.println("desiredDirection isn't a valid 8-point direction - defaulting to N");
+    targetHeading = 0;
+  }
+  Serial.printf("Target direction: %s (%.0f deg)\n", desiredDirection.c_str(), targetHeading);
 }
+
+
 
 // ------------- main loop -------------
 
@@ -584,6 +760,9 @@ void loop() {
   // --- button stuff
   debounceButton();
   checkButton();
+
+  compassDetectionLoop();
+  updateLed();
 
   // --- BLE feedback stuff (RX is callback-driven now, not polled here)
   updateHaptic();
@@ -666,6 +845,13 @@ void loop() {
 // ------------- references -------------
 // https://easyelecmodule.com/a-complete-guide-to-the-inmp441-i2s-microphone/ accessed 11/09/2026
 // https://github.com/kikookraft/HapticPatPat/blob/main/firmware/src/main.cpp accessed 12/09/2026
+
 // https://github.com/h2zero/NimBLE-Arduino - replaces the earlier BLESerial
 // dependency (see nova_v2/docs/ble-protocol.md for why)
 // https://www.cs.columbia.edu/~hgs/audio/dvi/IMA_ADPCM.pdf accessed 13/09/2026
+
+// https://github.com/5pIO/BLESerial accessed 12/09/2026
+// https://www.cs.columbia.edu/~hgs/audio/dvi/IMA_ADPCM.pdf accessed 13/09/2026
+// https://makeabilitylab.github.io/physcomp/advancedio/vibromotor.html#activity-1-vibration-blink accessed 21/09/2026
+// https://github.com/adafruit/Adafruit_HMC5883_Unified/blob/master/examples/magsensor/magsensor.ino accessed 26/09/2026
+
