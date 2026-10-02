@@ -82,7 +82,7 @@ uint32_t lastCentralActivityMs = 0;
 // ------------- define pins and variables -------------
 
 // --- button
-const int buttonPin = D2;
+#define buttonPin D2
 int prevButtonStatus = 0;
 int prevDebouncedButtonStatus = 0;
 int debouncedButtonStatus = 0;
@@ -141,8 +141,8 @@ uint8_t adpcmOut[4 + bufferLen / 2];
 static unsigned int haptic_level = 0;
 
 // --- leds
-#define LED_RED   D3
-#define LED_GREEN D6
+#define LED_RED   D6
+#define LED_GREEN D3
 // Both LED pins are driven with PWM (0-255) so the colour can fade red -> orange -> green.
 const int LED_PWM_FREQ = 5000;
 const int LED_PWM_BITS = 8;
@@ -270,7 +270,7 @@ void checkButton() {
 
 void startRecording() {
   isRecording = 1;
-  digitalWrite(led1, HIGH);
+  //digitalWrite(led1, HIGH);
   Serial.println("Begin audio recording!");
 }
 
@@ -278,8 +278,8 @@ void stopRecording() {
   if (!isRecording) return;
   isRecording = 0;
   Serial.println("Stop recording audio");
-  digitalWrite(led1, LOW);
-  startPulse(led2, led2Pulse, 500); // quick pulse
+  //digitalWrite(led1, LOW);
+  //startPulse(led2, led2Pulse, 500); // quick pulse
 }
 
 // --- microphone
@@ -575,6 +575,9 @@ void updateLed() {
   float closeness = 1.0 - (error / FULL_RED_ANGLE); // 0 = way off, 1 = on target
   uint8_t green = (uint8_t)(closeness * 255);
   setLedColour(255 - green, green);
+
+}
+
 // Starts `pattern` (see HapticPattern), replacing whatever was playing.
 void playHaptic(const uint16_t* pattern, uint8_t count) {
   haptic.count = min((int)count, (int)(sizeof(haptic.steps) / sizeof(haptic.steps[0])));
@@ -658,9 +661,9 @@ void compassDetectionLoop(){
   mag.getEvent(&event);
 
   /* Display the results (magnetic vector values are in micro-Tesla (uT)) */
-  Serial.print("X: "); Serial.print(event.magnetic.x); Serial.print("  ");
-  Serial.print("Y: "); Serial.print(event.magnetic.y); Serial.print("  ");
-  Serial.print("Z: "); Serial.print(event.magnetic.z); Serial.print("  ");Serial.println("uT");
+  //Serial.print("X: "); Serial.print(event.magnetic.x); Serial.print("  ");
+ // Serial.print("Y: "); Serial.print(event.magnetic.y); Serial.print("  ");
+//  Serial.print("Z: "); Serial.print(event.magnetic.z); Serial.print("  ");Serial.println("uT");
 
   // Hold the module so that Z is pointing 'up' and you can measure the heading with x&y
   // Calculate heading when the magnetometer is level, then correct for signs of axis.
@@ -684,10 +687,10 @@ void compassDetectionLoop(){
   // Convert radians to degrees for readability.
   float headingDegrees = heading * 180/M_PI;
 
-  Serial.print("Heading (degrees): "); Serial.println(headingDegrees);
+  //Serial.print("Heading (degrees): "); Serial.println(headingDegrees);
 
   // convert to 8 point compass interpretation
-  if (headingDegrees >= 337.5 || headingDegrees < 22.5) {
+ /* if (headingDegrees >= 337.5 || headingDegrees < 22.5) {
   Serial.println("N");
 } else if (headingDegrees < 67.5) {
   Serial.println("NE");
@@ -704,7 +707,7 @@ void compassDetectionLoop(){
 } else {
   Serial.println("NW");
 }
-
+*/
     // Shortest angle between where we're facing and where we want to face: 0-180 deg.
   float diff = fmod(headingDegrees - targetHeading + 540.0, 360.0) - 180.0;
   headingError = fabs(diff);
@@ -713,9 +716,8 @@ void compassDetectionLoop(){
   static uint32_t lastPrint = 0;
   if (!isRecording && (millis() - lastPrint) > 1000) {
     lastPrint = millis();
-    Serial.printf("Heading %.0f deg (%s) | target %s | off by %.0f deg\n",
-                  headingDegrees,
-                  desiredDirection.c_str(), headingError);
+    //Serial.printf("Heading %.0f deg | target %s | off by %.0f deg\n",
+      //            headingDegrees, desiredDirection.c_str(), headingError);
   }
 }
 
@@ -724,6 +726,10 @@ void compassDetectionLoop(){
 void setup() {
   pinMode(buttonPin, INPUT_PULLUP);
   pinMode(HAPTIC, OUTPUT);
+
+  ledcAttach(LED_RED,   LED_PWM_FREQ, LED_PWM_BITS);
+  ledcAttach(LED_GREEN, LED_PWM_FREQ, LED_PWM_BITS);
+  setLedColour(0, 0);
 
   //pinMode(led1, OUTPUT);
   //pinMode(led2, OUTPUT);
@@ -750,6 +756,11 @@ void setup() {
     targetHeading = 0;
   }
   Serial.printf("Target direction: %s (%.0f deg)\n", desiredDirection.c_str(), targetHeading);
+
+    // TEMP LED test
+  setLedColour(255, 0); delay(1000);  // should be RED
+  setLedColour(0, 255); delay(1000);  // should be GREEN
+  setLedColour(0, 0);   delay(1000);  // should be OFF
 }
 
 
