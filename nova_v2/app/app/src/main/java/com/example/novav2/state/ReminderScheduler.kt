@@ -32,6 +32,8 @@ import kotlinx.coroutines.sync.withLock
  *
  * Place reminders are fired by geofences rather than this alarm, so reconcile also hands over to
  * [GeofenceRegistrar] - every caller that keeps the alarm right keeps the geofences right too.
+ * The same goes for the device's reminder LED ([DeviceLayers.syncReminders]): it pulses while
+ * something has fired unanswered, and every answer comes through here.
  *
  * PendingIntent request codes in this app: 100 = DepartureAlarmScheduler, 200 = this,
  * 400 = GeofenceRegistrar, 1001 = ActivitySignal, 3000+ = ReminderNotifier's per-reminder actions.
@@ -52,6 +54,7 @@ object ReminderScheduler {
     suspend fun reconcile(context: Context) {
         reconcileAlarm(context)
         GeofenceRegistrar.reconcile(context)
+        DeviceLayers.syncReminders(context)
     }
 
     private suspend fun reconcileAlarm(context: Context) = mutex.withLock {

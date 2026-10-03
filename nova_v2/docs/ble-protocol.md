@@ -38,11 +38,24 @@ dropped").
 
 | Type | Value | Payload |
 |---|---|---|
-| Single click | `0x01` | none |
-| Double click | `0x02` | none |
-| Multi-click | `0x03` | 1 byte: click count |
-| Battery level | `0x04` | 1 byte: percentage 0–100 |
+| Single click | `0x01` | none — older firmware only, see Press |
+| Double click | `0x02` | none — older firmware only |
+| Multi-click | `0x03` | 1 byte: click count — older firmware only |
+| Battery level | `0x04` | 3 bytes: percentage 0–100, millivolts (2 bytes LE) |
 | Heartbeat | `0x05` | none |
+| Press | `0x06` | 3 bytes: press count, mode, token |
+
+Battery is sent 3 s after connecting (time for the phone to subscribe) and
+every 15 s after that. The firmware reads the cell through the 220k/220k
+divider on A0 every 2 s (skipping samples while the motor runs), smooths them,
+and maps the voltage onto a LiPo discharge curve. That curve is an estimate,
+which is why the millivolts travel with it. Firmware older than this sent the
+percentage alone, and the app still reads that. On USB with the power switch
+off, A0 sees the charger's output, so the reading sits near 100%.
+
+Press replaces `0x01`–`0x03`; the app still reads those as presses with no
+mode, for firmware that predates it. Mode and token are whatever Set mode last
+set, captured when the sequence's first press went down (see Button).
 
 ### `audio` — device → phone
 
@@ -91,28 +104,100 @@ lockstep with button state.
 | Type | Value | Payload |
 |---|---|---|
 | Haptic pulse | `0x01` | 1 byte: duration in 10ms units |
-| LED pulse | `0x02` | 1 byte: duration in 10ms units |
+| LED pulse | `0x02` | 1 byte: duration in 10ms units — flashes the RG LED green |
 | Ping | `0x03` | none — device should reply on `events` with a heartbeat |
+| Set LED layer | `0x04` | 10 bytes, below |
+| Clear LED layer | `0x05` | 1 byte: layer id, `0xFF` clears every layer |
+| Play haptic | `0x06` | 1–6 bytes: alternating on/off step durations in 10ms units, starting with on |
+| Set mode | `0x07` | 4 bytes: mode, token, timeout seconds (little-endian, `0` = until changed) |
 
-First real use: the departure-alert work already built
-(`AmbientNotifier`/`DepartureAlarmReceiver`) writes a haptic pulse here
-alongside posting the phone notification it already sends.
+Set LED layer payload (11 bytes with the type byte):
+
+| Byte | Field | Notes |
+|---|---|---|
+| 1 | id | same id replaces that layer |
+| 2 | priority | highest active layer is shown; newest wins a tie |
+| 3 | red | 0–255 |
+| 4 | green | 0–255 |
+| 5 | pattern | `0x00` solid, `0x01` blink (on for on-time at the start of each period), `0x02` breathe |
+| 6–7 | period | 10ms units, little-endian |
+| 8 | on-time | 10ms units (blink only) |
+| 9–10 | timeout | seconds, little-endian; `0` = until cleared |
+
+The firmware queues every write and applies it from `loop()`, so the BLE task
+never touches LED/haptic state directly.
+
+### LED layers
+
+Ambient cues (a pending reminder, "leave soon", "leave now") are layers the
+firmware plays on its own clock: once set, a pattern keeps going with no further
+BLE traffic until it is cleared, times out, or the link drops. The device holds
+up to 4; when full, a new layer evicts the lowest-priority one unless that
+outranks it.
+
+What the LED shows, first match wins:
+
+1. recording: solid red
+2. the release / `LED pulse` green flash
+3. the top layer, including the dark half of a blink
+4. the compass heading gradient, if a compass is fitted
+5. off
+
+**All layers are dropped on disconnect.** The phone (`DeviceLayers`) is the
+source of truth: on every connect it clears all and re-sends the layers that
+still apply, with their remaining time as the timeout.
+
+Layers the app uses today (rhythm carries the meaning; colour is secondary,
+since red/green is the pair red-green colour blindness confuses):
+
+| Cue | id / priority | Pattern | Colour | Lasts |
+|---|---|---|---|---|
+| Reminder fired, unanswered | 1 / 10 | blink 150ms every 3s | amber | until answered, at most 6h after the latest one fired |
+| Leave soon | 2 / 20 | blink 150ms every 1s | orange | until the leave-by time |
+| Leave now | 2 / 20 | blink 120ms every 330ms | red | 5 minutes |
+
+Leave soon and leave now share a slot; a leave-soon never replaces a live
+leave-now.
 
 ## Button
 
-One button. Only hold is mapped for now; clicks are detected and sent, but
-nothing acts on them yet.
+One button, read by a small state machine in the firmware (`checkButton`):
 
-| Input | Firmware sends | Feedback on the device |
-|---|---|---|
-| Hold (> 500 ms) | audio, START | LED1 on while held |
-| Single click | `events` `0x01` | — |
-| Double click | `events` `0x02` | — |
-| Three or more clicks | `events` `0x03` + count | — |
+| Input | What the firmware does |
+|---|---|
+| Hold (≥ 500 ms) | records for Nova: audio, START. LED solid red, green flash on release |
+| Tap, then hold | records a note: audio, START + NOTE |
+| 1–n presses, ≤ 500 ms apart | `events` Press with the count, once 500 ms pass with no further press |
 
-A hold records a voice command or question for the assistant, and stops when
-the button is released. The phone confirms a saved note with its own haptic
-command (one buzz = saved, two long = failed).
+Two taps then a hold is a plain hold. With no phone connected, a press or a
+hold just blinks the LED red twice — nothing is recorded or sent.
+
+**What a press means is the phone's call** (`DeviceButtonPolicy`), because it
+depends on things only the phone knows:
+
+| Situation | 1 press | 2 presses | 3 presses |
+|---|---|---|---|
+| Nova is thinking | busy | busy | busy |
+| Nova just replied (15 s after it finishes speaking) | repeat it | done | — |
+| "Leave soon/now" showing | got it | got it | read it aloud |
+| A reminder went off unanswered | done | snooze | read it aloud |
+| Otherwise | user's idle action | user's idle action | user's idle action |
+
+Idle actions are presets or a free-text instruction sent to Nova as if spoken
+(defaults: status buzz / "What's next?" / repeat Nova's last reply). Feedback is
+haptic: one tick = done, two light taps = nothing to do, and the status action
+buzzes once per reminder due in the next hour (up to three; one long buzz for
+none). "Read aloud" only ever uses headphones.
+
+**Modes and tokens.** The phone sends Set mode as it moves between idle (`0`),
+thinking (`1`, LED breathes green) and replied (`2`). Each change carries a new
+token (1–255). The device echoes the mode and token with every press,
+captured at the press's first touch, so a press made in the last moment of the
+reply window still means "repeat" even though it reaches the phone 500 ms
+later. The device drops back to idle when the timeout passes or the link drops.
+
+The phone confirms a saved note with its own haptic command (one buzz = saved,
+two long = failed).
 
 ## Connection setup
 

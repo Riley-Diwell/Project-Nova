@@ -147,14 +147,23 @@ class NovaGattClient(
     }
 
     override fun sendHapticPulse(durationMs: Int) =
-        sendCommand(NovaBleProtocol.CommandType.HAPTIC_PULSE, durationMs)
+        sendCommand(NovaCommandFrames.pulse(NovaBleProtocol.CommandType.HAPTIC_PULSE, durationMs))
 
     override fun sendLedPulse(durationMs: Int) =
-        sendCommand(NovaBleProtocol.CommandType.LED_PULSE, durationMs)
+        sendCommand(NovaCommandFrames.pulse(NovaBleProtocol.CommandType.LED_PULSE, durationMs))
 
-    /** [durationMs] is clamped into the 1-byte, x10ms unit the firmware expects
-     * (see docs/ble-protocol.md) — 0..2550ms, silently clamped rather than
-     * rejected, since a haptic/LED nudge has no reason to need finer range.
+    override fun sendHapticPattern(stepsMs: List<Int>) =
+        sendCommand(NovaCommandFrames.playHaptic(stepsMs))
+
+    override fun sendSetLayer(layer: NovaLedLayer) = sendCommand(NovaCommandFrames.setLayer(layer))
+
+    override fun sendClearLayer(id: Int) = sendCommand(NovaCommandFrames.clearLayer(id))
+
+    override fun sendSetMode(mode: Int, token: Int, timeoutSeconds: Int) =
+        sendCommand(NovaCommandFrames.setMode(mode, token, timeoutSeconds))
+
+    /** [payload] is one encoded command (see [NovaCommandFrames], which owns the byte
+     * layouts and clamping).
      *
      * Goes through [enqueue] like every other GATT operation on this connection
      * — `WRITE_TYPE_NO_RESPONSE` skips the remote ATT response, but Android's
@@ -163,11 +172,9 @@ class NovaGattClient(
      * `onCharacteristicWrite` callback silently drops it (confirmed against
      * real hardware: sending haptic then LED back-to-back only ever delivered
      * the haptic write). */
-    private fun sendCommand(type: Int, durationMs: Int) {
+    private fun sendCommand(payload: ByteArray) {
         val characteristic = commandsCharacteristic ?: return
         val g = gatt ?: return
-        val tenMsUnits = (durationMs / 10).coerceIn(0, 255)
-        val payload = byteArrayOf(type.toByte(), tenMsUnits.toByte())
         enqueue {
             characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             @Suppress("DEPRECATION") // classic .value + writeCharacteristic(characteristic)
@@ -185,7 +192,7 @@ class NovaGattClient(
      * (see docs/ble-protocol.md "Connection liveness"), since a BLE link stays up
      * at the radio level even after this app's process dies, so the firmware can't
      * tell "phone gone quiet" from "phone gone" any other way. */
-    fun sendPing() = sendCommand(NovaBleProtocol.CommandType.PING, 0)
+    fun sendPing() = sendCommand(NovaCommandFrames.ping())
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
@@ -284,19 +291,7 @@ class NovaGattClient(
     }
 
     private fun handleEventFrame(frame: ByteArray) {
-        if (frame.isEmpty()) return
-        val type = frame[0].toInt() and 0xFF
-        val event = when (type) {
-            NovaBleProtocol.EventType.SINGLE_CLICK -> NovaDeviceEvent.SingleClick
-            NovaBleProtocol.EventType.DOUBLE_CLICK -> NovaDeviceEvent.DoubleClick
-            NovaBleProtocol.EventType.MULTI_CLICK ->
-                NovaDeviceEvent.MultiClick(count = frame.getOrNull(1)?.toInt()?.and(0xFF) ?: 0)
-            NovaBleProtocol.EventType.BATTERY ->
-                NovaDeviceEvent.Battery(percent = frame.getOrNull(1)?.toInt()?.and(0xFF) ?: 0)
-            NovaBleProtocol.EventType.HEARTBEAT -> NovaDeviceEvent.Heartbeat
-            else -> return // unknown type - firmware/app protocol drifted; drop rather than guess
-        }
-        NovaDeviceRepository.recordEvent(event)
+        NovaEventFrames.parse(frame)?.let(NovaDeviceRepository::recordEvent)
     }
 
     private fun handleAudioFrame(frame: ByteArray) {

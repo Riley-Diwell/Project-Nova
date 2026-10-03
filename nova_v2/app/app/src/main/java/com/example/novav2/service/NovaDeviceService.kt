@@ -1,22 +1,21 @@
 package com.example.novav2.service
 
-import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import com.example.novav2.R
 import com.example.novav2.ble.NovaDeviceConnectionState
 import com.example.novav2.ble.NovaDevicePairing
 import com.example.novav2.ble.NovaDeviceRepository
 import com.example.novav2.ble.NovaGattClient
 import com.example.novav2.notes.capture.DeviceRecordingRouter
+import com.example.novav2.state.DeviceInteraction
+import com.example.novav2.state.DeviceLayers
 import com.example.novav2.stt.StreamingTranscriber
 import com.example.novav2.stt.VoskTranscriber
 import kotlinx.coroutines.CoroutineScope
@@ -55,6 +54,9 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
         // storage), and this way it's usually done well before the first utterance
         // the device sends actually finishes.
         VoskTranscriber.preload(applicationContext)
+        // Started once here, not in connectIfPaired (which a stuck link re-runs): presses come
+        // through one app-wide flow, and a second collector would act on every press twice.
+        scope.launch { DeviceInteraction.run(applicationContext) }
         connectIfPaired()
     }
 
@@ -127,23 +129,7 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
      * thread, POSTed through the same /event pipeline, spoken back via TTS.
      */
     private fun onUtteranceRecorded(transcript: String) {
-        scope.launch {
-            // AssistVoiceService's manifest foregroundServiceType includes
-            // "microphone", which Android 14+ refuses to start without RECORD_AUDIO
-            // already granted - true here even though this particular turn never
-            // touches the phone's own mic, since the type is declared per service
-            // class, not per call. Same permission AssistTrampolineActivity already
-            // requires before starting this same service for the phone-mic path.
-            val hasMicPermission = ContextCompat.checkSelfPermission(
-                applicationContext, Manifest.permission.RECORD_AUDIO,
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!hasMicPermission) return@launch
-            ContextCompat.startForegroundService(
-                applicationContext,
-                Intent(applicationContext, AssistVoiceService::class.java)
-                    .putExtra(AssistVoiceService.EXTRA_TRANSCRIPT, transcript),
-            )
-        }
+        scope.launch { AssistVoiceService.submitTranscript(applicationContext, transcript) }
     }
 
     override fun onConnectionStateChanged(state: NovaDeviceConnectionState) {
@@ -151,6 +137,11 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
         NovaDeviceRepository.setCommandSender(
             if (state == NovaDeviceConnectionState.CONNECTED) gattClient else null
         )
+        // The firmware dropped its LED layers and mode when the link went down - put back what applies.
+        if (state == NovaDeviceConnectionState.CONNECTED) {
+            DeviceLayers.onConnected(applicationContext)
+            DeviceInteraction.onConnected()
+        }
     }
 
     override fun onDestroy() {

@@ -58,6 +58,10 @@ interface ReminderDao {
     @Query("SELECT * FROM reminders WHERE status = 'pending'")
     suspend fun pending(): List<ReminderEntity>
 
+    /** When the most recent still-unanswered reminder went off - DeviceLayers' reminder glow. */
+    @Query("SELECT MAX(firedAtMillis) FROM reminders WHERE status = 'fired'")
+    suspend fun latestFiredAt(): Long?
+
     /** Place reminders a geofence should be watching for: waiting on their place, or gone off
      * and set to go off again every time (state/GeofenceRegistrar.kt). */
     @Query("SELECT * FROM reminders WHERE placeOn IS NOT NULL AND (status = 'pending' OR (everyTime = 1 AND status = 'fired'))")

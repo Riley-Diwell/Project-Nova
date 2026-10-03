@@ -70,11 +70,16 @@ object AmbientCheckRunner {
     private suspend fun handleResult(
         context: Context, result: NovaApiClient.EventResult.Final
     ): AmbientCheckResult {
-        val departure = result.scheduledDeparture
-        departure?.let { DepartureAlarmScheduler.schedule(context, it) }
+        val departure = result.scheduledDeparture ?: return AmbientCheckResult.QUIET
+        DepartureAlarmScheduler.schedule(context, departure)
 
-        val text = departure?.let { leaveSoonText(it) } ?: return AmbientCheckResult.QUIET
-        val delivered = AmbientNotifier.notify(context, text, ledFlash = AmbientNotifier.LedFlash.SLOW)
+        val text = leaveSoonText(departure) ?: return AmbientCheckResult.QUIET
+        val delivered = AmbientNotifier.notify(context, text)
+        // Pulses until the leave-by moment, where DepartureAlarmReceiver's LEAVE_NOW takes over
+        // (a minute's floor, so "leave in 0 minutes" still shows). Independent of `delivered`,
+        // like the buzz: the device is its own channel, not the phone notification's shadow.
+        val untilLeave = (departure.leaveInMinutes * 60_000).toLong().coerceAtLeast(60_000L)
+        DeviceLayers.show(DeviceLayers.Cue.LEAVE_SOON, untilLeave, text = text)
 
         // "Shown" is the ambient equivalent of a voice turn's TTS finishing without being
         // talked over (VoiceScreen.kt's speak()/postOutcome) - there is no barge-in signal

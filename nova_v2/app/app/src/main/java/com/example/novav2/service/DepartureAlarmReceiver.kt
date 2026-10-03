@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.example.novav2.state.AmbientNotifier
+import com.example.novav2.state.DeviceLayers
 
 /**
  * Fires when a [com.example.novav2.state.DepartureAlarmScheduler] alarm goes off - the precise
@@ -21,10 +22,15 @@ class DepartureAlarmReceiver : BroadcastReceiver() {
             mode == "walking" -> "Time to head to $destination"
             else -> "Time to leave for $destination"
         }
-        AmbientNotifier.notify(context, text, ledFlash = AmbientNotifier.LedFlash.FAST)
+        AmbientNotifier.notify(context, text)
+        DeviceLayers.show(DeviceLayers.Cue.LEAVE_NOW, LEAVE_NOW_GLOW_MILLIS, text = text)
     }
 
     companion object {
+        /** How long the device keeps flashing "leave now" - nothing yet tells the phone the user
+         * actually left, so it gives up on its own. */
+        private const val LEAVE_NOW_GLOW_MILLIS = 5 * 60_000L
+
         const val EXTRA_DESTINATION = "destination"
         const val EXTRA_MODE = "mode"
     }
