@@ -1,6 +1,6 @@
-"""The Knowledge Map's meaning groups: facts join the nearest group or start
-one, stay put when reworded, and groups are named once - plus the graph and
-search endpoints that serve them."""
+"""The Knowledge Map's topics: every fact sits under one of a fixed list of
+topics, guessed at once and confirmed by the classifier, and a topic is never
+renamed - plus the graph and search endpoints that serve them."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -63,19 +63,25 @@ def test_a_close_fact_joins_the_group_and_a_far_one_starts_its_own(grouping):
     assert by_group(groups) == [["Likes apples", "Likes pears"], ["Takes the bus to uni"]]
 
 
-def test_a_reworded_fact_keeps_its_group_until_it_really_moves(grouping):
+def title_of(groups, fact_id):
+    return next(c.title for c in groups.clusters(USER) if c.id == group_of(groups, fact_id))
+
+
+def test_a_reworded_fact_keeps_its_topic_and_a_new_subject_moves_it(grouping):
     store, groups, emb = grouping
     emb.set("Likes apples", fruit=1)
     fact = persona.get(USER, say("Likes apples").fact_id)
     home = group_of(groups, fact.id)
+    assert title_of(groups, fact.id) == "Food & drink"                 # from the category
 
-    emb.set("Likes apples, mostly green ones", fruit=1, green=1.265)   # cos ~0.62 >= STAY
+    emb.set("Likes apples, mostly green ones", fruit=1, green=1.265)
     persona.remember(USER, fact.model_copy(update={"text": "Likes apples, mostly green ones"}))
     assert group_of(groups, fact.id) == home
 
-    emb.set("Collects vinyl records", music=1)                          # nowhere near
-    persona.remember(USER, persona.get(USER, fact.id).model_copy(update={"text": "Collects vinyl records"}))
-    assert group_of(groups, fact.id) != home
+    emb.set("Collects vinyl records", music=1)
+    persona.remember(USER, persona.get(USER, fact.id).model_copy(
+        update={"text": "Collects vinyl records", "category": ["interests", "music"]}))
+    assert title_of(groups, fact.id) == "Entertainment"
     assert home not in {c.id for c in groups.clusters(USER)}           # emptied, dropped
 
 
@@ -90,68 +96,75 @@ def test_a_merged_duplicate_leaves_one_member(grouping):
 
 def test_first_grouping_is_made_over_everything_at_once(grouping):
     store, groups, emb = grouping
-    for text, mix in [("Likes apples", {"fruit": 1}), ("Takes the bus", {"travel": 1}),
-                      ("Likes pears", {"fruit": 1, "pear": 0.4}), ("Cycles to uni", {"travel": 1, "bike": 0.4})]:
-        emb.set(text, **mix)
-        store.upsert(USER, Fact(text=text, category=FOOD))    # written before grouping existed
+    for text in ("Likes pizza", "Takes the bus", "Drinks coffee every day", "Drives the car on weekends"):
+        store.upsert(USER, Fact(text=text, category=FOOD))    # written before topics existed
     assert groups.clusters(USER) == []
     result = refresh(groups, store, USER)
-    assert result.created == 2
-    assert by_group(groups) == [["Cycles to uni", "Takes the bus"], ["Likes apples", "Likes pears"]]
+    assert result.created == 2 and result.placed == 4 and result.confirmed == 4
+    assert by_group(groups) == [["Drinks coffee every day", "Likes pizza"],
+                                ["Drives the car on weekends", "Takes the bus"]]
+    assert groups.unconfirmed(USER) == set()
 
 
-def test_refresh_groups_stragglers_drops_the_gone_and_moves_nobody(grouping):
+def test_refresh_places_stragglers_drops_the_gone_and_moves_nobody(grouping):
     store, groups, emb = grouping
-    emb.set("Likes apples", fruit=1)
-    emb.set("Likes pears", fruit=1, pear=0.5)
-    apples = say("Likes apples").fact_id
-    home = group_of(groups, apples)
-    pears = store.upsert(USER, Fact(text="Likes pears", category=FOOD))   # bypassed grouping
+    pizza = say("Likes pizza").fact_id
+    home = group_of(groups, pizza)
+    coffee = store.upsert(USER, Fact(text="Likes coffee", category=FOOD))   # bypassed placement
     refresh(groups, store, USER)
-    assert group_of(groups, pears) == home == group_of(groups, apples)
+    assert group_of(groups, coffee) == home == group_of(groups, pizza)
 
-    persona.delete(USER, apples)
-    persona.delete(USER, pears)
+    persona.delete(USER, pizza)
+    persona.delete(USER, coffee)
     refresh(groups, store, USER)
     assert groups.clusters(USER) == [] and groups.membership(USER) == {}
 
 
 # --- headings ---------------------------------------------------------------------------
 
-def test_groups_are_named_once_and_again_only_after_growing_a_lot(grouping):
+def test_topics_are_named_by_the_list_and_never_renamed(grouping):
     store, groups, emb = grouping
-    emb.set("Likes apples", fruit=1)
-    say("Likes apples")
+    say("Likes pizza")
     [group] = groups.clusters(USER)
-    assert group.title == "Likes apples" and group.title_source == groups_mod.TITLE_PENDING
+    assert group.title == "Food & drink" and group.title_source == groups_mod.TITLE_TOPIC
 
-    titler = StubTitler("Fruit")
-    assert title_pending(groups, store, USER, titler) == 1
-    assert title_pending(groups, store, USER, titler) == 0          # named: left alone
-    assert groups.clusters(USER)[0].title == "Fruit"
-    assert len(titler.calls) == 1
-
-    for i in range(5):
-        emb.set(f"Likes fruit {i}", fruit=1, **{f"f{i}": 0.3})
-        say(f"Likes fruit {i}")
+    titler = StubTitler("Snacks")
+    for food in ("Likes sushi", "Loves coffee", "Eats breakfast late", "Likes tea", "Cooks on Sundays"):
+        say(food)
     assert groups.clusters(USER)[0].size == 6
-    assert title_pending(groups, store, USER, titler) == 1          # grew 1 -> 6: renamed
-    assert len(titler.calls) == 2
+    assert title_pending(groups, store, USER, titler) == 0          # grew, still not renamed
+    assert groups.clusters(USER)[0].title == "Food & drink"
+    assert titler.calls == []
 
 
-def test_a_failed_titler_leaves_a_stand_in_and_is_retried(grouping):
+def test_a_failed_classifier_keeps_the_guess_and_the_next_pass_confirms_it(grouping):
     store, groups, emb = grouping
-    emb.set("Is doing a mechanical engineering degree at ANU", study=1)
-    say("Is doing a mechanical engineering degree at ANU", ["facts", "courses"])
-    titler = StubTitler()
-    titler.fail = True
-    assert title_pending(groups, store, USER, titler) == 0
-    [group] = groups.clusters(USER)
-    assert group.title_source == groups_mod.TITLE_FALLBACK
-    assert group.title.endswith("…") and len(group.title) <= 33
+    fact_id = store.upsert(USER, Fact(text="Is doing a mechanical engineering degree at ANU",
+                                      category=["facts", "courses"]))
 
-    titler.fail = False
-    assert title_pending(groups, store, USER, titler) == 1
+    def down(texts):
+        raise RuntimeError("model unreachable")
+
+    refresh(groups, store, USER, classifier=down)
+    assert title_of(groups, fact_id) == "Study"                        # guessed from the category
+    assert groups.unconfirmed(USER) == {fact_id}
+
+    assert refresh(groups, store, USER).confirmed == 1
+    assert groups.unconfirmed(USER) == set()
+
+
+def test_old_embedding_groups_become_topics_on_the_first_pass(grouping):
+    store, groups, emb = grouping
+    fact_id = store.upsert(USER, Fact(text="Likes pizza", category=FOOD))
+    groups.create(USER, groups_mod.Cluster(id="old", title="Likes pizza", centroid=store.vector(USER, fact_id),
+                                           size=1, title_source=groups_mod.TITLE_PENDING))
+    groups.assign(USER, fact_id, "old")
+
+    result = refresh(groups, store, USER)
+    assert result.migrated
+    [topic] = groups.clusters(USER)
+    assert topic.is_topic and topic.title == "Food & drink"
+    assert groups.membership(USER) == {fact_id: topic.id}
 
 
 def test_a_heading_the_user_chose_is_never_overwritten(grouping):
