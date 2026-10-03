@@ -66,6 +66,7 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.time.temporal.ChronoUnit
+import com.example.novav2.ui.components.clearFocusOnTap
 
 /** Quick date-range presets shown as chips, plus a custom range via the picker dialog. Range
  * boundaries are computed in UTC throughout, matching Material3's DateRangePicker - which
@@ -296,7 +297,8 @@ fun AuditLogScreen() {
                 modifier = Modifier
                     .fillMaxWidth(0.95f)
                     .fillMaxHeight(0.9f)
-                    .padding(vertical = 24.dp),
+                    .padding(vertical = 24.dp)
+                    .clearFocusOnTap(),
             ) {
                 Column(modifier = Modifier.fillMaxSize()) {
                     // weight(1f) bounds the picker to the space left after the button row,

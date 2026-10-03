@@ -67,6 +67,7 @@ import com.example.novav2.viewmodel.NotesViewModel
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import com.example.novav2.ui.components.clearFocusOnTap
 
 /** The Activity-scoped NotesViewModel, shared by the list and the detail view so a delete
  * started in the detail view shows its Undo on the list it returns to. */
@@ -231,6 +232,7 @@ private fun TypedNoteDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
     LaunchedEffect(Unit) { focus.requestFocus() }
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.clearFocusOnTap(),
         title = { Text("New note") },
         text = {
             OutlinedTextField(

@@ -1,6 +1,7 @@
 package com.example.novav2.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,8 +19,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -27,6 +32,22 @@ import androidx.compose.ui.unit.dp
 
 /** Horizontal gutter every top-level screen lines its content up against. */
 val ScreenGutter = 20.dp
+
+/**
+ * Tapping anywhere under this that isn't itself tappable (a button, a card, a text field) drops
+ * text-field focus and closes the keyboard. On the app's root Scaffold, and on each dialog with a
+ * text field - a dialog is its own window, so the root's handler never sees taps inside one.
+ */
+fun Modifier.clearFocusOnTap(): Modifier = composed {
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    pointerInput(Unit) {
+        detectTapGestures(onTap = {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        })
+    }
+}
 
 /**
  * The title block at the top of each bottom-nav tab, so every tab opens the same way: a bold
