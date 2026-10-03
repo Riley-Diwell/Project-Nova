@@ -1,3 +1,5 @@
 .env
 data/
 server/
+redeploy.ps1
+redeploy-remote.sh
