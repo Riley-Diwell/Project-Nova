@@ -99,6 +99,9 @@ object NovaApiClient {
             /** memory-tool recalls this turn - the Voice tab shows the notes they found as
              * chips (see NoteRecallActions.kt). */
             val recallActions: List<RecallAction> = emptyList(),
+            /** Notes, memories and reminders this turn saved - the Voice tab's "Saved to …"
+             * chips (see SavedActions.kt). */
+            val savedActions: List<SavedAction> = emptyList(),
         ) : EventResult()
         data class NeedMore(
             val sessionId: String,
@@ -746,6 +749,7 @@ object NovaApiClient {
                 reminderActions = parseReminderActions(json.optJSONArray("actions")),
                 updateReminderActions = parseUpdateReminderActions(json.optJSONArray("actions")),
                 recallActions = parseRecallActions(json.optJSONArray("actions")),
+                savedActions = parseSavedActions(json.optJSONArray("actions")),
             )
         }
     }

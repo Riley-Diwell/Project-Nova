@@ -1,16 +1,8 @@
 package com.example.novav2.ui.screens
 
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -41,6 +33,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.StickyNote2
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
@@ -59,13 +53,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -89,84 +81,26 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.novav2.model.ChatMessage
-import com.example.novav2.network.NovaApiClient
+import com.example.novav2.navigation.NovaDestination
+import com.example.novav2.network.SavedAction
 import com.example.novav2.state.CalendarWriter
-import com.example.novav2.state.ReminderRepository
-import com.example.novav2.state.TurnActionApplier
-import com.example.novav2.state.UserStateCollector
-import com.example.novav2.state.parseIsoToEpochMillis
 import com.example.novav2.viewmodel.ChatViewModel
+import com.example.novav2.viewmodel.VoiceState
 import com.example.novav2.ui.components.EmptyState
 import com.example.novav2.ui.components.ScreenHeader
-import kotlinx.coroutines.launch
-import java.io.IOException
-import java.time.format.DateTimeParseException
-import java.util.Locale
 
-private enum class VoiceState { IDLE, LISTENING, THINKING, SPEAKING }
-
-/**
- * Executes the backend's queued "calendar.create_event" actions (add_calendar_event in
- * the server's intent_surface.py) via CalendarWriter, which inserts into the device's Calendar Provider
- * and syncs onward to whichever account owns that calendar (e.g. Google). Assumes
- * WRITE_CALENDAR is already granted - callers must check CalendarWriter.hasPermission first.
- */
-private fun writeCalendarActions(
-    context: android.content.Context,
-    actions: List<NovaApiClient.CalendarAction>,
-): Int {
-    var created = 0
-    for (action in actions) {
-        try {
-            val start = parseIsoToEpochMillis(action.startIso)
-            val end = parseIsoToEpochMillis(action.endIso)
-            val uri = CalendarWriter.createEvent(
-                context = context,
-                title = action.title,
-                startMillis = start,
-                endMillis = end,
-                description = action.description,
-                location = action.location,
-                rrule = action.rrule,
-            )
-            if (uri != null) created++
-        } catch (e: DateTimeParseException) {
-            // Skip this one action rather than failing the whole batch - LLM-produced input,
-            // not a validated wire contract.
-        }
-    }
-    return created
+/** The tab a "Saved to …" chip leads to - its icon is the chip's icon too, so the chip and the
+ * bottom bar point at the same place. */
+private fun SavedAction.destination(): NovaDestination = when (kind) {
+    SavedAction.Kind.NOTE -> NovaDestination.Notes
+    SavedAction.Kind.MEMORY -> NovaDestination.Knowledge
+    SavedAction.Kind.REMINDER -> NovaDestination.Reminders
 }
 
-/**
- * Executes the backend's queued edit_calendar_event actions via CalendarWriter.updateEvent, the
- * same fire-and-forget way writeCalendarActions applies an add - no confirmation, since an edit
- * is easily undone. startIso/endIso are only present when the model actually changed them, so a
- * parse failure there is treated the same as "not provided" rather than dropping the whole edit -
- * unlike a bad add, a partially-applied edit (e.g. new title, unchanged time) is still useful.
- */
-private fun writeEditActions(
-    context: android.content.Context,
-    actions: List<NovaApiClient.EditCalendarAction>,
-) {
-    for (action in actions) {
-        val start = action.startIso?.let {
-            try { parseIsoToEpochMillis(it) } catch (e: DateTimeParseException) { null }
-        }
-        val end = action.endIso?.let {
-            try { parseIsoToEpochMillis(it) } catch (e: DateTimeParseException) { null }
-        }
-        CalendarWriter.updateEvent(
-            context = context,
-            eventId = action.eventId,
-            title = action.title,
-            startMillis = start,
-            endMillis = end,
-            description = action.description,
-            location = action.location,
-            rrule = action.rrule,
-        )
-    }
+private fun SavedAction.chipPrefix(): String = when (kind) {
+    SavedAction.Kind.NOTE -> "Note"
+    SavedAction.Kind.MEMORY -> "Remembered"
+    SavedAction.Kind.REMINDER -> "Reminder"
 }
 
 @Composable
@@ -244,20 +178,32 @@ private fun PendingStatusBubble(text: String, fromUser: Boolean = false) {
  * DESIGN.md §5.1/§5.3: text or SpeechRecognizer input -> POST /event -> TextToSpeech, rendered
  * as a message thread (user bubbles on the right, Nova's replies on the left) rather than a
  * single last-turn readout, so the reply is always visible even before/without TTS finishing.
+ *
+ * The turn itself lives in [ChatViewModel] (Activity-scoped), so a message sent here keeps going
+ * - and its "Thinking…" bubble is still showing on return - if the user switches tabs meanwhile.
+ * This composable only holds what needs an Activity: the permission prompts.
  */
 @Composable
 fun VoiceScreen(
     bottomBarHeight: Dp = 0.dp,
     autoListenRequested: MutableState<Boolean> = mutableStateOf(false),
     onOpenNote: (String) -> Unit = {},
+    /** Switches to another tab - where a "Saved to …" chip leads. */
+    onOpenTab: (NovaDestination) -> Unit = {},
 ) {
     val context = LocalContext.current
-    val mainHandler = remember { Handler(Looper.getMainLooper()) }
-    val coroutineScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val density = LocalDensity.current
+
+    val chatViewModel: ChatViewModel = viewModel(viewModelStoreOwner = context as ComponentActivity)
+    val messages = chatViewModel.messages
+    val voiceState = chatViewModel.voiceState
+    val statusText = chatViewModel.statusText
+    val pendingConfirmation = chatViewModel.pendingConfirmation
+    val recallChips = chatViewModel.recallChips
+    val savedChips = chatViewModel.savedChips
 
     var hasPermission by remember {
         mutableStateOf(
@@ -265,59 +211,29 @@ fun VoiceScreen(
                 PackageManager.PERMISSION_GRANTED
         )
     }
-    var voiceState by remember { mutableStateOf(VoiceState.IDLE) }
-    var inputText by remember { mutableStateOf("") }
-    var statusText by remember { mutableStateOf("") }
-    val chatViewModel: ChatViewModel = viewModel()
-    val messages = chatViewModel.messages
-    // Holds a finished turn's calendar.create_event actions while we wait on the
-    // calendar permission prompt, so they can still be applied once granted.
-    var pendingCalendarActions by remember { mutableStateOf<List<NovaApiClient.CalendarAction>>(emptyList()) }
-    // Same, for edit_calendar_event actions - kept as a separate list from the adds above so
-    // each can be routed to the right CalendarWriter call once permission is granted.
-    var pendingEditActions by remember { mutableStateOf<List<NovaApiClient.EditCalendarAction>>(emptyList()) }
-    // Mirrors the last reply's EventResult.Final.confirmation - "yes_no" shows the quick-reply
-    // buttons below; cleared as soon as any new turn is sent (button tap, typed, or spoken),
-    // same as the backend's own _PENDING_CONFIRMATION is popped on the next voice turn.
-    var pendingConfirmation by remember { mutableStateOf<String?>(null) }
-    // delete_calendar_event Actions waiting on the user's explicit Yes/No - see the AlertDialog
-    // below. This is the hard gate: unlike pendingCalendarActions (which only waits on a
-    // permission prompt and then writes unconditionally), nothing here is ever deleted without
-    // this confirmation, regardless of gain or what the model said in speech.
-    var pendingDeleteConfirmations by remember { mutableStateOf<List<NovaApiClient.DeleteCalendarAction>>(emptyList()) }
     // Set only while waiting on WRITE_CALENDAR after the user has ALREADY said yes to a specific
     // deletion - holds just that one id so the launcher's callback has something to act on.
     var deleteAwaitingPermission by remember { mutableStateOf<Long?>(null) }
-    // The notes the last reply's memory recall answered from - chips that open them.
-    // Cleared when the next turn starts.
-    var recallChips by remember { mutableStateOf<List<com.example.novav2.network.NotesApiClient.NoteRow>>(emptyList()) }
 
-    LaunchedEffect(messages.size, voiceState) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
-        }
-    }
-
-    // Once nothing is in flight, whatever statusText still says is a one-off notice ("Didn't
-    // catch that", "Stopped.", …) rather than live progress - let it fade instead of sitting at
-    // the bottom of the transcript until the next turn. Restarts if the text or state changes.
-    LaunchedEffect(statusText, voiceState) {
-        if (voiceState == VoiceState.IDLE && statusText.isNotBlank()) {
-            kotlinx.coroutines.delay(4000)
-            statusText = ""
-        }
+    // The status bubble is its own item after the last message, so it's the one to scroll to
+    // while it's showing. Also runs on returning to the tab, landing on the latest turn.
+    val lastIndex = messages.size - 1 + if (statusText.isNotBlank()) 1 else 0
+    LaunchedEffect(lastIndex, voiceState) {
+        if (lastIndex >= 0) listState.animateScrollToItem(lastIndex)
     }
 
     // Both calendar permissions in one prompt - see CalendarWriter.PERMISSIONS.
     val calendarPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        if (results.values.all { it }) {
-            if (pendingCalendarActions.isNotEmpty()) writeCalendarActions(context, pendingCalendarActions)
-            if (pendingEditActions.isNotEmpty()) writeEditActions(context, pendingEditActions)
-        }
-        pendingCalendarActions = emptyList()
-        pendingEditActions = emptyList()
+        chatViewModel.onCalendarPermissionResult(granted = results.values.all { it })
+    }
+    // A reply can queue calendar writes while the user is on another tab - ask once they're
+    // back here rather than popping a system prompt over an unrelated screen.
+    val calendarAwaitingPermission =
+        chatViewModel.pendingCalendarActions.isNotEmpty() || chatViewModel.pendingEditActions.isNotEmpty()
+    LaunchedEffect(calendarAwaitingPermission) {
+        if (calendarAwaitingPermission) calendarPermissionLauncher.launch(CalendarWriter.PERMISSIONS)
     }
 
     val deletePermissionLauncher = rememberLauncherForActivityResult(
@@ -326,263 +242,8 @@ fun VoiceScreen(
         val eventId = deleteAwaitingPermission
         deleteAwaitingPermission = null
         if (results.values.all { it } && eventId != null) {
-            coroutineScope.launch { CalendarWriter.deleteEvent(context, eventId) }
+            chatViewModel.deleteCalendarEvent(eventId)
         }
-    }
-
-    // The Episode of the reply currently being spoken, held until its Outcome is
-    // reported. Atomic and single-shot (getAndSet(null)): onDone and the stop
-    // button race whenever the user cuts NOVA off near the end of an utterance,
-    // and the turn must be scored once, as whichever got there first.
-    val speakingEpisode = remember { java.util.concurrent.atomic.AtomicReference<String?>(null) }
-    val outcomeScope = rememberCoroutineScope()
-    fun reportOutcome(accepted: Boolean) {
-        val episodeId = speakingEpisode.getAndSet(null) ?: return
-        outcomeScope.launch { NovaApiClient.postOutcome(episodeId, accepted) }
-    }
-
-    val textToSpeech = remember { arrayOfNulls<TextToSpeech>(1) }
-    // TextToSpeech initialises asynchronously, and speak() before that finishes
-    // is dropped silently - it returns ERROR and says nothing. Track readiness,
-    // and hold the one utterance that arrived too early so it can be spoken on
-    // init instead of lost.
-    val ttsReady = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
-    val pendingUtterance = remember { arrayOfNulls<String>(1) }
-    DisposableEffect(Unit) {
-        val tts = TextToSpeech(context) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                ttsReady.set(true)
-                pendingUtterance[0]?.let { queued ->
-                    pendingUtterance[0] = null
-                    mainHandler.post {
-                        textToSpeech[0]?.speak(
-                            queued, TextToSpeech.QUEUE_FLUSH, null, "nova-response",
-                        )
-                    }
-                }
-            } else {
-                mainHandler.post {
-                    statusText = "Text-to-speech didn't start on this device."
-                    voiceState = VoiceState.IDLE
-                }
-            }
-        }
-        tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
-            override fun onDone(utteranceId: String?) {
-                // Heard out to the end. Silence is the accept signal - the user
-                // had a stop button and did not reach for it.
-                reportOutcome(accepted = true)
-                mainHandler.post { voiceState = VoiceState.IDLE }
-            }
-
-            @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) {
-                // The engine failed, which says nothing about whether the user
-                // wanted this. Drop the turn rather than scoring it either way.
-                speakingEpisode.set(null)
-                mainHandler.post { voiceState = VoiceState.IDLE }
-            }
-        })
-        textToSpeech[0] = tts
-        onDispose {
-            tts.stop()
-            tts.shutdown()
-        }
-    }
-
-    val speechRecognizer = remember {
-        if (SpeechRecognizer.isRecognitionAvailable(context)) {
-            SpeechRecognizer.createSpeechRecognizer(context)
-        } else {
-            null
-        }
-    }
-    DisposableEffect(Unit) {
-        onDispose { speechRecognizer?.destroy() }
-    }
-
-    /**
-     * Cuts NOVA off mid-sentence. The barge-in that DESIGN.md §5.7 reads as the user's
-     * rejection of the turn - and, first and foremost, the control any talking assistant owes
-     * its user. It is feedback precisely because it is not a feedback button.
-     */
-    fun stopSpeaking() {
-        textToSpeech[0]?.stop()
-        reportOutcome(accepted = false)
-        voiceState = VoiceState.IDLE
-        statusText = "Stopped."
-    }
-
-    fun speak(text: String, episodeId: String?) {
-        speakingEpisode.set(episodeId)
-        if (text.isBlank()) {
-            // The backend returns an empty string when the Intent Surface ends
-            // without a final answer. Saying nothing looks identical to a crash
-            // from the user's side, so say so instead.
-            statusText = "Nova didn't have an answer for that - tap to try again."
-            voiceState = VoiceState.IDLE
-            // Nothing was said, so there is nothing for the user to accept or
-            // reject. Scoring this would blame the tools for an empty reply.
-            speakingEpisode.set(null)
-            return
-        }
-
-        // Anything past the engine's limit is rejected outright, not truncated -
-        // and a long recall ("what have I asked you to remember?") is exactly
-        // the kind of answer that gets near it.
-        val limit = TextToSpeech.getMaxSpeechInputLength()
-        val utterance = if (text.length > limit) text.take(limit) else text
-
-        voiceState = VoiceState.SPEAKING
-        if (!ttsReady.get()) {
-            pendingUtterance[0] = utterance
-            return
-        }
-
-        val result = textToSpeech[0]
-            ?.speak(utterance, TextToSpeech.QUEUE_FLUSH, null, "nova-response")
-        if (result != TextToSpeech.SUCCESS) {
-            statusText = "Couldn't speak that - tap to try again."
-            voiceState = VoiceState.IDLE
-            speakingEpisode.set(null)
-        }
-    }
-
-    /**
-     * A failed turn, told the same way a successful one is - added to the transcript and
-     * spoken - rather than left as a caption underneath that a narrow screen truncates to
-     * something like "Couldn't reach the back…". No episodeId: a failed turn is evidence
-     * about the network or the clock, never about the tools, so there is nothing here for
-     * [reportOutcome] to score.
-     */
-    fun sayFailure(text: String) {
-        statusText = ""
-        chatViewModel.addMessage(text, fromUser = false)
-        speak(text, episodeId = null)
-    }
-
-    /** Sends one turn to the backend, whether it came from typing or from a voice transcript. */
-    fun sendMessage(text: String) {
-        if (text.isBlank()) return
-        chatViewModel.addMessage(text, fromUser = true)
-        pendingConfirmation = null
-        recallChips = emptyList()
-        voiceState = VoiceState.THINKING
-        statusText = "Sending to Nova…"
-        coroutineScope.launch {
-            val userState = ReminderRepository.attachWindow(context, UserStateCollector.snapshot(context))
-            try {
-                // The Intent Surface can pause on a client-executed tool (get_calendar_range,
-                // get_reminders) it needs on-device data for; TurnActionApplier resolves it
-                // locally and hands the result back until there's a final answer.
-                val result = TurnActionApplier.resolveNeedMore(
-                    context, NovaApiClient.postVoiceEvent(text, userState),
-                ) { need ->
-                    statusText = if (need.requestType == "get_reminders") "Checking your reminders…"
-                    else "Checking your calendar…"
-                }
-                val finalResult = result as? NovaApiClient.EventResult.Final
-                val calendarActions = finalResult?.actions.orEmpty()
-                val editActions = finalResult?.editActions.orEmpty()
-                if (calendarActions.isNotEmpty() || editActions.isNotEmpty()) {
-                    if (CalendarWriter.hasPermission(context)) {
-                        if (calendarActions.isNotEmpty()) writeCalendarActions(context, calendarActions)
-                        if (editActions.isNotEmpty()) writeEditActions(context, editActions)
-                    } else {
-                        // One permission request covers both - the launcher's callback flushes
-                        // whichever of these two lists actually has something queued.
-                        pendingCalendarActions = calendarActions
-                        pendingEditActions = editActions
-                        calendarPermissionLauncher.launch(CalendarWriter.PERMISSIONS)
-                    }
-                }
-                val deleteActions = finalResult?.deleteActions.orEmpty()
-                if (deleteActions.isNotEmpty()) {
-                    // Appended, not replaced - a dialog already awaiting an earlier turn's answer
-                    // must not be dropped by a new one arriving.
-                    pendingDeleteConfirmations = pendingDeleteConfirmations + deleteActions
-                }
-                // Timers, alarms, reminders and the departure alarm - fire-and-forget like the
-                // calendar writes above, no prompt needed. Shared with AssistVoiceService.
-                finalResult?.let { TurnActionApplier.applyHeadless(context, it) }
-                finalResult?.recallActions?.lastOrNull()?.let { recall ->
-                    coroutineScope.launch { recallChips = com.example.novav2.notes.RecallChips.find(recall) }
-                }
-                val reply = finalResult?.speech ?: "Sorry, I couldn't finish that."
-                statusText = ""
-                chatViewModel.addMessage(reply, fromUser = false)
-                pendingConfirmation = finalResult?.confirmation
-                speak(reply, finalResult?.episodeId)
-            } catch (e: java.net.SocketTimeoutException) {
-                // Distinct from "couldn't reach": the backend IS answering, it
-                // just took longer than readTimeout. Worth its own message,
-                // because the fix is a slower client rather than a broken server.
-                sayFailure("Sorry, that's taking too long - can you try again?")
-            } catch (e: IOException) {
-                sayFailure("Sorry, I couldn't reach the network - can you try again?")
-            } catch (e: DateTimeParseException) {
-                sayFailure("Sorry, something about that didn't come through right - can you try again?")
-            }
-        }
-    }
-
-    /** Shared by the send button, the IME "send" action, and a physical Enter key press. */
-    fun handleSend() {
-        val text = inputText
-        if (text.isNotBlank()) {
-            inputText = ""
-            sendMessage(text)
-        }
-    }
-
-    fun startListening() {
-        if (speechRecognizer == null) {
-            statusText = "Speech recognition isn't available on this device."
-            return
-        }
-        statusText = "Listening…"
-        voiceState = VoiceState.LISTENING
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-        }
-
-        speechRecognizer.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
-
-            override fun onError(error: Int) {
-                // SpeechRecognizer can report a stray error after it has already delivered
-                // results (or after stopListening()) - by then the turn is THINKING/SPEAKING
-                // and this must not knock it back to IDLE with a bogus "Didn't catch that".
-                if (voiceState != VoiceState.LISTENING) return
-                voiceState = VoiceState.IDLE
-                statusText = "Didn't catch that - tap to try again."
-            }
-
-            override fun onResults(results: Bundle?) {
-                val text = results
-                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-                    .orEmpty()
-                if (text.isNotBlank()) {
-                    sendMessage(text)
-                } else {
-                    voiceState = VoiceState.IDLE
-                    statusText = "Didn't catch that - tap to try again."
-                }
-            }
-
-            override fun onPartialResults(partialResults: Bundle?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
-
-        speechRecognizer.startListening(intent)
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -590,9 +251,9 @@ fun VoiceScreen(
     ) { granted ->
         hasPermission = granted
         if (granted) {
-            startListening()
+            chatViewModel.startListening()
         } else {
-            statusText = "Microphone permission is required for voice input."
+            chatViewModel.showNotice("Microphone permission is required for voice input.")
         }
     }
 
@@ -600,12 +261,9 @@ fun VoiceScreen(
         if (!hasPermission) {
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         } else if (voiceState == VoiceState.LISTENING) {
-            // Force-finish the utterance now instead of waiting for the
-            // recognizer's own silence timeout.
-            statusText = "Sending to Nova…"
-            speechRecognizer?.stopListening()
+            chatViewModel.finishListening()
         } else if (voiceState == VoiceState.IDLE) {
-            startListening()
+            chatViewModel.startListening()
         }
     }
 
@@ -624,16 +282,16 @@ fun VoiceScreen(
     // The hard gate for delete_calendar_event: shown for every queued deletion, one at a time,
     // regardless of gain or how the model phrased its speech. Nothing in CalendarWriter runs
     // until the user taps Delete here.
-    pendingDeleteConfirmations.firstOrNull()?.let { action ->
+    chatViewModel.pendingDeleteConfirmations.firstOrNull()?.let { action ->
         AlertDialog(
-            onDismissRequest = { pendingDeleteConfirmations = pendingDeleteConfirmations.drop(1) },
+            onDismissRequest = { chatViewModel.dismissDeleteConfirmation() },
             title = { Text("Delete this event?") },
             text = { Text("\"${action.title}\" will be removed from your calendar.") },
             confirmButton = {
                 TextButton(onClick = {
-                    pendingDeleteConfirmations = pendingDeleteConfirmations.drop(1)
+                    chatViewModel.dismissDeleteConfirmation()
                     if (CalendarWriter.hasPermission(context)) {
-                        coroutineScope.launch { CalendarWriter.deleteEvent(context, action.eventId) }
+                        chatViewModel.deleteCalendarEvent(action.eventId)
                     } else {
                         deleteAwaitingPermission = action.eventId
                         deletePermissionLauncher.launch(CalendarWriter.PERMISSIONS)
@@ -641,7 +299,7 @@ fun VoiceScreen(
                 }) { Text("Delete") }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDeleteConfirmations = pendingDeleteConfirmations.drop(1) }) {
+                TextButton(onClick = { chatViewModel.dismissDeleteConfirmation() }) {
                     Text("Cancel")
                 }
             },
@@ -660,16 +318,18 @@ fun VoiceScreen(
     ) {
         ScreenHeader(title = "Nova") {
             if (messages.isNotEmpty()) {
-                TextButton(onClick = {
-                    chatViewModel.clearMessages()
-                    // A leftover notice ("Didn't catch that", "Stopped.") belongs to the chat
-                    // being cleared; one describing a turn still in flight does not.
-                    if (voiceState == VoiceState.IDLE) statusText = ""
-                }) {
+                TextButton(onClick = { chatViewModel.clearMessages() }) {
                     Icon(Icons.Default.DeleteSweep, contentDescription = null, Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("Clear chat")
                 }
+            }
+            // Whether replies are read out. Replies always land in the thread either way.
+            IconButton(onClick = { chatViewModel.toggleMuted() }) {
+                Icon(
+                    if (chatViewModel.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                    contentDescription = if (chatViewModel.muted) "Unmute replies" else "Mute replies",
+                )
             }
         }
         // The empty state only when there's truly nothing to show - a status with no messages yet
@@ -713,7 +373,7 @@ fun VoiceScreen(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.Start,
             ) {
-                OutlinedButton(onClick = { stopSpeaking() }) {
+                OutlinedButton(onClick = { chatViewModel.stopSpeaking() }) {
                     Icon(Icons.Default.Stop, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Stop")
@@ -740,6 +400,29 @@ fun VoiceScreen(
             }
         }
 
+        if (savedChips.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                savedChips.forEach { saved ->
+                    val tab = saved.destination()
+                    AssistChip(
+                        onClick = {
+                            val noteId = saved.noteId
+                            if (noteId != null) onOpenNote(noteId) else onOpenTab(tab)
+                        },
+                        label = {
+                            Text("${saved.chipPrefix()}: ${saved.text}", maxLines = 1,
+                                overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 240.dp))
+                        },
+                        leadingIcon = { Icon(tab.icon, null, Modifier.size(16.dp)) },
+                    )
+                }
+            }
+        }
+
         // Quick replies for a dangling yes/no question (EventOut.confirmation) - voice and
         // typed "Other" answers still go through sendMessage/onMicClick exactly as before,
         // these buttons are just a shortcut into the same path.
@@ -748,8 +431,8 @@ fun VoiceScreen(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedButton(onClick = { sendMessage("Yes") }) { Text("Yes") }
-                OutlinedButton(onClick = { sendMessage("No") }) { Text("No") }
+                OutlinedButton(onClick = { chatViewModel.sendMessage("Yes") }) { Text("Yes") }
+                OutlinedButton(onClick = { chatViewModel.sendMessage("No") }) { Text("No") }
             }
         }
 
@@ -774,14 +457,14 @@ fun VoiceScreen(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
-                        value = inputText,
-                        onValueChange = { inputText = it },
+                        value = chatViewModel.inputText,
+                        onValueChange = { chatViewModel.inputText = it },
                         modifier = Modifier
                             .weight(1f)
                             .onPreviewKeyEvent { event ->
                                 val isEnter = event.key == Key.Enter || event.key == Key.NumPadEnter
                                 if (event.type == KeyEventType.KeyDown && isEnter && !event.isShiftPressed) {
-                                    handleSend()
+                                    chatViewModel.sendDraft()
                                     true
                                 } else {
                                     false
@@ -793,12 +476,13 @@ fun VoiceScreen(
                         maxLines = 4,
                         shape = RoundedCornerShape(24.dp),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = { handleSend() }),
+                        keyboardActions = KeyboardActions(onSend = { chatViewModel.sendDraft() }),
                     )
                     Spacer(Modifier.width(8.dp))
                     FilledIconButton(
-                        onClick = { handleSend() },
-                        enabled = inputText.isNotBlank(),
+                        onClick = { chatViewModel.sendDraft() },
+                        // One turn at a time - the draft waits while a reply is on its way.
+                        enabled = chatViewModel.inputText.isNotBlank() && voiceState != VoiceState.THINKING,
                         modifier = Modifier.size(48.dp),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")

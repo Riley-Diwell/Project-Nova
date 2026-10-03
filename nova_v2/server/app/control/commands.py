@@ -240,3 +240,33 @@ def note_body(event: Any) -> Optional[str]:
         return None
     body = text[match.end():].strip()
     return body or None
+
+
+# --- "yes" / "no" to an offer ------------------------------------------------
+# After a timed note NOVA asks "want a reminder for it too?" (intent_surface
+# _save_verbatim_note). A bare "yes" is not a request by the rule above, so
+# the answer is read here instead, and only against that one offer. Short
+# answers only: "yes but make it 6" is not a plain yes, and goes to the model.
+_YES = re.compile(
+    r"^(?:yes|yeah|yep|yup|sure|ok(?:ay)?|please|go on|do it|sounds good)"
+    r"(?:[\s,]+(?:please|thanks|thank you|do|go on))*[\s.!]*$"
+)
+_NO = re.compile(
+    r"^(?:no|nope|nah|don't|dont|no need)"
+    r"(?:[\s,]+(?:thanks|thank you|need|just the note|that's fine|thats fine))*[\s.!]*$"
+)
+
+
+def offer_reply(event: Any) -> Optional[bool]:
+    """True for a plain yes, False for a plain no, None for anything else."""
+    if getattr(event, "type", None) not in SPEECH_EVENT_TYPES:
+        return None
+    spoken = getattr(event, "text", None)
+    if not isinstance(spoken, str):
+        return None
+    text = _strip_address(spoken.strip().lower()).replace("’", "'")
+    if _YES.match(text):
+        return True
+    if _NO.match(text):
+        return False
+    return None

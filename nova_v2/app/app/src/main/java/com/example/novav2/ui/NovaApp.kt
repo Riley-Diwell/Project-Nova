@@ -175,6 +175,13 @@ fun NovaApp(
                     bottomBarHeight = innerPadding.calculateBottomPadding(),
                     autoListenRequested = autoListenRequested,
                     onOpenNote = { navController.navigate(noteDetailRoute(it)) },
+                    // The same move as tapping that tab in the bottom bar.
+                    onOpenTab = { destination ->
+                        navController.navigate(destination.route) {
+                            popUpTo(navController.graph.findStartDestination().id)
+                            launchSingleTop = true
+                        }
+                    },
                 )
             }
             composable(NovaDestination.Reminders.route) {

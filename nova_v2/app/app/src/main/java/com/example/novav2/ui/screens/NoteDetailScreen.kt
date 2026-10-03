@@ -52,12 +52,14 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.novav2.network.NotesApiClient
+import com.example.novav2.ui.components.NoteText
 import com.example.novav2.ui.components.SectionLabel
 import com.example.novav2.notes.audio.NoteAudioPlayer
 import com.example.novav2.viewmodel.NotesViewModel
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.launch
+import com.example.novav2.ui.components.clearFocusOnTap
 
 /** Where "Add to what Nova knows" can file a note - top-level branches of the ontology the
  * Knowledge Map already shows (persona/models.py). */
@@ -165,6 +167,9 @@ fun NoteDetailScreen(noteId: String, onClosed: () -> Unit, vm: NotesViewModel = 
         }
 
         Spacer(Modifier.height(16.dp))
+        // A spoken note Nova has read back: the words as heard stay the record, with Nova's
+        // reading underneath to take or leave.
+        val meant = note.interpretedText?.takeIf { it.isNotBlank() && it.trim() != note.text.trim() }
         if (note.segments.isNotEmpty()) {
             SectionLabel("Transcript")
             if (note.sttEngine != null) {
@@ -184,7 +189,14 @@ fun NoteDetailScreen(noteId: String, onClosed: () -> Unit, vm: NotesViewModel = 
                 }
             }
         } else {
-            Text(note.text, style = MaterialTheme.typography.bodyLarge)
+            if (meant != null) {
+                SectionLabel("What Nova heard")
+                Spacer(Modifier.height(6.dp))
+            }
+            NoteText(note.text)
+        }
+        if (meant != null) {
+            InterpretationCard(meant, enabled = !state.busy, onUse = { vm.saveEdits(null, meant) })
         }
         Spacer(Modifier.height(24.dp))
     }
@@ -204,12 +216,35 @@ fun NoteDetailScreen(noteId: String, onClosed: () -> Unit, vm: NotesViewModel = 
     }
 }
 
+/** Nova's reading of a spoken note, under what was heard. "Use this version" replaces the
+ * note's text with it - which, like any edit, the server then treats as the user's own words. */
+@Composable
+private fun InterpretationCard(meant: String, enabled: Boolean, onUse: () -> Unit) {
+    Card(
+        Modifier.fillMaxWidth().padding(top = 16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text("What Nova thinks you said", style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold)
+            Text("Likely mis-hearings fixed and punctuation added. What was heard is kept above.",
+                style = MaterialTheme.typography.bodySmall, fontStyle = FontStyle.Italic,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(10.dp))
+            NoteText(meant)
+            Spacer(Modifier.height(4.dp))
+            TextButton(onClick = onUse, enabled = enabled) { Text("Use this version") }
+        }
+    }
+}
+
 @Composable
 private fun NoteEditorDialog(note: NotesApiClient.Note, onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
     var title by remember { mutableStateOf(note.displayTitle) }
     var text by remember { mutableStateOf(note.text) }
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.clearFocusOnTap(),
         title = { Text("Edit note") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
