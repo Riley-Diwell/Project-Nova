@@ -128,6 +128,15 @@ docker compose restart qwen     # if the model wedges
 
 To deploy new API code: pull the repo, copy `nova_v2/server` over `/srv/nova/server`, and run `bash update.sh`. It applies any schema additions and rebuilds only the API; the model and database keep running.
 
+**From a teammate's own machine** (Windows, no login shell needed on the server beyond `nova-ops`), `redeploy.ps1` does all of that in one command. Set `NOVA_SSH=you@<server tailscale ip>` once, then:
+
+```powershell
+.\nova_v2\deploy\redeploy.ps1                 # your local nova_v2/server, after the tests pass
+.\nova_v2\deploy\redeploy.ps1 -FromGitHub     # origin/main as pushed (-Branch for another)
+```
+
+It copies only what the image is built from (never `tests/`), keeps the team permissions (2770/660) so the next person can deploy, runs `sudo nova-ops deploy`, and waits for `/health`. `cat /srv/nova/server/.deployed` says what's live and who put it there. A plain `cp` or `tar` into `server/` leaves files only their owner can change; the next `sudo nova-ops deploy` puts the team permissions back (`update.sh` does it before building).
+
 For a nightly backup, run `crontab -e` and add:
 
 ```
