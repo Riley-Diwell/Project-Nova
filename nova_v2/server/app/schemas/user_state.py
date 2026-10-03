@@ -42,12 +42,22 @@ class ReminderInfo(BaseModel):
     """
     id: str
     text: str
-    due_local: str                          # the user's wall clock, no suffix
-    minutes_until_due: int                  # negative = overdue
+    # The user's wall clock, no suffix. None for a place reminder that is waiting
+    # on its place - snoozed or held, it has a time again. A place reminder's
+    # own due_local is its deadline: it goes off then if they haven't got there.
+    due_local: Optional[str] = None
+    minutes_until_due: Optional[int] = None  # negative = overdue; None with due_local
     status: str                             # pending / snoozed / deferred / fired
     priority: str = "normal"
     fired_minutes_ago: Optional[int] = None
     recurrence: Optional[str] = None        # e.g. "weekly", for a repeating one
+    # A place reminder: "arrive: the shops" / "leave: work", and whether it
+    # stays set after it goes off (set_reminder's every_time).
+    place: Optional[str] = None
+    every_time: bool = False
+    # A place reminder that can't go off before this (local wall clock). Its
+    # due_local, if it has one, is then a deadline rather than when it goes off.
+    place_after_local: Optional[str] = None
 
 
 class UserState(BaseModel):

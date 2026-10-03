@@ -8,6 +8,7 @@ import com.example.novav2.model.ReminderPriority
 import com.example.novav2.model.ReminderRecurrence
 import com.example.novav2.state.ReminderNotifier
 import com.example.novav2.state.ReminderRepository
+import com.example.novav2.state.GeofenceRegistrar
 import com.example.novav2.state.ReminderScheduler
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -30,10 +31,14 @@ class RemindersViewModel(application: Application) : AndroidViewModel(applicatio
 
     val exactAlarmsAllowed: StateFlow<Boolean> = ReminderScheduler.exactAlarmsAllowed
 
+    /** Whether place reminders can go off - the Reminders screen's location banner. */
+    val placeStatus: StateFlow<GeofenceRegistrar.Status> = GeofenceRegistrar.status
+
     private val _notificationsAllowed = MutableStateFlow(true)
     val notificationsAllowed: StateFlow<Boolean> = _notificationsAllowed
 
-    /** Re-read on every return to the screen - both can be changed in system Settings. */
+    /** Re-read on every return to the screen - all can be changed in system Settings. The
+     * reconcile re-registers geofences if location was just allowed. */
     fun refreshPermissions() {
         _notificationsAllowed.value = ReminderNotifier.canPost(app)
         viewModelScope.launch { ReminderScheduler.reconcile(app) }

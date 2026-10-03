@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import com.example.novav2.data.NovaDatabase
+import com.example.novav2.data.ReminderEntity
 import com.example.novav2.service.ReminderAlarmReceiver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,8 +30,11 @@ import kotlinx.coroutines.sync.withLock
  * (API 31-32 with SCHEDULE_EXACT_ALARM revoked) it falls back to setAndAllowWhileIdle, which can
  * be minutes late, and [exactAlarmsAllowed] drives the Reminders screen's "may be late" banner.
  *
+ * Place reminders are fired by geofences rather than this alarm, so reconcile also hands over to
+ * [GeofenceRegistrar] - every caller that keeps the alarm right keeps the geofences right too.
+ *
  * PendingIntent request codes in this app: 100 = DepartureAlarmScheduler, 200 = this,
- * 1001 = ActivitySignal, 3000+ = ReminderNotifier's per-reminder actions.
+ * 400 = GeofenceRegistrar, 1001 = ActivitySignal, 3000+ = ReminderNotifier's per-reminder actions.
  */
 object ReminderScheduler {
     private const val REQUEST_CODE = 200
@@ -45,14 +49,22 @@ object ReminderScheduler {
         Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
             context.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
 
-    suspend fun reconcile(context: Context) = mutex.withLock {
+    suspend fun reconcile(context: Context) {
+        reconcileAlarm(context)
+        GeofenceRegistrar.reconcile(context)
+    }
+
+    private suspend fun reconcileAlarm(context: Context) = mutex.withLock {
         val app = context.applicationContext
         val alarmManager = app.getSystemService(AlarmManager::class.java)
         val pendingIntent = pendingIntent(app)
         val exact = canScheduleExact(app)
         _exactAlarmsAllowed.value = exact
 
+        // NO_TRIGGER is a place reminder waiting on its place - MIN only returns it when nothing
+        // else needs the alarm.
         val next = NovaDatabase.getInstance(app).reminderDao().nextTrigger()
+            ?.takeIf { it != ReminderEntity.NO_TRIGGER }
         if (next == null) {
             alarmManager.cancel(pendingIntent)
             return@withLock

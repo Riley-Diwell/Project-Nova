@@ -121,7 +121,12 @@ object ReminderSync {
             .put("updatedAtMillis", updatedAtMillis)
             .putOpt("firedAtMillis", firedAtMillis)
             .putOpt("completedAtMillis", completedAtMillis)
-            .putOpt("clearedAtMillis", clearedAtMillis))
+            .putOpt("clearedAtMillis", clearedAtMillis)
+            .putOpt("placeOn", placeOn)
+            .putOpt("placeLabel", placeLabel)
+            .putOpt("placePoints", placePoints)
+            .put("everyTime", everyTime)
+            .putOpt("placeAfterLocal", placeAfterLocal))
 
     private fun JSONObject.toReminder() = ReminderEntity(
         id = getString("id"),
@@ -148,6 +153,11 @@ object ReminderSync {
         firedAtMillis = longOrNull("firedAtMillis"),
         completedAtMillis = longOrNull("completedAtMillis"),
         clearedAtMillis = longOrNull("clearedAtMillis"),
+        placeOn = stringOrNull("placeOn"),
+        placeLabel = stringOrNull("placeLabel"),
+        placePoints = stringOrNull("placePoints"),
+        everyTime = optBoolean("everyTime"),
+        placeAfterLocal = stringOrNull("placeAfterLocal"),
     )
 
     private fun JSONObject.stringOrNull(key: String): String? =

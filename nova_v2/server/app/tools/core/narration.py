@@ -276,8 +276,21 @@ def _minutes_phrase(minutes: Any) -> str:
 
 
 def _reminder_when(tool_input: dict[str, Any]) -> str:
-    """" for Wed, Sep 23, 4:30pm" / " in 20 minutes" / "" - set_reminder's time,
-    plus how it repeats if it does."""
+    """" for Wed, Sep 23, 4:30pm" / " in 20 minutes" / " for when you get to the
+    shops" / "" - set_reminder's time or place, plus how it repeats if it does."""
+    place = tool_input.get("place")
+    if isinstance(place, dict) and place.get("label"):
+        verb = "leave" if place.get("on") == "leave" else "get to"
+        when = (f" for {'every time' if tool_input.get('every_time') else 'when'} "
+                f"you {verb} {place['label']}")
+        after = _format_local_dt(tool_input.get("after_local"))
+        if after:
+            when += f", from {after}"
+        due = _format_local_dt(tool_input.get("due_local"))
+        minutes = tool_input.get("in_minutes")
+        if due or minutes:
+            when += f", or {due if due else 'in ' + _minutes_phrase(minutes)} at the latest"
+        return when
     due = _format_local_dt(tool_input.get("due_local"))
     minutes = tool_input.get("in_minutes")
     when = f" for {due}" if due else (f" in {_minutes_phrase(minutes)}" if minutes else "")

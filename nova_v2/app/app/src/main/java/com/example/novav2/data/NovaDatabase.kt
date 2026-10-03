@@ -16,12 +16,16 @@ import androidx.room.RoomDatabase
  *   1 -> 2  reminders table
  *   2 -> 3  reminders.dirty, for syncing to the account (state/ReminderSync.kt)
  *   3 -> 4  reminders.clearedAtMillis, for swiping done reminders off the list
+ *   4 -> 5  reminders.placeOn/placeLabel/placePoints/everyTime/placeAfterLocal, for place reminders
  */
 @Database(
     entities = [ChatMessageEntity::class, ReminderEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = true,
-    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3), AutoMigration(from = 3, to = 4)],
+    autoMigrations = [
+        AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3), AutoMigration(from = 3, to = 4),
+        AutoMigration(from = 4, to = 5),
+    ],
 )
 abstract class NovaDatabase : RoomDatabase() {
     abstract fun chatMessageDao(): ChatMessageDao

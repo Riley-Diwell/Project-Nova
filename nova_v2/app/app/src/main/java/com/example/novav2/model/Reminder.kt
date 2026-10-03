@@ -88,10 +88,16 @@ data class ReminderRecurrence(
 data class ReminderSummary(
     val id: String,
     val text: String,
-    val dueLocal: String,
-    val minutesUntilDue: Int,
+    /** Null for a place reminder waiting on its place. */
+    val dueLocal: String?,
+    val minutesUntilDue: Int?,
     val status: String,
     val priority: String,
     val firedMinutesAgo: Int?,
     val recurrence: String?,
+    /** [ReminderPlace.describe] - "arrive: the shops" - for a place reminder. */
+    val place: String? = null,
+    val everyTime: Boolean = false,
+    /** A place reminder can't go off before this - its [dueLocal] is then a deadline. */
+    val placeAfterLocal: String? = null,
 )

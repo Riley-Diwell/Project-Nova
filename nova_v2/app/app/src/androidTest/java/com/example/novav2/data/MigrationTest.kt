@@ -95,6 +95,31 @@ class MigrationTest {
         }
     }
 
+    @Test
+    fun migrate4To5KeepsRemindersTimed() {
+        helper.createDatabase(dbName, 2).apply {
+            execSQL(INSERT_V2_REMINDER)
+            close()
+        }
+        helper.runMigrationsAndValidate(dbName, 3, true).close()
+        helper.runMigrationsAndValidate(dbName, 4, true).close()
+
+        helper.runMigrationsAndValidate(dbName, 5, true).close()
+
+        val db = Room.databaseBuilder(
+            ApplicationProvider.getApplicationContext(), NovaDatabase::class.java, dbName,
+        ).build()
+        try {
+            val r = runBlocking { db.reminderDao().byId("r1") }!!
+            assertEquals("2026-09-23T16:30:00", r.dueLocal)
+            assertNull(r.placeOn)
+            assertNull(r.place)
+            assertEquals(false, r.everyTime)
+        } finally {
+            db.close()
+        }
+    }
+
     private companion object {
         /** A row in the version 2 shape - no dirty, no clearedAtMillis. */
         const val INSERT_V2_REMINDER =

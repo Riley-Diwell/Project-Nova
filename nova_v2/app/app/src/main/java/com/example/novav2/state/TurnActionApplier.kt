@@ -122,6 +122,7 @@ object TurnActionApplier {
 
     private suspend fun applySet(context: Context, action: ReminderAction, episodeId: String?) {
         try {
+            val origin = if (action.trigger == "inferred") ReminderOrigin.INFERRED else ReminderOrigin.REQUESTED
             val zone = ZoneId.systemDefault()
             val due = action.dueLocal?.let { ReminderTime.parseLocal(it, zone) }
                 ?: action.inMinutes?.let {
@@ -129,13 +130,27 @@ object TurnActionApplier {
                     // latency don't matter, and the model never does clock arithmetic.
                     ReminderTime.toLocal(System.currentTimeMillis(), zone).plusMinutes(it.toLong())
                 }
-                ?: return
+            if (action.place != null) {
+                ReminderRepository.createAtPlace(
+                    context,
+                    text = action.text,
+                    place = action.place,
+                    everyTime = action.everyTime,
+                    priority = ReminderPriority.fromWire(action.priority),
+                    origin = origin,
+                    sourceEpisodeId = episodeId,
+                    deadline = due,
+                    afterLocal = action.afterLocal,
+                )
+                return
+            }
+            if (due == null) return
             ReminderRepository.create(
                 context,
                 text = action.text,
                 due = due,
                 priority = ReminderPriority.fromWire(action.priority),
-                origin = if (action.trigger == "inferred") ReminderOrigin.INFERRED else ReminderOrigin.REQUESTED,
+                origin = origin,
                 sourceEpisodeId = episodeId,
                 recurrence = action.recurrence,
             )
@@ -154,6 +169,7 @@ object TurnActionApplier {
                 "edit" -> ReminderRepository.editFromAction(
                     context, action.id, action.text, action.dueLocal,
                     action.inMinutes, action.shiftMinutes, action.recurrence,
+                    action.place, action.everyTime,
                 )
                 "delete" -> ReminderRepository.cancel(context, action.id)?.let {
                     ReminderNotifier.notifyUndo(context, it)

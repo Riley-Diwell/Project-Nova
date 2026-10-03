@@ -30,6 +30,23 @@ Reminder times cross the wire as the user's LOCAL wall clock with no suffix
 today's utc_offset_minutes; the phone knows the zone rules, so "Monday 9am"
 stays 9am across a daylight-saving change the server cannot see.
 
+PLACE
+A reminder can fire on arriving at or leaving a place instead of at a time
+("remind me to buy milk when I get to the shops"). The phone fires it from a
+geofence, so what crosses the wire is the circles to watch - resolved here, by
+places.py, from what the model named: `here`, `one` place (or an address - how
+home and work arrive, read from the Knowledge Map), any branch of a `chain`, or
+any place of a `type`. The resolved `place` comes back in the result, and
+intent_surface._run_local_tool writes it into the Action, which is what the
+phone reads. The user's location is passed in as `near` for that search only
+and never recorded (see _run_local_tool). `every_time` keeps one armed after
+it fires ("every time I get to the gym") - a place reminder's recurrence.
+
+A place reminder can carry time as well, as bounds rather than a trigger:
+`after_local` - not before then ("when I get to uni tomorrow" ignores getting
+there today) - and due_local / in_minutes as a deadline - it goes off then if
+they haven't got there ("at 5 or when I leave work, whichever is first").
+
 VALIDATION
 Unlike the calendar tools these validate their input, and return
 {"success": False, "error": ...} rather than raising (nothing would catch it).
@@ -45,6 +62,7 @@ from typing import Any, Optional
 from uuid import UUID
 
 from app.tools.core.base import BaseTool
+from app.tools.functions import places
 from app.tools.functions.calendar_tool import _RECURRENCE_SCHEMA
 
 # A year, in minutes. Anything further out is almost certainly a mis-parse.
@@ -59,6 +77,11 @@ DEFAULT_SNOOZE_MINUTES = 10
 PRIORITIES = ("normal", "important")
 UPDATE_ACTIONS = ("complete", "snooze", "edit", "delete")
 FREQUENCIES = ("daily", "weekly", "monthly", "yearly")
+PLACE_EVENTS = ("arrive", "leave")
+
+# How many resolved places the model is told the names of - the rest are
+# counted. The phone gets them all.
+FOUND_NAMES_SHOWN = 5
 
 
 def _now_utc() -> datetime:
@@ -103,6 +126,20 @@ def _check_due_local(value: Any, tool_input: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _check_after_local(value: Any) -> Optional[str]:
+    """None if `value` is a usable local "not before" time. It may be in the past -
+    that just means it is already allowed to go off."""
+    if not isinstance(value, str) or not value.strip():
+        return "after_local must be a local ISO 8601 time like 2026-09-24T00:00:00."
+    try:
+        after = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return f"after_local {value!r} is not ISO 8601 - use e.g. 2026-09-24T00:00:00."
+    if after.tzinfo is not None:
+        return "after_local must be the user's LOCAL wall clock with no timezone suffix."
+    return None
+
+
 def _check_in_minutes(value: Any) -> Optional[str]:
     if not _is_int(value) or not 1 <= value <= MAX_IN_MINUTES:
         return f"in_minutes must be a whole number of minutes from 1 to {MAX_IN_MINUTES}."
@@ -126,6 +163,90 @@ def _has(tool_input: dict[str, Any], key: str) -> bool:
     return tool_input.get(key) is not None
 
 
+_PLACE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "on": {
+            "type": "string",
+            "enum": list(PLACE_EVENTS),
+            "description": "'arrive' for 'when I get to / next time I'm at', 'leave' for 'when I leave'.",
+        },
+        "match": {
+            "type": "string",
+            "enum": list(places.MATCHES),
+            "description": (
+                "here: where they are right now ('when I get back here'). "
+                "one: one specific place or address - 'Woolworths Dickson', "
+                "'the Chifley library', or for home, work or someone's place "
+                "the ADDRESS from what you know about the user. "
+                "chain: any branch of a named business ('any Woolworths', "
+                "'a Bunnings'). "
+                "type: any place of a kind - 'the shops' (shops), 'a petrol "
+                "station', 'the chemist' (pharmacy) - with place_type."
+            ),
+        },
+        "query": {
+            "type": "string",
+            "description": (
+                "one: the place's name or street address to search for. chain: "
+                "just the business name ('Woolworths'). Not for here or type."
+            ),
+        },
+        "place_type": {
+            "type": "string",
+            "enum": list(places.PLACE_TYPES),
+            "description": "type only: the kind of place.",
+        },
+        "label": {
+            "type": "string",
+            "description": (
+                "How the user said it, for the notification and the list: "
+                "'the shops', 'home', 'Woolworths', 'the gym'."
+            ),
+        },
+    },
+    "required": ["on", "match", "label"],
+}
+
+
+def _resolve_place(value: Any, near: Any) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """A validated place with its geofence circles, or (None, why not)."""
+    if not isinstance(value, dict):
+        return None, "place must be an object with on, match and label."
+    on, match = value.get("on"), value.get("match")
+    if on not in PLACE_EVENTS:
+        return None, "place.on must be 'arrive' or 'leave'."
+    if match not in places.MATCHES:
+        return None, f"place.match must be one of {', '.join(places.MATCHES)}."
+    label = value.get("label")
+    if not isinstance(label, str) or not label.strip():
+        return None, "place.label is required - how the user named the place."
+    query = value.get("query")
+    query = query.strip() if isinstance(query, str) and query.strip() else None
+    if match in ("one", "chain") and query is None:
+        return None, f"place.query is required for match {match!r} - the name or address to look up."
+    place_type = value.get("place_type")
+    if match == "type" and place_type not in places.PLACE_TYPES:
+        return None, f"place.place_type must be one of {', '.join(places.PLACE_TYPES)}."
+
+    points, problem = places.resolve(match, query, place_type, near)
+    if problem:
+        return None, problem
+    return {"on": on, "match": match, "label": label.strip(), "points": points}, None
+
+
+def _found(place: dict[str, Any]) -> str:
+    """What the resolved place turned out to be, for the model to confirm with -
+    "Woolworths Dickson", or "9 places, nearest Lyneham Shops, Ainslie Shops"."""
+    names = [p["name"] for p in place["points"]]
+    if place["match"] == "here":
+        return "where the user is now"
+    if len(names) == 1:
+        return names[0]
+    shown = ", ".join(names[:FOUND_NAMES_SHOWN])
+    return f"{len(names)} places, nearest first: {shown}" + (", ..." if len(names) > FOUND_NAMES_SHOWN else "")
+
+
 class SetReminderTool(BaseTool):
     """
     Setting a reminder that Nova delivers at the right moment.
@@ -146,17 +267,26 @@ class SetReminderTool(BaseTool):
                 "Chen', 'remind me in 20 minutes to take the pasta off', "
                 "'don't let me forget to submit the form by 5', 'remember to "
                 "call Mum tonight' ('remember to ...' is a reminder, not a "
-                "memory save). Not for a bare "
-                "countdown (set_timer), a wake-up (set_alarm), or something "
-                "with a place, people or a duration (add_calendar_event). "
+                "memory save). It can also go off when they arrive at or "
+                "leave a place instead of at a time: 'remind me to buy milk "
+                "when I get to the shops', 'when I leave work remind me to "
+                "grab my charger', 'every time I get to the gym remind me to "
+                "stretch' - use place, not due_local. Not for a bare "
+                "countdown (set_timer), a wake-up (set_alarm), or an "
+                "appointment with people or a duration (add_calendar_event). "
                 "For a relative time use in_minutes and never do the clock "
                 "arithmetic yourself. For an absolute time use due_local in "
                 "the user's LOCAL time, worked out from the top-level "
                 "local_time. For 'after this lecture/class', copy that "
-                "current_events entry's end_local exactly. If they gave no "
-                "time at all, ask when rather than guessing. It is stored on "
-                "the device the moment this call is made, so confirm it as "
-                "done ('I'll remind you at 4:30'), not as pending."
+                "current_events entry's end_local exactly. For home, work or "
+                "anyone's place, pass its address from what you know about "
+                "the user (recall it with the memory tool if it isn't in "
+                "front of you); if you don't know it, ask for the address - "
+                "never search for 'home'. If they gave no time or place at "
+                "all, ask when rather than guessing. It is stored on the "
+                "device the moment this call is made, so confirm it as done "
+                "('I'll remind you at 4:30', 'I'll remind you when you get to "
+                "the shops'), not as pending."
             ),
             gain_description=(
                 "How readily Nova sets a reminder you didn't ask for. At 0.0 "
@@ -185,7 +315,10 @@ class SetReminderTool(BaseTool):
                             "timezone suffix (2026-09-23T16:30:00), worked out from "
                             "top-level local_time - never UTC. For 'after this "
                             "lecture/class' copy that current_events entry's "
-                            "end_local exactly. Omit if you set in_minutes."
+                            "end_local exactly. Omit if you set in_minutes. With "
+                            "place it is a deadline: the latest it goes off, if "
+                            "they haven't got there first ('at 5 or when I leave "
+                            "work, whichever comes first') - only when they gave one."
                         ),
                     },
                     "in_minutes": {
@@ -196,7 +329,31 @@ class SetReminderTool(BaseTool):
                             "half') the whole minutes from now (20, 90). Do NOT add "
                             "it to local_time yourself - the phone counts from when "
                             "it receives this. Set exactly one of due_local / "
-                            "in_minutes."
+                            "in_minutes / place."
+                        ),
+                    },
+                    "place": {
+                        **_PLACE_SCHEMA,
+                        "description": (
+                            "For a reminder that goes off on arriving at or "
+                            "leaving a place instead of at a time. Omit "
+                            "due_local and in_minutes when you set this."
+                        ),
+                    },
+                    "every_time": {
+                        "type": "boolean",
+                        "description": (
+                            "place only: true for 'every time I get to ...' - it "
+                            "stays set after it goes off. Default false."
+                        ),
+                    },
+                    "after_local": {
+                        "type": "string",
+                        "description": (
+                            "place only: don't go off before this LOCAL time, same "
+                            "format as due_local - 'when I get to uni tomorrow' is "
+                            "tomorrow at 00:00, 'when I get home tonight' is today "
+                            "at 17:00. Omit for 'next time I'm there'."
                         ),
                     },
                     "priority": {
@@ -241,22 +398,35 @@ class SetReminderTool(BaseTool):
         if not isinstance(text, str) or not text.strip():
             return _fail("text is required - what should the reminder say?")
 
-        has_due, has_in = _has(tool_input, "due_local"), _has(tool_input, "in_minutes")
-        if has_due == has_in:
+        times = [k for k in ("due_local", "in_minutes") if _has(tool_input, k)]
+        has_place = _has(tool_input, "place")
+        if len(times) > 1 or (not times and not has_place):
             return _fail(
-                "Set exactly one of due_local (a clock time) or in_minutes (relative). "
-                "If the user gave no time, ask them when."
+                "Set exactly one of due_local (a clock time) or in_minutes (relative), "
+                "or place (arriving at or leaving somewhere). If the user gave no "
+                "time or place, ask them when."
             )
-        problem = (
-            _check_due_local(tool_input["due_local"], tool_input) if has_due
-            else _check_in_minutes(tool_input["in_minutes"])
-        )
-        if problem:
-            return _fail(problem)
 
         priority = tool_input.get("priority") or "normal"
         if priority not in PRIORITIES:
             return _fail("priority must be 'normal' or 'important'.")
+
+        problem = None
+        if times == ["due_local"]:
+            problem = _check_due_local(tool_input["due_local"], tool_input)
+        elif times == ["in_minutes"]:
+            problem = _check_in_minutes(tool_input["in_minutes"])
+        if problem:
+            return _fail(problem)
+
+        if has_place:
+            return self._at_place(tool_input, text.strip(), priority, deadline=bool(times))
+
+        if tool_input.get("every_time") or _has(tool_input, "after_local"):
+            return _fail(
+                "every_time and after_local are only for place reminders - use "
+                "recurrence for a repeating time."
+            )
 
         problem = _check_recurrence(tool_input.get("recurrence"))
         if problem:
@@ -270,6 +440,44 @@ class SetReminderTool(BaseTool):
             "in_minutes": tool_input.get("in_minutes"),
             "priority": priority,
             "recurrence": tool_input.get("recurrence"),
+        }
+
+
+    def _at_place(self, tool_input: dict[str, Any], text: str, priority: str,
+                  deadline: bool) -> dict[str, Any]:
+        """The place half of _execute: bounds checked, then the place resolved -
+        last, since it is the one step that costs a network call."""
+        if _has(tool_input, "recurrence"):
+            return _fail(
+                "recurrence is for timed reminders - for 'every time I get to "
+                "...' set every_time true instead."
+            )
+        every_time = tool_input.get("every_time") is True
+        if every_time and deadline:
+            return _fail("An every-time place reminder can't have a deadline - drop due_local/in_minutes.")
+        after = tool_input.get("after_local")
+        if after is not None:
+            problem = _check_after_local(after)
+            if problem:
+                return _fail(problem)
+            due = tool_input.get("due_local")
+            if isinstance(due, str) and datetime.fromisoformat(due.strip()) <= datetime.fromisoformat(after.strip()):
+                return _fail("due_local (the deadline) must be after after_local.")
+
+        place, problem = _resolve_place(tool_input["place"], tool_input.get("near"))
+        if problem:
+            return _fail(problem)
+        return {
+            "success": True,
+            "queued_for_device": True,
+            "text": text,
+            "place": place,
+            "every_time": every_time,
+            "after_local": after.strip() if isinstance(after, str) else None,
+            "due_local": tool_input.get("due_local"),
+            "in_minutes": tool_input.get("in_minutes"),
+            "found": _found(place),
+            "priority": priority,
         }
 
 
@@ -296,9 +504,12 @@ class UpdateReminderTool(BaseTool):
                 "or its time with due_local (a new LOCAL time), in_minutes "
                 "(relative to now) or shift_minutes ('push it back half an "
                 "hour' = 30, 'an hour earlier' = -60) - only one of those "
-                "three. 'Change my X reminder to 4pm' is an edit with "
-                "due_local on the reminder's own date; 'to Friday' keeps its "
-                "own time; 'to say Y' is text. delete: remove it. All apply "
+                "three - or place, to make it go off at a place instead "
+                "('actually remind me when I get home'). 'Change my X "
+                "reminder to 4pm' is an edit with due_local on the reminder's "
+                "own date (a place reminder has none - use today's or the day "
+                "they said); 'to Friday' keeps its own time; 'to say Y' is "
+                "text. delete: remove it. All apply "
                 "on the device the moment this call is made, so confirm them "
                 "as done."
             ),
@@ -359,6 +570,20 @@ class UpdateReminderTool(BaseTool):
                             "the current one."
                         ),
                     },
+                    "place": {
+                        **_PLACE_SCHEMA,
+                        "description": (
+                            "edit only: a new place for it to go off at, same as "
+                            "set_reminder's. Replaces any time it had."
+                        ),
+                    },
+                    "every_time": {
+                        "type": "boolean",
+                        "description": (
+                            "edit only, for a place reminder: true to keep it set "
+                            "after it goes off, false to make it a one-off."
+                        ),
+                    },
                 },
                 "required": ["reminder_id", "action", "label"],
             },
@@ -405,11 +630,17 @@ class UpdateReminderTool(BaseTool):
         if new_text is not None and (not isinstance(new_text, str) or not new_text.strip()):
             return _fail("text, if given, must not be empty.")
 
-        timing = [k for k in ("due_local", "in_minutes", "shift_minutes") if _has(tool_input, k)]
+        timing = [k for k in ("due_local", "in_minutes", "shift_minutes", "place")
+                  if _has(tool_input, k)]
         if len(timing) > 1:
-            return _fail("Give only one of due_local, in_minutes or shift_minutes.")
-        if not new_text and not timing and not _has(tool_input, "recurrence"):
-            return _fail("An edit has to change something - the text, the time or the repeat.")
+            return _fail("Give only one of due_local, in_minutes, shift_minutes or place.")
+        every_time = tool_input.get("every_time")
+        if every_time is not None and not isinstance(every_time, bool):
+            return _fail("every_time must be true or false.")
+        if not new_text and not timing and not _has(tool_input, "recurrence") and every_time is None:
+            return _fail("An edit has to change something - the text, the time, the place or the repeat.")
+        if "place" in timing and _has(tool_input, "recurrence"):
+            return _fail("recurrence is for timed reminders - use every_time for a place.")
 
         if "due_local" in timing:
             problem = _check_due_local(tool_input["due_local"], tool_input)
@@ -421,6 +652,11 @@ class UpdateReminderTool(BaseTool):
                 None if _is_int(shift) and shift != 0 and abs(shift) <= MAX_IN_MINUTES
                 else "shift_minutes must be a non-zero whole number of minutes."
             )
+        elif "place" in timing:
+            place, problem = _resolve_place(tool_input["place"], tool_input.get("near"))
+            if place is not None:
+                result["place"] = place
+                result["found"] = _found(place)
         else:
             problem = None
         if problem:
@@ -430,7 +666,7 @@ class UpdateReminderTool(BaseTool):
         if problem:
             return _fail(problem)
 
-        for key in ("text", "due_local", "in_minutes", "shift_minutes", "recurrence"):
+        for key in ("text", "due_local", "in_minutes", "shift_minutes", "recurrence", "every_time"):
             if _has(tool_input, key):
                 result[key] = tool_input[key]
         return result

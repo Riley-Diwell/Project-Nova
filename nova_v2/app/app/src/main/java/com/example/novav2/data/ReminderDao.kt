@@ -58,6 +58,11 @@ interface ReminderDao {
     @Query("SELECT * FROM reminders WHERE status = 'pending'")
     suspend fun pending(): List<ReminderEntity>
 
+    /** Place reminders a geofence should be watching for: waiting on their place, or gone off
+     * and set to go off again every time (state/GeofenceRegistrar.kt). */
+    @Query("SELECT * FROM reminders WHERE placeOn IS NOT NULL AND (status = 'pending' OR (everyTime = 1 AND status = 'fired'))")
+    suspend fun armedAtPlaces(): List<ReminderEntity>
+
     /** Floating local times a zone change has to re-resolve: pending ones, and the next
      * occurrence of fired recurring ones. */
     @Query("SELECT * FROM reminders WHERE status = 'pending' OR (status = 'fired' AND recurFrequency IS NOT NULL)")

@@ -209,8 +209,13 @@ SYSTEM_PROMPT = (
     "forget to submit the form', 'remember to call Mum tonight') - call "
     "set_reminder. 'Remember to ...' is always a reminder, never a memory "
     "save. A timer is a bare "
-    "countdown, an alarm is a wake-up, and something with a place, people or "
-    "a duration is a calendar event. For a relative time pass in_minutes and "
+    "countdown, an alarm is a wake-up, and an appointment with people or "
+    "a duration is a calendar event. 'When I get to the shops', 'when I leave "
+    "work', 'every time I get to the gym' is a reminder with a place instead "
+    "of a time - home, work or anyone's place goes in as its address from "
+    "what you know about the user, and if you don't know it, ask. 'When I get "
+    "to uni tomorrow' adds after_local; 'at 5 or when I leave, whichever is "
+    "first' adds due_local as a deadline. For a relative time pass in_minutes and "
     "never add it to local_time yourself. 'After this lecture' or 'after "
     "class' means copying that current_events entry's end_local exactly. If "
     "they gave no time, ask when. user_state.reminders lists their reminders "
@@ -681,9 +686,24 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
             # forgotten, and what stops consolidation re-extracting it.
             tool_input = {**tool_input, "episode_id": ctx.episode_id}
         # Authorisation already happened in _gate. The dispatcher just runs it.
-        result = _DISPATCHER.dispatch_reactive(name, tool_input)
+        # A place reminder is the one exception to the no-coordinates rule above:
+        # "the shops" means the ones near the user, so the location goes in as
+        # `near` - to the search only, never into the recorded Action.
+        dispatch_input = tool_input
+        if name in DEVICE_TOOLS and tool_input.get("place") is not None and ctx.location_ctx:
+            dispatch_input = {**tool_input, "near": ctx.location_ctx}
+        result = _DISPATCHER.dispatch_reactive(name, dispatch_input)
         if name == "memory" and tool_input.get("action") == "save":
             tool_input = {**tool_input, **_memory_outcome(result)}
+        if name in DEVICE_TOOLS and isinstance(result, dict) and isinstance(result.get("place"), dict):
+            # The resolved geofences are the instruction the phone reads, so they
+            # go into the Action in place of what the model asked for. The model
+            # confirms from `found`, and needs none of the coordinates.
+            tool_input = {**tool_input, "place": result["place"]}
+            for key in ("every_time", "after_local"):
+                if result.get(key) is not None:
+                    tool_input[key] = result[key]
+            result = {k: v for k, v in result.items() if k != "place"}
         # Recorded after the call, so a tool that raises is not reported as run -
         # and with the augmented tool_input, so the Action carries the origin the
         # tool actually used rather than the one the model supplied.
