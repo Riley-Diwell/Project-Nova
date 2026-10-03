@@ -496,15 +496,24 @@ def edit_persona_fact(
     except persona.FactNotFound:
         raise HTTPException(status_code=404, detail=f"unknown fact: {fact_id!r}")
 
+    now = datetime.now(timezone.utc)
+    metadata = {**(current.metadata or {}), "source": "stated", "edited": True}
+    text = edit.text if edit.text is not None else current.text
+    if text != current.text:
+        # The map's History view: each rewording, dated, oldest first.
+        metadata["history"] = [
+            *(metadata.get("history") or []),
+            {"at": now.isoformat(), "from": current.text, "to": text},
+        ]
     updated = current.model_copy(update={
-        "text": edit.text if edit.text is not None else current.text,
+        "text": text,
         "category": edit.category if edit.category is not None else current.category,
         # Correcting a belief makes it something the user stated, whatever it
         # was before - they have overruled whatever NOVA inferred.
-        "metadata": {**(current.metadata or {}), "source": "stated", "edited": True},
+        "metadata": metadata,
     })
     try:
-        result = persona.remember(user.id, updated, stated_at=datetime.now(timezone.utc))
+        result = persona.remember(user.id, updated, stated_at=now)
         # What NOVA knows just changed by hand: older conversation stops being
         # context, so the old version can't be picked back up from it.
         intent_surface.reset_context(user.id)
