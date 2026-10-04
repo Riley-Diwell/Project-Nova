@@ -468,8 +468,8 @@ private fun whenLine(r: ReminderEntity, nowLocal: LocalDateTime, zone: ZoneId, n
             val place = r.place
             when {
                 ago == null || ago < 1 -> "Just now"
-                place != null -> "Went off ${ago} min ago · ${if (place.on == PlaceEvent.ARRIVE) "at" else "leaving"} ${place.label}"
-                else -> "Went off ${ago} min ago · was due $dueText"
+                place != null -> "Went off ${agoText(ago)} · ${if (place.on == PlaceEvent.ARRIVE) "at" else "leaving"} ${place.label}"
+                else -> "Went off ${agoText(ago)} · was due $dueText"
             }
         }
         ReminderStatus.DONE -> r.completedAtMillis?.let {
@@ -477,6 +477,14 @@ private fun whenLine(r: ReminderEntity, nowLocal: LocalDateTime, zone: ZoneId, n
         } ?: "Done"
         else -> dueText
     }
+}
+
+/** Minutes under two hours, then whole hours, then whole days once it's been a day. */
+private fun agoText(minutes: Long): String = when {
+    minutes < 120 -> "$minutes min ago"
+    minutes < 60 * 24 -> "${minutes / 60} hours ago"
+    minutes < 60 * 48 -> "1 day ago"
+    else -> "${minutes / (60 * 24)} days ago"
 }
 
 /** Days before today can't be picked - a reminder is always for later. Compared as the picker's
