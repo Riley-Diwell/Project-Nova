@@ -10,6 +10,7 @@ import com.example.novav2.service.ReminderSpeechService
 import com.example.novav2.state.DeviceButtonPolicy.Action
 import com.example.novav2.state.DeviceButtonPolicy.Mode
 import com.example.novav2.state.DeviceButtonPolicy.ModeState
+import com.example.novav2.widget.WidgetUpdater
 import kotlinx.coroutines.flow.filterIsInstance
 
 /**
@@ -123,6 +124,8 @@ object DeviceInteraction {
             Action.AcknowledgeDeparture -> {
                 DeviceLayers.clear(DeviceLayers.Slot.DEPARTURE)
                 AmbientNotifier.cancel(context)
+                DepartureStore.clear(context)
+                WidgetUpdater.requestUpdate(context)
             }
             is Action.ReadAloud -> {
                 // Never through the phone speaker - the same rule ReminderSpeechService enforces;

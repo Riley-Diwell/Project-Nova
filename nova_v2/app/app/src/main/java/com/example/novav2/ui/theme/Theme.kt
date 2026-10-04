@@ -11,7 +11,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
 // Nova always renders in its own dark/blue brand theme, regardless of system light/dark setting.
-private val NovaColorScheme = darkColorScheme(
+internal val NovaColorScheme = darkColorScheme(
     primary = NovaBlue,
     onPrimary = Color.White,
     primaryContainer = NovaBlueContainer,

@@ -190,6 +190,9 @@ dependencies {
     // The notes outbox (notes/NoteOutboxWorker.kt) - a note captured offline is sent when
     // there is a network, even if the app was closed in between.
     implementation(libs.androidx.work.runtime.ktx)
+    // The home-screen widget (widget/NovaWidget.kt).
+    implementation(libs.androidx.glance.appwidget)
+    implementation(libs.androidx.glance.material3)
     // Offline speech-to-text for the Nova device's BLE audio (see stt/VoskTranscriber.kt) -
     // Android's own SpeechRecognizer (used elsewhere in this app) can't accept a
     // pre-recorded buffer, only its own live mic, so BLE audio needs a separate

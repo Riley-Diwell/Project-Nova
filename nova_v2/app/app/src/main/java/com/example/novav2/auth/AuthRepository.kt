@@ -5,6 +5,7 @@ import android.content.Intent
 import com.example.novav2.network.NovaApiClient
 import com.example.novav2.network.NovaHttp
 import com.example.novav2.service.SignalMonitorService
+import com.example.novav2.widget.WidgetUpdater
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -231,6 +232,9 @@ object AuthRepository {
 
     private fun publish() {
         _state.value = session?.let { SessionState.SignedIn(it.userId, it.email) } ?: SessionState.SignedOut
+        // Every way in or out comes through here - sign-in, sign-out, and a session dying on its
+        // own - so the widget never keeps showing reminders to a signed-out phone.
+        WidgetUpdater.requestUpdate(appContext)
     }
 
     private fun credentials(email: String, password: String) =

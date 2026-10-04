@@ -10,6 +10,7 @@ import com.example.novav2.notes.audio.NoteAudioStore
 import com.example.novav2.notes.data.NotesDatabase
 import com.example.novav2.notes.data.PendingNoteDeleteEntity
 import com.example.novav2.profile.ProfileRepository
+import com.example.novav2.state.DepartureStore
 import com.example.novav2.state.DepartureUnknownStore
 import com.example.novav2.state.DeviceCompass
 import com.example.novav2.state.ReminderSync
@@ -107,6 +108,7 @@ object LocalData {
         }
         NoteAudioStore.deleteAll(app)
         ProfileRepository.clear(app)
+        DepartureStore.clear(app)
         DepartureUnknownStore.clear(app)
         DeviceCompass.clear(app)
         ConsolidationWorker.cancel(app)

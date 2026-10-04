@@ -1,5 +1,9 @@
 <resources>
     <string name="app_name">Nova V2</string>
+    <string name="widget_name">Nova</string>
+    <string name="widget_description">What\'s next: your reminders, your next event and when to leave</string>
+    <string name="widget_preview_title">Next</string>
+    <string name="widget_preview_detail">Your reminders and what\'s on</string>
     <!-- Google Maps share sheet -> ShareDestinationActivity -->
     <string name="share_destination_label">Nova compass</string>
     <string name="share_destination_set">Nova\'s compass is pointing to %1$s</string>

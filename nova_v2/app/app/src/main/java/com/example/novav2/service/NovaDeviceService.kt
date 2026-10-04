@@ -20,6 +20,7 @@ import com.example.novav2.state.DeviceInteraction
 import com.example.novav2.state.DeviceLayers
 import com.example.novav2.stt.StreamingTranscriber
 import com.example.novav2.stt.VoskTranscriber
+import com.example.novav2.widget.WidgetUpdater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -65,6 +66,9 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
             NovaDeviceRepository.events.filterIsInstance<NovaDeviceEvent.ClearHeading>()
                 .collect { DeviceCompass.clear(applicationContext) }
         }
+        // Only matters while a device can be connected, which is while this service runs.
+        // The widget's "Nova · 64%" line - once here for the same reason as above.
+        scope.launch { WidgetUpdater.followDevice(applicationContext) }
         connectIfPaired()
     }
 

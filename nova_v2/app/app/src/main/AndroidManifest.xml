@@ -60,6 +60,15 @@
         android:name="android.software.companion_device_setup"
         android:required="false" />
 
+    <!-- The widget's event row opens the calendar app at that event, or Nova if nothing can
+         (widget/WidgetActions.kt) - API 30+ hides other apps from that check without this. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="vnd.android.cursor.item/event" />
+        </intent>
+    </queries>
+
     <application
         android:name=".NovaApplication"
         android:allowBackup="true"
@@ -170,6 +179,24 @@
                 <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
+
+        <!-- The home-screen widget (widget/NovaWidget.kt). Exported: the launcher delivers its
+             APPWIDGET_UPDATE broadcasts. -->
+        <receiver
+            android:name=".widget.NovaWidgetReceiver"
+            android:exported="true"
+            android:label="@string/widget_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nova_widget_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.WidgetBoundaryReceiver"
+            android:exported="false" />
 
         <receiver
             android:name=".service.BootCompletedReceiver"

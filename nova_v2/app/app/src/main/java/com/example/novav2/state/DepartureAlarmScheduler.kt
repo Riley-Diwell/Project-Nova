@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import com.example.novav2.network.NovaApiClient
 import com.example.novav2.service.DepartureAlarmReceiver
+import com.example.novav2.widget.WidgetUpdater
 
 /**
  * Schedules a precise one-shot alarm for a navigation_departure_time countdown
@@ -46,6 +47,11 @@ object DepartureAlarmScheduler {
 
         context.getSystemService(AlarmManager::class.java)
             .setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
+
+        // Kept for the widget's "Leave by 4:05" - after the cut-off above, so the widget never
+        // shows a leave-by this alarm isn't going to act on.
+        DepartureStore.save(context, SavedDeparture.from(departure, System.currentTimeMillis()))
+        WidgetUpdater.requestUpdate(context)
         // The device's compass points at this trip's destination until the user gets there.
         DeviceCompass.setDestination(context, departure)
     }

@@ -18,6 +18,7 @@ import com.example.novav2.state.LocationSignal
 import com.example.novav2.state.ReminderScheduler
 import com.example.novav2.state.SensorSignal
 import com.example.novav2.state.SignalRepository
+import com.example.novav2.widget.WidgetUpdater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -70,6 +71,9 @@ class SignalMonitorService : Service() {
                 if (ticksSinceAmbientCheck >= TICKS_PER_AMBIENT_CHECK) {
                     ticksSinceAmbientCheck = 0
                     maybePostAmbientEvent()
+                    // The widget has no calendar observer of its own; this cadence picks up
+                    // calendar edits within ~10 minutes while signed in.
+                    WidgetUpdater.requestUpdate(applicationContext)
                     SignalRepository.scheduleNextAmbientCheck(
                         System.currentTimeMillis() + SignalRepository.AMBIENT_CHECK_INTERVAL_MILLIS
                     )
