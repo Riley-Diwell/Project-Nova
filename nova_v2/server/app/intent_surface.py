@@ -1570,6 +1570,29 @@ def _force_answer(
     return assistant, calls, finish
 
 
+def warm_prefix() -> None:
+    """Have the model server read the system prompt and tool list once for the
+    two tool sets most turns are offered, so the first such turn after a restart
+    finds them in its prefix cache instead of spending 6-10 s on them. One token
+    out each; the replies are thrown away.
+
+    The two sets: every tool (a command authorises them all) and none of the
+    Function tools (an unasked turn usually has no authority). The server keeps
+    both cached at once. A turn offered any other set re-reads its whole prompt
+    the first time that set comes up - the template puts the tools before the
+    system prompt."""
+    for authorised in (_REGISTRY.all_names(), []):
+        # Start-up's leash, not a voice turn's: the model may still be loading.
+        llm.client(120.0, 1).chat.completions.create(
+            model=llm.MODEL,
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": "{}"}],
+            tools=_build_tools(authorised),
+            tool_choice="auto",
+            max_tokens=1,
+            extra_body=llm.THINKING,
+        )
+
+
 def _tool_message(call_id: str, result: Any) -> dict[str, Any]:
     return {"role": "tool", "tool_call_id": call_id, "content": json.dumps(result, default=str)}
 

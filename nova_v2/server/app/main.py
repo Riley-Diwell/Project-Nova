@@ -109,11 +109,12 @@ def _warm_up() -> None:
     except Exception as e:
         print(f"[warmup] persona warm-up skipped: {e}")
 
-    # One token from the model, so a stopped or unreachable model server shows
-    # up in the log at start-up rather than on the first voice turn.
+    # One token from the model, over the real system prompt and tools: a stopped
+    # or unreachable model server shows up in the log at start-up rather than
+    # on the first voice turn, and that turn finds the prompt already cached.
     start = time.perf_counter()
     try:
-        llm.complete("Reply with OK.", "ping", max_tokens=4, timeout=120.0)
+        intent_surface.warm_prefix()
         print(f"[warmup] model {llm.MODEL} ready ({(time.perf_counter() - start) * 1000:.0f}ms)")
     except Exception as e:
         print(f"[warmup] model warm-up failed ({llm.LLM_BASE_URL}): {e}")
