@@ -59,6 +59,17 @@ object NovaCommandFrames {
         )
     }
 
+    /** type, bearing in tenths of a degree clockwise from true north (u16 LE, 0-3599) - 3 bytes.
+     * Null sends [NovaBleProtocol.HEADING_NONE]. Any angle is wrapped into 0-360 first. */
+    fun setHeading(degrees: Double?): ByteArray {
+        val tenths = if (degrees == null) NovaBleProtocol.HEADING_NONE
+        else (Math.round(((degrees % 360) + 360) % 360 * 10) % 3600).toInt()
+        return byteArrayOf(
+            NovaBleProtocol.CommandType.SET_HEADING.toByte(),
+            (tenths and 0xFF).toByte(), (tenths shr 8).toByte(),
+        )
+    }
+
     private fun tenMs(ms: Int, max: Int) = (ms / 10).coerceIn(0, max)
     private fun byte(value: Int) = value.coerceIn(0, 0xFF).toByte()
 }

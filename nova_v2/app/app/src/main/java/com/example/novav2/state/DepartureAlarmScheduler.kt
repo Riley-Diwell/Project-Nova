@@ -46,5 +46,7 @@ object DepartureAlarmScheduler {
 
         context.getSystemService(AlarmManager::class.java)
             .setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
+        // The device's compass points at this trip's destination until the user gets there.
+        DeviceCompass.setDestination(context, departure)
     }
 }

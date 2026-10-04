@@ -38,6 +38,20 @@ class NovaCommandFramesTest {
     }
 
     @Test
+    fun setHeading_tenthsOfADegreeLittleEndian() {
+        // 123.4 deg = 1234 = 0x04D2
+        assertArrayEquals(bytes(0x08, 0xD2, 0x04), NovaCommandFrames.setHeading(123.4))
+        assertArrayEquals(bytes(0x08, 0xFF, 0xFF), NovaCommandFrames.setHeading(null))
+    }
+
+    @Test
+    fun setHeading_wrapsIntoZeroTo360() {
+        assertArrayEquals(bytes(0x08, 0xAC, 0x0D), NovaCommandFrames.setHeading(-10.0)) // 350.0 = 3500
+        assertArrayEquals(bytes(0x08, 0x64, 0x00), NovaCommandFrames.setHeading(370.0)) // 10.0 = 100
+        assertArrayEquals(bytes(0x08, 0, 0), NovaCommandFrames.setHeading(359.99)) // rounds to 360 = 0
+    }
+
+    @Test
     fun pulseClearAndPing() {
         assertArrayEquals(bytes(0x01, 20), NovaCommandFrames.pulse(NovaBleProtocol.CommandType.HAPTIC_PULSE, 200))
         assertArrayEquals(bytes(0x02, 255), NovaCommandFrames.pulse(NovaBleProtocol.CommandType.LED_PULSE, 60_000))

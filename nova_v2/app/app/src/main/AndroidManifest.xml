@@ -116,6 +116,27 @@
             </intent-filter>
         </activity>
 
+        <!-- Google Maps -> Share -> "Nova compass": points the device's compass at the shared
+             place (ShareDestinationActivity). Maps offers no way to read where it is navigating
+             to, so sharing is how the user tells Nova. Invisible and gone in a second, like the
+             assist trampoline above - taskAffinity="" for the same reason. -->
+        <activity
+            android:name=".ShareDestinationActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:label="@string/share_destination_label"
+            android:theme="@style/Theme.Transparent">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
         <receiver
             android:name=".state.ActivityTransitionReceiver"
             android:exported="false" />

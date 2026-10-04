@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">Nova V2</string>
+    <!-- Google Maps share sheet -> ShareDestinationActivity -->
+    <string name="share_destination_label">Nova compass</string>
+    <string name="share_destination_set">Nova\'s compass is pointing to %1$s</string>
+    <string name="share_destination_set_disconnected">Nova\'s compass will point to %1$s once your device connects</string>
+    <string name="share_destination_already_there">You\'re already at %1$s</string>
+    <string name="share_destination_there">your destination</string>
+    <string name="share_destination_not_a_place">Couldn\'t find a place in that - try sharing it from Google Maps</string>
 </resources>

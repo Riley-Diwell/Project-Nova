@@ -15,6 +15,9 @@ sealed class NovaDeviceEvent {
     /** [millivolts] is the smoothed cell voltage - null from firmware that sends percent only. */
     data class Battery(val percent: Int, val millivolts: Int? = null) : NovaDeviceEvent()
     data object Heartbeat : NovaDeviceEvent()
+    /** Two taps then a hold - the user turned the compass off on the device
+     * ([com.example.novav2.state.DeviceCompass.clear]). */
+    data object ClearHeading : NovaDeviceEvent()
 }
 
 /** What [com.example.novav2.service.NovaDeviceService] exposes so callers elsewhere
@@ -32,6 +35,9 @@ interface NovaCommandSender {
     fun sendClearLayer(id: Int)
     /** Tells the device which interaction mode it is in - see [NovaCommandFrames.setMode]. */
     fun sendSetMode(mode: Int, token: Int, timeoutSeconds: Int)
+    /** Points the device's compass at [degrees] (true north), or turns it off with null - see
+     * [com.example.novav2.state.DeviceCompass]. */
+    fun sendSetHeading(degrees: Double?)
 }
 
 /**
@@ -97,7 +103,7 @@ object NovaDeviceRepository {
         when (event) {
             is NovaDeviceEvent.Heartbeat -> _lastHeartbeatAtMillis.value = System.currentTimeMillis()
             is NovaDeviceEvent.Battery -> _battery.value = event
-            is NovaDeviceEvent.Press -> {
+            is NovaDeviceEvent.Press, is NovaDeviceEvent.ClearHeading -> {
                 _lastEvent.value = event
                 _events.tryEmit(event)
             }

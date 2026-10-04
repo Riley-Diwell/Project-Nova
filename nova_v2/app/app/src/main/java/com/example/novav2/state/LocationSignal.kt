@@ -31,6 +31,12 @@ object LocationSignal {
     var latestLocationCtx: String? = null
         private set
 
+    /** The same fix as [latestLocationCtx], unrounded - (latitude, longitude). [DeviceCompass]
+     * measures the bearing and distance to a destination from it. */
+    @Volatile
+    var latestFix: Pair<Double, Double>? = null
+        private set
+
     fun hasPermission(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED ||
@@ -42,18 +48,24 @@ object LocationSignal {
      * fallback a phone that isn't producing new fixes - indoors, or the emulator, which only
      * emits one when a location is set - never had a location at all, however recently it knew
      * where it was.
+     *
+     * [onFix] runs once a fix has been remembered - never if none arrives.
      */
     @SuppressLint("MissingPermission")
-    fun refresh(context: Context) {
+    fun refresh(context: Context, onFix: (() -> Unit)? = null) {
         if (!hasPermission(context)) return
         val client = LocationServices.getFusedLocationProviderClient(context)
         client.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
             .addOnSuccessListener { location ->
                 if (location != null) {
                     remember(location.latitude, location.longitude)
+                    onFix?.invoke()
                 } else {
                     client.lastLocation.addOnSuccessListener { last ->
-                        if (last != null) remember(last.latitude, last.longitude)
+                        if (last != null) {
+                            remember(last.latitude, last.longitude)
+                            onFix?.invoke()
+                        }
                     }
                 }
             }
@@ -61,6 +73,7 @@ object LocationSignal {
 
     // Locale.US so the decimal separator is always '.', which the server splits on.
     private fun remember(latitude: Double, longitude: Double) {
+        latestFix = Pair(latitude, longitude)
         latestLocationCtx = String.format(Locale.US, "%.4f,%.4f", latitude, longitude)
     }
 }

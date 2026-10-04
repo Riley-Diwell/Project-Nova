@@ -44,6 +44,7 @@ dropped").
 | Battery level | `0x04` | 3 bytes: percentage 0–100, millivolts (2 bytes LE) |
 | Heartbeat | `0x05` | none |
 | Press | `0x06` | 3 bytes: press count, mode, token |
+| Clear heading | `0x07` | none — two taps then a hold; the phone forgets the compass destination |
 
 Battery is sent 3 s after connecting (time for the phone to subscribe) and
 every 15 s after that. The firmware reads the cell through the 220k/220k
@@ -110,6 +111,7 @@ lockstep with button state.
 | Clear LED layer | `0x05` | 1 byte: layer id, `0xFF` clears every layer |
 | Play haptic | `0x06` | 1–6 bytes: alternating on/off step durations in 10ms units, starting with on |
 | Set mode | `0x07` | 4 bytes: mode, token, timeout seconds (little-endian, `0` = until changed) |
+| Set heading | `0x08` | 2 bytes: bearing to the destination in 0.1° units, clockwise from true north (little-endian, 0–3599); `0xFFFF` = no destination |
 
 Set LED layer payload (11 bytes with the type byte):
 
@@ -140,8 +142,34 @@ What the LED shows, first match wins:
 1. recording: solid red
 2. the release / `LED pulse` green flash
 3. the top layer, including the dark half of a blink
-4. the compass heading gradient, if a compass is fitted
+4. the compass heading gradient, if a compass is fitted and the phone has set a heading
 5. off
+
+### Compass
+
+The compass is dark unless the phone has a destination. The device has no GPS,
+so the phone (`DeviceCompass`) works out the bearing from its latest fix to the
+destination and sends it with Set heading. The device compares that bearing to
+its magnetometer heading (corrected to true north) and fades the LED from green
+when it faces the destination to red when it faces the opposite way.
+
+The destination is the end of the route behind the latest leave-by (the
+server's `scheduled_departure`, `destination_lat`/`destination_lng`). The phone
+re-sends the bearing as the user moves, on its ~10 s signal tick, but only when
+it has moved 2° or more. It sends `0xFFFF` once the user is within 150 m of the
+destination, 30 minutes after the event starts, or when a new leave-by has no
+coordinates. Acknowledging "leave now"
+on the device leaves the compass on, because that is when the walk starts.
+
+A place shared from Google Maps (Share, then "Nova compass") overrides the
+leave-by. Maps has no way for another app to read where it is navigating to, so
+sharing is how the user tells Nova. The phone follows the share link's
+redirects for coordinates, or geocodes the place name. A later leave-by doesn't
+replace a shared place until it ends, which is 2 hours after sharing or within
+150 m of the place.
+
+The heading is dropped on disconnect like the layers, and the phone sends it
+again when it reconnects.
 
 **All layers are dropped on disconnect.** The phone (`DeviceLayers`) is the
 source of truth: on every connect it clears all and re-sends the layers that
@@ -167,9 +195,10 @@ One button, read by a small state machine in the firmware (`checkButton`):
 |---|---|
 | Hold (≥ 500 ms) | records for Nova: audio, START. LED solid red, green flash on release |
 | Tap, then hold | records a note: audio, START + NOTE |
+| Two taps, then hold | compass off: drops the heading, buzzes once, `events` Clear heading |
 | 1–n presses, ≤ 500 ms apart | `events` Press with the count, once 500 ms pass with no further press |
 
-Two taps then a hold is a plain hold. With no phone connected, a press or a
+Three or more taps then a hold is a plain hold. With no phone connected, a press or a
 hold just blinks the LED red twice — nothing is recorded or sent.
 
 **What a press means is the phone's call** (`DeviceButtonPolicy`), because it

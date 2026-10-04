@@ -35,6 +35,7 @@ object NovaBleProtocol {
                                        // older firmware sent percent alone
         const val HEARTBEAT = 0x05    // no payload
         const val PRESS = 0x06        // payload: count, mode, token (see SET_MODE)
+        const val CLEAR_HEADING = 0x07 // no payload - two taps then a hold: compass off
     }
 
     /** commands characteristic (phone → device, Write no response): 1 type byte + payload. */
@@ -46,7 +47,11 @@ object NovaBleProtocol {
         const val CLEAR_LAYER = 0x05  // payload: 1 byte layer id, LAYER_ID_ALL for every layer
         const val PLAY_HAPTIC = 0x06  // payload: 1-6 on/off step durations, x10ms, starting on
         const val SET_MODE = 0x07     // payload: mode, token, timeout seconds (u16 LE, 0 = until changed)
+        const val SET_HEADING = 0x08  // payload: bearing x0.1 deg (u16 LE, 0-3599), HEADING_NONE = none
     }
+
+    /** SET_HEADING's "no destination" - the device's compass goes dark. */
+    const val HEADING_NONE = 0xFFFF
 
     /** SET_MODE's mode byte - echoed back on every PRESS (see DeviceInteraction). */
     object DeviceMode {

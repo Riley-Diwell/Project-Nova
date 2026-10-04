@@ -34,6 +34,8 @@ enum NovaEventType : uint8_t {
   EVENT_PRESS        = 0x06, // payload: count, mode, token - mode/token are
                              // whatever COMMAND_SET_MODE last set, as of the
                              // first press of the sequence
+  EVENT_CLEAR_HEADING = 0x07, // no payload - two taps then a hold: the user
+                              // turned the compass off (see clearHeadingGesture)
 };
 
 // commands characteristic (phone -> device, Write no response): 1 type byte + payload.
@@ -49,7 +51,12 @@ enum NovaCommandType : uint8_t {
                                // durations x10ms, starting with on
   COMMAND_SET_MODE     = 0x07, // payload: mode, token, timeout seconds
                                // (2 bytes LE, 0 = until changed)
+  COMMAND_SET_HEADING  = 0x08, // payload: bearing to the destination, x0.1 deg
+                               // (2 bytes LE, 0-3599), HEADING_NONE = no destination
 };
+
+// COMMAND_SET_HEADING's "no destination" - the compass goes dark.
+const uint16_t HEADING_NONE = 0xFFFF;
 
 // The phone's interaction mode (COMMAND_SET_MODE). The phone decides what a
 // press means; the device only echoes the mode and token back with each press,
@@ -264,12 +271,15 @@ uint8_t audioSeq = 0;
 /* Assign a unique ID to this sensor at the same time */
 Adafruit_HMC5883_Unified mag = Adafruit_HMC5883_Unified(12345);
 
-String desiredDirection = "NE"; // debug this is just a placeholder to test, we will need to replace this with some incoming ble signal
 const float FULL_RED_ANGLE = 180.0;
 const uint32_t COMPASS_INTERVAL_MS = 100; // read the compass 10x per second
 uint32_t lastCompassRead = 0;
 bool compassAvailable = false; // false if mag.begin() failed - see setupCompass()
-float targetHeading = 0;    // desiredDirection converted to degrees in setup()
+// The phone sets these (COMMAND_SET_HEADING) while it has a destination: the
+// bearing from where it is to there, true north, refreshed as the user moves.
+// No destination, no compass - the LED stays dark. Dropped on disconnect.
+bool hasTargetHeading = false;
+float targetHeading = 0;    // degrees 0-360
 float currentHeading = 0;   // latest compass heading, degrees 0-360
 float headingError = 180;   // how far off target we are, degrees 0-180
 
@@ -310,9 +320,10 @@ void checkButton() {
         pressCount++;
         enterButtonState(BUTTON_GAP);
       } else if (inState >= holdMs) {
-        // One tap before the hold makes it a note; a plain hold talks to
-        // Nova; anything else (two taps, then a hold) is read as a plain hold.
-        startHold(pressCount == 1);
+        // One tap before the hold makes it a note; two taps clear the
+        // compass; a plain hold (or 3+ taps first) talks to Nova.
+        if (pressCount == 2) clearHeadingGesture();
+        else startHold(pressCount == 1);
         enterButtonState(BUTTON_HOLD);
       }
       break;
@@ -369,6 +380,22 @@ void startHold(bool note) {
   recordingIsNote = note;
   isRecording = 1; // updateLed() shows solid red while this is set
   Serial.println(note ? "Begin note recording!" : "Begin audio recording!");
+}
+
+// Two taps then a hold: compass off. Dark here at once, with a buzz, and the
+// phone is told - it owns the destination and would otherwise send it again.
+// The rest of the hold does nothing (stopRecording is a no-op on release).
+void clearHeadingGesture() {
+  if (!bleConnected) {
+    // the heading went with the connection anyway - nothing to clear
+    showNotConnected();
+    return;
+  }
+  hasTargetHeading = false;
+  uint16_t buzz[] = {120};
+  playHaptic(buzz, 1);
+  Serial.println("Compass cleared by the button");
+  sendEvent(EVENT_CLEAR_HEADING, nullptr, 0);
 }
 
 // Two quick red blinks: "the phone isn't connected". A device-local layer, so
@@ -505,9 +532,11 @@ class NovaServerCallbacks : public NimBLEServerCallbacks {
     // ones that still apply when it reconnects.
     CommandFrame clearAll = {2, {COMMAND_CLEAR_LAYER, LAYER_ID_ALL}};
     CommandFrame idle = {5, {COMMAND_SET_MODE, MODE_IDLE, 0, 0, 0}};
+    CommandFrame noHeading = {3, {COMMAND_SET_HEADING, 0xFF, 0xFF}}; // HEADING_NONE
     if (commandQueue) {
       xQueueSend(commandQueue, &clearAll, 0);
       xQueueSend(commandQueue, &idle, 0);
+      xQueueSend(commandQueue, &noHeading, 0);
     }
     NimBLEDevice::startAdvertising();
   }
@@ -595,6 +624,18 @@ void handleCommand(const CommandFrame& frame) {
       for (uint8_t i = 0; i < count; i++) steps[i] = value[1 + i] * 10;
       Serial.printf("[BLE] command: haptic pattern (%u steps)\n", count);
       playHaptic(steps, count);
+      break;
+    }
+    case COMMAND_SET_HEADING: {
+      if (frame.len < 3) break;
+      uint16_t tenths = readU16LE(value + 1);
+      hasTargetHeading = tenths != HEADING_NONE;
+      if (hasTargetHeading) {
+        targetHeading = (tenths % 3600) / 10.0;
+        Serial.printf("[BLE] command: heading %.1f deg (%s)\n", targetHeading, degreesToDirection(targetHeading));
+      } else {
+        Serial.println("[BLE] command: no heading");
+      }
       break;
     }
     default:
@@ -817,9 +858,9 @@ void updateLed() {
     return;
   }
 
-  // no compass, no heading to show - off rather than a constant "way off" red,
-  // which would read as recording
-  if (!compassAvailable) {
+  // no compass or no destination, no heading to show - off rather than a
+  // constant "way off" red, which would read as recording
+  if (!compassAvailable || !hasTargetHeading) {
     setLedColour(0, 0);
     return;
   }
@@ -937,16 +978,7 @@ void setupCompass(){
   displaySensorDetails();
 }
 
-// Converts an 8-point compass name ("N", "NE", ...) to degrees. Returns -1 if unknown.
-float directionToDegrees(const String& dir) {
-  const char* names[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
-  for (int i = 0; i < 8; i++) {
-    if (dir.equalsIgnoreCase(names[i])) return i * 45.0;
-  }
-  return -1;
-}
-
-// The reverse of directionToDegrees: the nearest 8-point compass name.
+// The nearest 8-point compass name ("N", "NE", ...) - for the Serial log.
 const char* degreesToDirection(float degrees) {
   const char* names[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
   return names[(int)((degrees + 22.5) / 45.0) % 8];
@@ -955,7 +987,8 @@ const char* degreesToDirection(float degrees) {
 void compassDetectionLoop(){
   // Every loop() pass used to read the sensor and print ~4 lines - an I2C read
   // plus Serial time the audio path can't spare (see AUDIO_DEBUG_HEX).
-  if (!compassAvailable || (millis() - lastCompassRead) < COMPASS_INTERVAL_MS) return;
+  // Nothing reads the heading without a destination, so skip the I2C read too.
+  if (!compassAvailable || !hasTargetHeading || (millis() - lastCompassRead) < COMPASS_INTERVAL_MS) return;
   lastCompassRead = millis();
 
   /* Get a new sensor event */
@@ -995,9 +1028,9 @@ void compassDetectionLoop(){
     lastPrint = millis();
     // Four specifiers, four arguments - the current direction used to be
     // missing, so %s read a float as a string pointer.
-    Serial.printf("Heading %.0f deg (%s) | target %s | off by %.0f deg\n",
+    Serial.printf("Heading %.0f deg (%s) | target %.0f deg (%s) | off by %.0f deg\n",
                   headingDegrees, degreesToDirection(headingDegrees),
-                  desiredDirection.c_str(), headingError);
+                  targetHeading, degreesToDirection(targetHeading), headingError);
   }
 }
 
@@ -1028,14 +1061,7 @@ void setup() {
   delay(1000);           // give USB serial a moment to come up
   Serial.println("Ready. Press the button.");
 
-  setupCompass();
-
-  targetHeading = directionToDegrees(desiredDirection);
-  if (targetHeading < 0) {
-    Serial.println("desiredDirection isn't a valid 8-point direction - defaulting to N");
-    targetHeading = 0;
-  }
-  Serial.printf("Target direction: %s (%.0f deg)\n", desiredDirection.c_str(), targetHeading);
+  setupCompass(); // dark until the phone sends a heading (COMMAND_SET_HEADING)
 }
 
 

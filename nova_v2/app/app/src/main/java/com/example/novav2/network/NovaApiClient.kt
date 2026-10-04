@@ -126,7 +126,7 @@ object NovaApiClient {
     }
 
     /** Mirrors EventOut.scheduled_departure - {destination, mode, leave_in_minutes,
-     * minutes_until_start, event_title}. */
+     * minutes_until_start, event_title, destination_lat, destination_lng}. */
     data class ScheduledDeparture(
         val destination: String?,
         val mode: String?,
@@ -140,6 +140,10 @@ object NovaApiClient {
          * Same null condition as [minutesUntilStart]. Falls back to [destination] in the
          * notification text when absent (see AmbientCheckRunner.kt's leaveSoonText). */
         val eventTitle: String?,
+        /** Where the route ends - what the device's compass points at
+         * ([com.example.novav2.state.DeviceCompass]). Null when Directions gave none. */
+        val destinationLatitude: Double? = null,
+        val destinationLongitude: Double? = null,
     )
 
     /** Mirrors EventOut.departure_unknown - {destination, event_title, minutes_until_start,
@@ -767,6 +771,8 @@ object NovaApiClient {
                         minutesUntilStart = it.optDouble("minutes_until_start")
                             .takeIf { v -> !v.isNaN() },
                         eventTitle = it.optString("event_title").takeIf { t -> t.isNotBlank() },
+                        destinationLatitude = it.optDouble("destination_lat").takeIf { v -> !v.isNaN() },
+                        destinationLongitude = it.optDouble("destination_lng").takeIf { v -> !v.isNaN() },
                     )
                 },
                 departureUnknown = json.optJSONObject("departure_unknown")?.let {

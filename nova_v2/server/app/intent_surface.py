@@ -470,7 +470,8 @@ class TurnContext:
 
     # Set when navigation_departure_time ran this turn and returned a
     # leave_in_minutes - {destination, mode, leave_in_minutes,
-    # minutes_until_start, event_title}. Carried separately from `actions`
+    # minutes_until_start, event_title, destination_lat, destination_lng}.
+    # Carried separately from `actions`
     # because that records the tool's *input*, not its *result*, and this is
     # the one result Android needs structured rather than folded into speech
     # (see the tool loop below) - it builds the leave-soon notification text
@@ -1640,6 +1641,9 @@ def _run_loop(
                         # anchor.
                         "minutes_until_start": tool_input.get("minutes_until_start"),
                         "event_title": tool_input.get("event_title"),
+                        # Where the route ends, for the device's compass.
+                        "destination_lat": result.get("destination_lat"),
+                        "destination_lng": result.get("destination_lng"),
                     }
                     ctx.departure_unknown = None
                 elif (name == "navigation_departure_time"

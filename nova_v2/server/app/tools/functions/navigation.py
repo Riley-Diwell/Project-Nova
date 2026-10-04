@@ -505,6 +505,13 @@ def _directions_result(data: dict, destination: str, mode: str, arrival_time: st
         "spoken": spoken,
         "api_used": True,
     }
+    # Where the route ends - what the device's compass points at while this
+    # departure is live (Android's DeviceCompass). Only real Directions results
+    # have it.
+    end = leg.get("end_location") or {}
+    if "lat" in end and "lng" in end:
+        result["destination_lat"] = end["lat"]
+        result["destination_lng"] = end["lng"]
     leave_in = _leave_in_minutes(minutes_until_start, duration_minutes)
     if leave_in is not None:
         result["leave_in_minutes"] = leave_in

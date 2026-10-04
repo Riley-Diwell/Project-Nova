@@ -29,7 +29,8 @@ class EventOut(BaseModel):
     # but not one a Yes/No answer fits, None otherwise.
     confirmation: Literal["yes_no", "open"] | None = None
     # {destination, mode, leave_in_minutes, minutes_until_start,
-    # event_title} when navigation_departure_time ran this turn and could
+    # event_title, destination_lat, destination_lng} when
+    # navigation_departure_time ran this turn and could
     # measure a countdown - see intent_surface.py's
     # TurnContext.scheduled_departure. Android schedules a precise local
     # alarm against leave_in_minutes rather than waiting for the next

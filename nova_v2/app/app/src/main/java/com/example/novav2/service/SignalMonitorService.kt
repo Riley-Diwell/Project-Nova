@@ -12,6 +12,7 @@ import com.example.novav2.R
 import com.example.novav2.state.ActivitySignal
 import com.example.novav2.state.AmbientCheckRunner
 import com.example.novav2.state.AmbientNotifier
+import com.example.novav2.state.DeviceCompass
 import com.example.novav2.state.GeofenceRegistrar
 import com.example.novav2.state.LocationSignal
 import com.example.novav2.state.ReminderScheduler
@@ -61,6 +62,9 @@ class SignalMonitorService : Service() {
                 SignalRepository.update(applicationContext)
                 // Location switched back on after the platform dropped the geofences, say.
                 GeofenceRegistrar.retryIfFailed(applicationContext)
+                // Re-aims the device's compass from the latest fix - the previous tick's, since
+                // refresh() above lands asynchronously. Nothing to do with no destination.
+                DeviceCompass.sync(applicationContext)
 
                 ticksSinceAmbientCheck++
                 if (ticksSinceAmbientCheck >= TICKS_PER_AMBIENT_CHECK) {
