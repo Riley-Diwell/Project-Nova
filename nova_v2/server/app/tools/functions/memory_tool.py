@@ -80,22 +80,36 @@ class MemoryTool(BaseTool):
         super().__init__(
             name="memory",
             description=(
-                "The user's notebook - things they asked Nova to remember and "
-                "voice notes dictated on their device. "
-                "'save' when they ask you to remember something about "
-                "themselves or their situation ('remember I parked on level "
-                "3', 'remember I love a long black'). Never for something to "
-                "do later ('remember to email Dr Chen') - that is "
-                "set_reminder. Also 'save' when they ask you to write or make "
-                "a note for them (class notes, a summary, a list): save the "
-                "note itself, with a `title`. "
-                "'recall' when they ask what they noted, recorded or captured, "
-                "or about something they may have told you ('where did I "
-                "park?', 'summarise today's lecture notes'), and before "
-                "telling them you don't know something about them. Each hit "
-                "is a title, a one-line tldr and the matching passage, never a "
-                "whole transcript - skim them and answer from the relevant "
-                "ones."
+                "The user's personal notebook - their notes, including ones "
+                "they asked Nova to remember and voice notes they dictated "
+                "on their device. Two actions. "
+                "Use action 'save' whenever the user asks you to remember "
+                "something about themselves or their situation ('remember I "
+                "parked on level 3', 'remember I love a long black with "
+                "sugar'), and put what they want remembered in `text`, "
+                "written as a statement about them. Never for something they "
+                "need to do later ('remember to email Dr Chen', 'don't let me "
+                "forget the form') - that is set_reminder. "
+                "Something durable about who they are (give it a `category`) "
+                "is filed into what Nova knows about them, not the Notes tab; "
+                "only situational things are kept as a short note. "
+                "When they ask you to write or make a note for them - notes "
+                "for a class, a summary, a list, what they need to know - "
+                "save the note itself, to be read later on a phone: give it a "
+                "short `title`, and lay `text` out with '## ' headings, '- ' "
+                "bullets, one point per line and a blank line between "
+                "sections. Never one long paragraph. "
+                "Use action 'recall' whenever they ask what they noted, "
+                "recorded or captured, or ask about something they may have "
+                "told you earlier ('where did I park?', 'what did I note about "
+                "the assignment?', 'summarise today's lecture notes'). Pass "
+                "`query` to narrow the search, and `since`/`until` when they "
+                "name a time ('yesterday's lecture', 'this morning'). Each hit "
+                "comes back with a title, a one-line summary (tldr) and the "
+                "passage that matched - answer from those; you never get a "
+                "whole transcript. Expect to skim the hits and pick the "
+                "relevant ones yourself. Call recall before telling the user "
+                "you don't know something about them."
             ),
             # This tool is open-loop: error() returns None, so the
             # Controller only ever runs it on the user's explicit command and
@@ -115,69 +129,89 @@ class MemoryTool(BaseTool):
                     "action": {
                         "type": "string",
                         "enum": ["save", "recall"],
-                        "description": "'save' = remember or write a note, 'recall' = look it back up.",
+                        "description": (
+                            "'save' = remember something (a durable fact about the user, "
+                            "or a short situational note), 'recall' = look it back up."
+                        ),
                     },
                     "text": {
                         "type": "string",
                         "description": (
-                            "Required for 'save'. A statement about them that makes "
-                            "sense weeks later - 'Parked on level 3 of the Kambri "
-                            "car park'. A note you write: the whole note, read on "
-                            "a phone, so '## ' headings, '- ' bullets, one point "
-                            "per line, a blank line between sections - never one "
-                            "long paragraph."
+                            "Required for 'save'. What to remember, phrased as a "
+                            "standalone statement that will still make sense weeks "
+                            "later, e.g. 'Parked on level 3 of the Kambri car park'. "
+                            "For a note you write for them, the whole note, laid out "
+                            "with '## ' headings and '- ' bullets."
                         ),
                     },
                     "title": {
                         "type": "string",
                         "description": (
-                            "'save', only for a note you write: at most 8 words - "
-                            "'DSP week 10 workshop prep'. Omit for 'remember ...'."
+                            "Optional for 'save'. Only for a note you write for them "
+                            "(prep for a class, a summary, a list): its heading, at "
+                            "most 8 words, e.g. 'DSP week 10 workshop prep'. Omit "
+                            "for a one-line 'remember ...'."
                         ),
                     },
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional for 'save'. A few topic words to find it by - ['parking', 'car'].",
+                        "description": (
+                            "Optional for 'save'. A few short topic words to make "
+                            "the note easier to find later, e.g. ['parking', 'car']."
+                        ),
                     },
                     "category": {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "'save': give it for anything durable about who they "
-                            "are - a preference, opinion, routine, course, health "
-                            "fact - general to specific: ['opinions', 'likes', "
-                            "'food'] for 'loves a long black', ['facts', 'health'] "
-                            "for 'allergic to peanuts'. It is then filed as "
-                            "something Nova knows, not a note. Omit for anything "
-                            "situational ('parked on level 3', 'meeting moved to "
-                            "3pm'), which is kept as a short note."
+                            "Optional for 'save'. Where this belongs in what Nova "
+                            "knows about the user, general to specific. Give it "
+                            "whenever the thing says something durable about who "
+                            "they are - a preference, an opinion, a routine, a "
+                            "course they take, a health fact - e.g. ['opinions', "
+                            "'likes', 'food'] for 'likes bagels' or 'loves a long "
+                            "black with sugar', or ['facts', 'health'] for "
+                            "'allergic to peanuts'. It is then saved only as "
+                            "something Nova knows, never as a note. Omit it for "
+                            "anything situational or one-off ('parked on level "
+                            "3', 'meeting moved to 3pm') - those are kept as a "
+                            "short note and are not remembered as part of who "
+                            "the user is."
                         ),
                     },
                     "query": {
                         "type": "string",
                         "description": (
-                            "'recall': what to look for, in their words - matched "
-                            "by meaning and exact words (course codes). Omit for "
-                            "the most recent notes in the time range."
+                            "Optional for 'recall'. What to look for, in the "
+                            "user's own words. Matched by meaning and by exact "
+                            "words (course codes, question numbers). Omit it to "
+                            "get the most recent notes in the time range."
                         ),
                     },
                     "since": {
                         "type": "string",
                         "description": (
-                            "'recall', when they name a time ('yesterday's "
-                            "lecture'): notes from this LOCAL time on, ISO 8601 "
-                            "with no suffix, from local_time."
+                            "Optional for 'recall'. Only notes taken at or after "
+                            "this LOCAL time, ISO 8601 with no timezone suffix, "
+                            "e.g. '2026-09-22T00:00:00' - resolve 'yesterday' or "
+                            "'this morning' against local_time."
                         ),
                     },
                     "until": {
                         "type": "string",
-                        "description": "'recall': notes up to this LOCAL time, same format as `since`.",
+                        "description": (
+                            "Optional for 'recall'. Only notes taken at or before "
+                            "this LOCAL time, same format as `since`."
+                        ),
                     },
                     "kind": {
                         "type": "string",
                         "enum": ["quick", "dictation"],
-                        "description": "'recall': 'dictation' = longer spoken notes, 'quick' = short. Omit for all.",
+                        "description": (
+                            "Optional for 'recall'. 'dictation' = longer spoken notes, "
+                            "'quick' = short notes. Omit to search all."
+                        ),
                     },
                 },
                 "required": ["action"],

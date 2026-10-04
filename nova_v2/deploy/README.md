@@ -123,6 +123,7 @@ docker compose logs -f nova     # the API log; model timings are on the [loop] l
 docker compose logs -f qwen     # the model server
 bash update.sh                  # after copying new server code into ./server
 bash backup.sh                  # database dump into data/backups (keeps 14)
+bash scrub-backups.sh --now     # remove deleted notes from every dump now
 docker compose restart qwen     # if the model wedges
 ```
 
@@ -137,17 +138,29 @@ To deploy new API code: pull the repo, copy `nova_v2/server` over `/srv/nova/ser
 
 It copies only what the image is built from (never `tests/`), keeps the team permissions (2770/660) so the next person can deploy, runs `sudo nova-ops deploy`, and waits for `/health`. `cat /srv/nova/server/.deployed` says what's live and who put it there. A plain `cp` or `tar` into `server/` leaves files only their owner can change; the next `sudo nova-ops deploy` puts the team permissions back (`update.sh` does it before building).
 
-For a nightly backup, run `crontab -e` and add:
+For nightly backups, and for deleted notes to leave them, run `crontab -e` and add:
 
 ```
 15 3 * * * bash /srv/nova/backup.sh >> /srv/nova/data/backups/backup.log 2>&1
+*/5 * * * * bash /srv/nova/scrub-backups.sh >> /srv/nova/data/backups/scrub.log 2>&1
 ```
 
-To restore one:
+**Deleted means deleted, in the backups too.** Every note delete journals the ids of what it removed (`public.deletion_journal`, ids only). Five minutes after a delete, `scrub-backups.sh` restores each dump into `scrub-db` (a throwaway copy of the database, kept in RAM), removes those rows, dumps it back, checks the new dump lists the same contents as the old one, and swaps it in with the old one's timestamp. Then it empties the journal. If a dump fails any check, it is left as it was and the journal stays, so the next run tries again; `scrub.log` says which (ids and counts only). Scrubbing 14 dumps takes a few minutes and needs about the database's size in free RAM.
+
+Before relying on it, and after changing the database image, run the self-test. It uses made-up data in `scrub-db` only:
 
 ```sh
+bash scrub-backups.sh --self-test
+```
+
+To restore one: first scrub, so the dump you restore doesn't bring back a note deleted since the last scrub. Don't restore while that fails.
+
+```sh
+bash scrub-backups.sh --now
 docker compose exec -T db pg_restore -U supabase_admin -d postgres --clean /backups/<file>.dump
 ```
+
+**Copies off this machine** are out of the scrub's reach. Either keep none, or re-copy `data/backups` after each scrub (after `scrub.log` says `done`) so the copies hold only scrubbed dumps.
 
 ## Knobs (`.env`)
 
