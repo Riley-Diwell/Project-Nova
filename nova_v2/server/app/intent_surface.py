@@ -1666,6 +1666,21 @@ def _run_loop(
     ctx: TurnContext,
     is_voice: bool = False,
 ) -> IntentResult | NeedMoreResult:
+    """The turn's model calls. Someone is waiting on a voice turn, so while one
+    runs the model is kept for it - other work holds back (llm.voice_turn)."""
+    if not is_voice:
+        return _loop(messages, iterations_left, event_id, ctx, is_voice)
+    with llm.voice_turn():
+        return _loop(messages, iterations_left, event_id, ctx, is_voice)
+
+
+def _loop(
+    messages: list[dict[str, Any]],
+    iterations_left: int,
+    event_id: UUID,
+    ctx: TurnContext,
+    is_voice: bool,
+) -> IntentResult | NeedMoreResult:
     # Read off the Turn rather than passed in.
     tools = _build_tools(ctx.turn.authorised())
 
@@ -1676,6 +1691,8 @@ def _run_loop(
 
     # iterate until an appropriate answer is reached
     for _ in range(iterations_left):
+        # An ambient turn has nobody listening; it goes after any voice turn.
+        llm.yield_to_voice()
         # call model
         print(f"[loop] tools={[t['function']['name'] for t in tools]!r}")
         response = llm.client(LOOP_TIMEOUT_S, 1).chat.completions.create(
