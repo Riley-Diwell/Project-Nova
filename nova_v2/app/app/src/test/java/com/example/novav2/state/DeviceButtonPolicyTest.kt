@@ -6,6 +6,7 @@ import com.example.novav2.state.DeviceButtonPolicy.Mode
 import com.example.novav2.state.DeviceButtonPolicy.ModeState
 import com.example.novav2.state.DeviceButtonPolicy.Situation
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DeviceButtonPolicyTest {
@@ -144,6 +145,41 @@ class DeviceButtonPolicyTest {
             "Thursday at 10: press twice. Friday at 2: press 3 times.",
             DeviceButtonPolicy.howToAnswer(times),
         )
+    }
+
+    @Test
+    fun guide_hasARowForEveryMode_andAlert() {
+        val examples = DeviceButtonPolicy.guideSituations(DevicePreferences.DEFAULT_IDLE_ACTIONS).map { it.second }
+        Mode.entries.filter { it != Mode.IDLE }.forEach { mode ->
+            assertTrue("no guide row for $mode", examples.any { it.mode.mode == mode })
+        }
+        assertTrue("no guide row for a departure cue", examples.any { it.departure != null })
+        assertTrue("no guide row for a fired reminder", examples.any { it.firedReminders.isNotEmpty() })
+    }
+
+    @Test
+    fun guide_saysWhatThePolicyDoes() {
+        val custom = DevicePreferences.DEFAULT_IDLE_ACTIONS + (3 to IdleAction.Custom("Log a glass of water"))
+        val guide = DeviceButtonPolicy.guide(custom)
+        assertEquals(listOf("Busy buzz", "Busy buzz", "Busy buzz"), guide[0].presses)
+        assertEquals(listOf("Repeat it", "Done with it", "Nothing"), guide[1].presses)
+        assertEquals(listOf("Got it", "Got it", "Read it aloud"), guide[2].presses)
+        assertEquals(listOf("Mark it done", "Snooze it", "Read it aloud"), guide[3].presses)
+        assertEquals(listOf("Repeat it", "Answer: Yes", "Answer: No"), guide[4].presses)
+        assertEquals(listOf("Repeat it", "Answer: the first option", "Answer: the second option"), guide[5].presses)
+        assertEquals(
+            listOf("Buzz what's coming up", "What's next?", "“Log a glass of water”"),
+            guide.last().presses,
+        )
+    }
+
+    @Test
+    fun idleAction_ignoresAlerts_forTryIt() {
+        // "Try it" uses this directly: with reminders pulsing, a real 1 press would complete them.
+        assertEquals(Action.CompleteReminders(listOf("a", "b")), DeviceButtonPolicy.resolve(situation(fired = fired), 1))
+        assertEquals(Action.Status, DeviceButtonPolicy.idleAction(DevicePreferences.DEFAULT_IDLE_ACTIONS[1], "hi"))
+        assertEquals(Action.Repeat("hi"), DeviceButtonPolicy.idleAction(IdleAction.Use(IdleAction.Preset.REPEAT_LAST_REPLY), "hi"))
+        assertEquals(Action.Nothing, DeviceButtonPolicy.idleAction(IdleAction.Use(IdleAction.Preset.REPEAT_LAST_REPLY), null))
     }
 
     @Test

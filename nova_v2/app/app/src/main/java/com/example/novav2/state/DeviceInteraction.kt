@@ -138,6 +138,13 @@ object DeviceInteraction {
         return DeviceButtonPolicy.resolve(situation, press.count)
     }
 
+    /** The settings screen's "Try it": runs what [count] presses do when nothing else is going on,
+     * as a press would - but never acts on a showing alert, which a real press would. */
+    suspend fun tryIdleAction(context: Context, count: Int) {
+        val app = context.applicationContext
+        perform(app, DeviceButtonPolicy.idleAction(DevicePreferences.idleActions(app)[count], lastReply))
+    }
+
     /** The same set the reminder LED pulses for (DeviceLayers.syncReminders). */
     private suspend fun firedReminders(context: Context, nowMillis: Long): List<DeviceButtonPolicy.FiredReminder> =
         NovaDatabase.getInstance(context).reminderDao().active()

@@ -47,6 +47,7 @@ sealed interface IdleAction {
 object DevicePreferences {
     private const val PREFS_NAME = "nova_settings"
     private const val KEY_IDLE_ACTION = "device_idle_action_"
+    private const val KEY_CUE_MIX = "device_cue_mix_"
 
     /** Press counts the user can assign - more than three is too many to count reliably. */
     val IDLE_PRESS_COUNTS = 1..3
@@ -69,6 +70,23 @@ object DevicePreferences {
     fun setIdleAction(context: Context, count: Int, action: IdleAction) {
         require(count in IDLE_PRESS_COUNTS) { "no idle action for $count presses" }
         prefs(context).edit().putString(KEY_IDLE_ACTION + count, IdleAction.encode(action)).apply()
+    }
+
+    /** The cues the user has recoloured, as [DeviceLayers.Mix] slider values. */
+    fun cueMixes(context: Context): Map<DeviceLayers.Cue, Int> {
+        val prefs = prefs(context)
+        return DeviceLayers.Cue.entries
+            .filter { prefs.contains(KEY_CUE_MIX + it.name) }
+            .associateWith { prefs.getInt(KEY_CUE_MIX + it.name, 0).coerceIn(0, 100) }
+    }
+
+    /** Null puts [cue] back to its default colour. Also tells [DeviceLayers], so the next layer
+     * sent - and [DeviceLayers.resend] - uses it. */
+    fun setCueMix(context: Context, cue: DeviceLayers.Cue, mix: Int?) {
+        val edit = prefs(context).edit()
+        if (mix == null) edit.remove(KEY_CUE_MIX + cue.name) else edit.putInt(KEY_CUE_MIX + cue.name, mix.coerceIn(0, 100))
+        edit.apply()
+        DeviceLayers.setColours(cueMixes(context))
     }
 
     private fun prefs(context: Context) =

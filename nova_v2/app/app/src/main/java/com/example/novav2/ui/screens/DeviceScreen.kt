@@ -9,6 +9,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -74,7 +76,7 @@ import com.example.novav2.ui.theme.NovaOk
  * beyond that is still unverified.
  */
 @Composable
-fun DeviceScreen() {
+fun DeviceScreen(showSettings: Boolean = true) {
     val context = LocalContext.current
     val connectionState by NovaDeviceRepository.connectionState.collectAsState()
     val lastEvent by NovaDeviceRepository.lastEvent.collectAsState()
@@ -129,12 +131,16 @@ fun DeviceScreen() {
         }
     }
 
+    // Settings only once paired - and never in onboarding, which only wants the pairing card.
+    val withSettings = showSettings && paired
     Column(
         modifier = Modifier
             .fillMaxSize()
+            // Only when there is more than the card: a scrolling column can't centre it.
+            .then(if (withSettings) Modifier.verticalScroll(rememberScrollState()) else Modifier)
             .padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = if (withSettings) Arrangement.Top else Arrangement.Center
     ) {
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -220,6 +226,9 @@ fun DeviceScreen() {
         compass?.takeIf { paired }?.let {
             Spacer(Modifier.height(16.dp))
             CompassCard(it, onClear = { DeviceCompass.clear(context) })
+        }
+        if (withSettings) {
+            DeviceSettingsSection(connected = paired && connectionState == NovaDeviceConnectionState.CONNECTED)
         }
     }
 }
