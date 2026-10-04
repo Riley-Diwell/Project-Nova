@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Nova V2</string>
+    <string name="app_name">Nova</string>
     <string name="widget_name">Nova</string>
     <string name="widget_description">What\'s next: your reminders, your next event and when to leave</string>
     <string name="widget_preview_title">Next</string>

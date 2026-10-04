@@ -361,7 +361,7 @@ class AssistVoiceService : Service() {
         NotificationCompat.Builder(this, STATUS_CHANNEL_ID)
             .setContentTitle("Nova")
             .setContentText(text)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_nova)
             .setOngoing(true)
             .setPriority(if (alerting) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_MIN)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)

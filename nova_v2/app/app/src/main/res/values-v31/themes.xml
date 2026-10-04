@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ draws its own launch splash: match the icon's background so the star sits on
+         Nova's dark base rather than a system-coloured disc. -->
+    <style name="Theme.NovaV2" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/nova_background</item>
+        <item name="android:windowSplashScreenBackground">@color/nova_background</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/nova_background</item>
+    </style>
+</resources>

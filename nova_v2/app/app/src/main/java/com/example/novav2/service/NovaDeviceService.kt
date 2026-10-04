@@ -179,7 +179,7 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Nova")
             .setContentText("Connected to your Nova device")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_nova)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
