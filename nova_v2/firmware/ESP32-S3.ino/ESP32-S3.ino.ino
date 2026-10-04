@@ -63,6 +63,9 @@ const uint16_t HEADING_NONE = 0xFFFF;
 // so a press made just as the phone moved on is still read against the mode
 // the user saw. Reverts to MODE_IDLE on timeout and on disconnect.
 const uint8_t MODE_IDLE = 0x00;
+// Nova asked a question presses can answer - see enterConfirm. (1 = thinking
+// and 2 = replied mean nothing to the firmware; it only echoes them.)
+const uint8_t MODE_CONFIRM = 0x03;
 uint8_t deviceMode = MODE_IDLE;
 uint8_t deviceModeToken = 0;
 uint32_t deviceModeSetAt = 0;
@@ -73,10 +76,15 @@ enum LedPattern : uint8_t {
   PATTERN_SOLID   = 0x00, // period/on-time ignored
   PATTERN_BLINK   = 0x01, // on for on-time at the start of every period
   PATTERN_BREATHE = 0x02, // fades up and down once per period, on-time ignored
+  PATTERN_DOUBLE_BLINK = 0x03, // two on-time flashes, an on-time apart, at the start of every period
 };
 const uint8_t LAYER_ID_ALL = 0xFF;
 // The device's own feedback layer - see showNotConnected. Never sent by the phone.
 const uint8_t LOCAL_LAYER_ID = 0xFE;
+// The device's own "question" layer while in MODE_CONFIRM - see enterConfirm.
+// Priority 35: over the phone's thinking layer (30), under its preview (40).
+const uint8_t CONFIRM_LAYER_ID = 0xFD;
+const uint8_t CONFIRM_LAYER_PRIORITY = 35;
 
 // audio characteristic (device -> phone, Notify) envelope flags - see
 // docs/ble-protocol.md. Byte 0 of every notification is a wrapping sequence
@@ -354,6 +362,9 @@ void enterButtonState(ButtonState next) {
 // The mode the phone last set, unless its timeout has run out.
 uint8_t currentMode() {
   if (deviceModeTimeoutMs > 0 && millis() - deviceModeSetAt > deviceModeTimeoutMs) {
+    // The question layer times out on the same clock; cleared anyway so the
+    // two can't disagree by a loop.
+    if (deviceMode == MODE_CONFIRM) clearLedLayer(CONFIRM_LAYER_ID);
     deviceMode = MODE_IDLE;
     deviceModeToken = 0;
     deviceModeTimeoutMs = 0;
@@ -610,14 +621,22 @@ void handleCommand(const CommandFrame& frame) {
       clearLedLayer(value[1]);
       Serial.printf("[BLE] command: clear layer %u\n", value[1]);
       break;
-    case COMMAND_SET_MODE:
+    case COMMAND_SET_MODE: {
       if (frame.len < 5) break;
+      bool newQuestion = value[1] == MODE_CONFIRM &&
+                         (deviceMode != MODE_CONFIRM || deviceModeToken != value[2]);
       deviceMode = value[1];
       deviceModeToken = value[2];
       deviceModeTimeoutMs = (uint32_t)readU16LE(value + 3) * 1000;
       deviceModeSetAt = millis();
+      if (newQuestion) {
+        enterConfirm();
+      } else if (deviceMode != MODE_CONFIRM) {
+        clearLedLayer(CONFIRM_LAYER_ID);
+      }
       Serial.printf("[BLE] command: mode %u (token %u)\n", deviceMode, deviceModeToken);
       break;
+    }
     case COMMAND_PLAY_HAPTIC: {
       uint16_t steps[6];
       uint8_t count = min((int)frame.len - 1, 6);
@@ -767,6 +786,26 @@ void setLedColour(uint8_t red, uint8_t green) {
   ledcWrite(LED_GREEN, green);
 }
 
+// Nova asked a question presses can answer (MODE_CONFIRM, new token): one
+// short buzz, and a green double blink that lasts as long as the mode. What
+// the presses mean is the phone's call - this only says "your turn".
+void enterConfirm() {
+  LedLayer question;
+  question.active = true;
+  question.id = CONFIRM_LAYER_ID;
+  question.priority = CONFIRM_LAYER_PRIORITY;
+  question.red = 0;
+  question.green = 255;
+  question.pattern = PATTERN_DOUBLE_BLINK;
+  question.periodMs = 2000;
+  question.onMs = 120;
+  question.startedAt = millis();
+  question.timeoutMs = deviceModeTimeoutMs; // 0 = until the mode changes, like the mode
+  setLedLayer(question);
+  uint16_t buzz[] = {80};
+  playHaptic(buzz, 1);
+}
+
 // Adds `layer`, replacing one with the same id. With every slot taken, it
 // evicts the lowest-priority layer - unless that one outranks it, in which case
 // the new layer is dropped.
@@ -821,6 +860,9 @@ uint8_t layerLevel(const LedLayer& layer) {
   switch (layer.pattern) {
     case PATTERN_BLINK:
       return phase < layer.onMs ? 255 : 0;
+    case PATTERN_DOUBLE_BLINK:
+      // on, off, on - each on-time long - then dark for the rest of the period
+      return (phase < layer.onMs || (phase >= 2 * layer.onMs && phase < 3 * layer.onMs)) ? 255 : 0;
     case PATTERN_BREATHE: {
       // triangle wave: 0 -> 255 over the first half of the period, back to 0 over the second
       uint32_t half = layer.periodMs / 2;

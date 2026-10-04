@@ -26,7 +26,10 @@ import com.example.novav2.data.NovaDatabase
 import com.example.novav2.data.toEntity
 import com.example.novav2.model.ChatMessage
 import com.example.novav2.network.NovaApiClient
+import com.example.novav2.ble.NovaDeviceConnectionState
+import com.example.novav2.ble.NovaDeviceRepository
 import com.example.novav2.state.AmbientNotifier
+import com.example.novav2.state.DeviceButtonPolicy
 import com.example.novav2.state.DeviceInteraction
 import com.example.novav2.state.AppForegroundState
 import com.example.novav2.state.CalendarWriter
@@ -218,14 +221,22 @@ class AssistVoiceService : Service() {
                 // VoiceScreen uses, so the wearable's voice path can't drift from it again.
                 finalResult?.let { TurnActionApplier.applyHeadless(applicationContext, it) }
 
-                val reply = finalResult?.speech?.takeIf { it.isNotBlank() }
+                val reply = finalResult?.speechWithOptions?.takeIf { it.isNotBlank() }
                     ?: "Sorry, I couldn't finish that - try again from the app."
                 // Tagged like ChatViewModel's, so deleting a note this turn saved, read back or
                 // quoted deletes both bubbles.
                 val noteIds = finalResult?.referencedNoteIds.orEmpty()
                 NoteIdsColumn.encode(noteIds)?.let { dao.tagNotes(listOf(asked.id), it) }
                 dao.insert(ChatMessage(text = reply, fromUser = false).toEntity(System.currentTimeMillis(), noteIds))
-                finishTurn(reply, finalResult?.episodeId)
+                // A question the device's presses can answer: said with how to press for each
+                // answer instead of the bare option list (wording from DeviceButtonPolicy).
+                val question = DeviceButtonPolicy.question(finalResult?.confirmation, finalResult?.options)
+                    ?.takeIf { NovaDeviceRepository.connectionState.value == NovaDeviceConnectionState.CONNECTED }
+                if (question != null && finalResult != null) {
+                    finishTurn("${finalResult.speech} ${DeviceButtonPolicy.howToAnswer(question)}", finalResult.episodeId, question)
+                } else {
+                    finishTurn(reply, finalResult?.episodeId)
+                }
             } catch (e: SocketTimeoutException) {
                 finishTurn("Sorry, that's taking too long - try again from the app.", episodeId = null)
             } catch (e: IOException) {
@@ -279,8 +290,8 @@ class AssistVoiceService : Service() {
      * if it is, the reply already lands in VoiceScreen's chat thread on its own (ChatViewModel
      * observes the same DAO this writes to), so a system notification on top would just be a
      * second, redundant announcement of something already on screen. */
-    private fun finishTurn(reply: String, episodeId: String?) {
-        DeviceInteraction.replied(reply)
+    private fun finishTurn(reply: String, episodeId: String?, question: DeviceButtonPolicy.Question? = null) {
+        if (question != null) DeviceInteraction.asked(reply, question) else DeviceInteraction.replied(reply)
         if (!AppForegroundState.isInForeground()) {
             AmbientNotifier.notify(applicationContext, reply)
         }

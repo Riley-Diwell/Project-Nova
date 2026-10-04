@@ -66,7 +66,8 @@ object NovaApiClient {
          * [confirmation] mirrors EventOut.confirmation (schemas/event_out.py):
          * "yes_no" when this turn left a yes/no question dangling (so the UI
          * can offer quick-reply buttons), "open" for a dangling question that
-         * isn't yes/no-shaped, null otherwise.
+         * isn't yes/no-shaped, "choice" when Nova asked the user to pick one of
+         * [options] (ask_choice), null otherwise.
          */
         data class Final(
             val speech: String,
@@ -108,7 +109,20 @@ object NovaApiClient {
             /** Notes the turn quotes without an Action naming them (the "yes" to a reminder
              * offer). Empty from an older server. */
             val noteIds: List<String> = emptyList(),
+            /** A "choice" question's labels, in order. Picking one sends the label itself as
+             * the next turn. */
+            val options: List<String>? = null,
         ) : EventResult() {
+            /** [speech] with a choice question's options on the end - what the chat shows, and
+             * what is spoken when there is no device to press. Built here from [options], never
+             * by the model, which is told the options are read out for it. */
+            val speechWithOptions: String
+                get() {
+                    val labels = options?.takeIf { confirmation == "choice" && it.isNotEmpty() } ?: return speech
+                    val list = if (labels.size == 1) labels[0] else labels.dropLast(1).joinToString(", ") + ", or " + labels.last()
+                    return "$speech $list?"
+                }
+
             /** Every note whose words this turn holds - saved, read back, or quoted - so its
              * Voice history bubbles go when one of them is deleted. */
             val referencedNoteIds: List<String>
@@ -762,6 +776,9 @@ object NovaApiClient {
                 episodeId = json.optString("episode_id").takeIf { it.isNotBlank() },
                 confirmation = json.optString("confirmation").takeIf {
                     json.has("confirmation") && !json.isNull("confirmation")
+                },
+                options = json.optJSONArray("options")?.let { array ->
+                    (0 until array.length()).map { array.optString(it) }.filter { it.isNotBlank() }
                 },
                 scheduledDeparture = json.optJSONObject("scheduled_departure")?.let {
                     ScheduledDeparture(

@@ -121,7 +121,7 @@ Set LED layer payload (11 bytes with the type byte):
 | 2 | priority | highest active layer is shown; newest wins a tie |
 | 3 | red | 0–255 |
 | 4 | green | 0–255 |
-| 5 | pattern | `0x00` solid, `0x01` blink (on for on-time at the start of each period), `0x02` breathe |
+| 5 | pattern | `0x00` solid, `0x01` blink (on for on-time at the start of each period), `0x02` breathe, `0x03` double blink (two on-time flashes, an on-time apart, at the start of each period) |
 | 6–7 | period | 10ms units, little-endian |
 | 8 | on-time | 10ms units (blink only) |
 | 9–10 | timeout | seconds, little-endian; `0` = until cleared |
@@ -207,6 +207,8 @@ depends on things only the phone knows:
 | Situation | 1 press | 2 presses | 3 presses |
 |---|---|---|---|
 | Nova is thinking | busy | busy | busy |
+| Nova asked yes or no | repeat it | yes | no |
+| Nova asked you to pick (up to 3 options) | repeat it | option 1 | option 2 (4 presses: option 3) |
 | Nova just replied (15 s after it finishes speaking) | repeat it | done | — |
 | "Leave soon/now" showing | got it | got it | read it aloud |
 | A reminder went off unanswered | done | snooze | read it aloud |
@@ -219,11 +221,21 @@ buzzes once per reminder due in the next hour (up to three; one long buzz for
 none). "Read aloud" only ever uses headphones.
 
 **Modes and tokens.** The phone sends Set mode as it moves between idle (`0`),
-thinking (`1`, LED breathes green) and replied (`2`). Each change carries a new
+thinking (`1`, LED breathes green), replied (`2`) and confirm (`3`). Each change carries a new
 token (1–255). The device echoes the mode and token with every press,
 captured at the press's first touch, so a press made in the last moment of the
 reply window still means "repeat" even though it reaches the phone 500 ms
 later. The device drops back to idle when the timeout passes or the link drops.
+
+**Confirm (`3`)** means Nova has asked a question that presses can answer.
+On entering it (a new token), the device buzzes once briefly and shows its own
+"question" layer: a green double blink every 2 s, priority 35 (over the
+phone's thinking layer, under its preview). The layer lasts as long as the
+mode's timeout, and goes as soon as any other mode is set. Presses are
+reported as in every mode; what N presses answer is the phone's call, so the
+device needs no option count. Firmware older than this treats `3` as an
+unknown mode: no question light or buzz, but presses still carry the mode
+and token.
 
 The phone confirms a saved note with its own haptic command (one buzz = saved,
 two long = failed).

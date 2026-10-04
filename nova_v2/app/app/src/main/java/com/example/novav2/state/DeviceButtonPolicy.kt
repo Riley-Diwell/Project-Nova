@@ -11,6 +11,8 @@ import com.example.novav2.ble.NovaBleProtocol
  *
  *   situation                     1 press           2 presses         3 presses
  *   Nova is thinking              (busy buzz)       (busy buzz)       (busy buzz)
+ *   Nova asked yes or no          repeat it         yes               no
+ *   Nova asked you to pick        repeat it         option 1          option 2  (4 = option 3)
  *   Nova just replied             repeat it         done with it      -
  *   "leave soon/now" showing      got it            got it            read it aloud
  *   a reminder went unanswered    done              snooze            read it aloud
@@ -18,12 +20,54 @@ import com.example.novav2.ble.NovaBleProtocol
  *
  * The alerts follow the LED: departure outranks a reminder there too, so a press always acts on
  * the thing the user can see. More presses than a row lists do nothing.
+ *
+ * One press means "repeat" after anything Nova says, questions included (Riley's call,
+ * 2026-10-03): the two moments feel alike, and a habitual single press must never say yes to a
+ * delete. So answers start at two presses, and a question has at most three of them. An open
+ * question - no fixed answers - is just a reply: one press repeats it, hold to answer.
  */
 object DeviceButtonPolicy {
     enum class Mode(val wire: Int) {
         IDLE(NovaBleProtocol.DeviceMode.IDLE),
         THINKING(NovaBleProtocol.DeviceMode.THINKING),
         REPLIED(NovaBleProtocol.DeviceMode.REPLIED),
+        /** Nova asked a [Question] presses can answer. */
+        CONFIRM(NovaBleProtocol.DeviceMode.CONFIRM),
+    }
+
+    /** A question presses can answer: [answers] in order, the first at [FIRST_ANSWER_PRESSES].
+     * Each is sent to Nova word for word, as if spoken - for a choice, the option's own label,
+     * which is what the server expects back (ask_choice). */
+    data class Question(val answers: List<String>) {
+        init {
+            require(answers.size in 2..MAX_ANSWERS) { "a question needs 2-$MAX_ANSWERS answers" }
+        }
+    }
+
+    /** One press repeats; see the class comment. */
+    const val FIRST_ANSWER_PRESSES = 2
+    /** Four presses is as many as anyone counts reliably. */
+    const val MAX_ANSWERS = 3
+
+    /** The question a turn's EventOut.confirmation/options leave for presses, or null when
+     * presses can't answer it ("open", or nothing asked) - the reply rules apply then. */
+    fun question(confirmation: String?, options: List<String>?): Question? = when (confirmation) {
+        "yes_no" -> Question(listOf("Yes", "No"))
+        "choice" -> options?.filter { it.isNotBlank() }?.take(MAX_ANSWERS)
+            ?.takeIf { it.size >= 2 }?.let(::Question)
+        else -> null
+    }
+
+    /** Spoken after the question when the device is connected - built here from [question],
+     * never by the model, so it always matches what the presses do. */
+    fun howToAnswer(question: Question): String =
+        question.answers.mapIndexed { i, answer -> "$answer: press ${times(i + FIRST_ANSWER_PRESSES)}." }
+            .joinToString(" ")
+
+    private fun times(n: Int) = when (n) {
+        1 -> "once"
+        2 -> "twice"
+        else -> "$n times"
     }
 
     /** One mode the phone put the device in. [token] (1-255) comes back with presses made in it. */
@@ -32,6 +76,8 @@ object DeviceButtonPolicy {
         val token: Int,
         val untilMillis: Long?,
         val replyText: String? = null,
+        /** Set in [Mode.CONFIRM]. */
+        val question: Question? = null,
     ) {
         fun expired(nowMillis: Long) = untilMillis != null && nowMillis >= untilMillis
     }
@@ -58,6 +104,8 @@ object DeviceButtonPolicy {
         data object Status : Action
         /** Send [instruction] to Nova as if it had been spoken. */
         data class Ask(val instruction: String) : Action
+        /** Answer the question Nova asked with [text], as if it had been spoken. */
+        data class Answer(val text: String) : Action
         data object Busy : Action
         data object Nothing : Action
     }
@@ -84,6 +132,11 @@ object DeviceButtonPolicy {
                 1 -> mode.replyText?.let(Action::Repeat) ?: Action.Nothing
                 2 -> Action.EndReply
                 else -> Action.Nothing
+            }
+            Mode.CONFIRM -> when (count) {
+                1 -> mode.replyText?.let(Action::Repeat) ?: Action.Nothing
+                else -> mode.question?.answers?.getOrNull(count - FIRST_ANSWER_PRESSES)
+                    ?.let(Action::Answer) ?: Action.Nothing
             }
             Mode.IDLE -> alert(situation, count) ?: idle(situation, count)
         }

@@ -26,8 +26,14 @@ class EventOut(BaseModel):
     # Set only when speech leaves a question dangling (intent_surface.py's
     # _classify_confirmation): "yes_no" if Android should offer Yes/No quick
     # replies alongside its usual text/voice input, "open" if it's a question
-    # but not one a Yes/No answer fits, None otherwise.
-    confirmation: Literal["yes_no", "open"] | None = None
+    # but not one a Yes/No answer fits, "choice" if the model asked the user
+    # to pick one of `options` (intent_surface's ask_choice), None otherwise.
+    confirmation: Literal["yes_no", "open", "choice"] | None = None
+    # The labels for a "choice" question, in order - 2 or 3 short phrases,
+    # each a complete answer on its own ("Thursday at 10"). The phone shows
+    # them as buttons and reads them out, and the device answers option N
+    # with N + 1 presses. Picking one sends its label as the next voice turn.
+    options: list[str] | None = None
     # {destination, mode, leave_in_minutes, minutes_until_start,
     # event_title, destination_lat, destination_lng} when
     # navigation_departure_time ran this turn and could

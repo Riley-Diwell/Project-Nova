@@ -95,6 +95,57 @@ class DeviceButtonPolicyTest {
         assertEquals(IdleAction.Custom("a: b"), IdleAction.decode("custom:a: b"))
     }
 
+    private val yesNo = DeviceButtonPolicy.Question(listOf("Yes", "No"))
+    private val times = DeviceButtonPolicy.Question(listOf("Thursday at 10", "Friday at 2"))
+
+    @Test
+    fun yesNo_onePressRepeats_twoIsYes_threeIsNo() {
+        val s = situation(ModeState(Mode.CONFIRM, 8, null, "Delete it?", yesNo), departure, fired)
+        assertEquals(Action.Repeat("Delete it?"), DeviceButtonPolicy.resolve(s, 1))
+        assertEquals(Action.Answer("Yes"), DeviceButtonPolicy.resolve(s, 2))
+        assertEquals(Action.Answer("No"), DeviceButtonPolicy.resolve(s, 3))
+        assertEquals(Action.Nothing, DeviceButtonPolicy.resolve(s, 4))
+    }
+
+    @Test
+    fun choice_pressNPlusOnePicksOptionN_tooManyIsNothing() {
+        val s = situation(ModeState(Mode.CONFIRM, 8, null, "Which time?", times))
+        assertEquals(Action.Repeat("Which time?"), DeviceButtonPolicy.resolve(s, 1))
+        assertEquals(Action.Answer("Thursday at 10"), DeviceButtonPolicy.resolve(s, 2))
+        assertEquals(Action.Answer("Friday at 2"), DeviceButtonPolicy.resolve(s, 3))
+        assertEquals(Action.Nothing, DeviceButtonPolicy.resolve(s, 4))
+    }
+
+    @Test
+    fun aStaleQuestionsPress_answersThatQuestion_notTheNextOne() {
+        val first = ModeState(Mode.CONFIRM, 8, untilMillis = 1_000, replyText = "Which time?", question = times)
+        val next = ModeState(Mode.CONFIRM, 9, untilMillis = 5_000, replyText = "Delete it?", question = yesNo)
+        val pressedIn = DeviceButtonPolicy.modeAt(next, listOf(first), token = 8, nowMillis = 2_000)
+        assertEquals(Action.Answer("Friday at 2"), DeviceButtonPolicy.resolve(situation(pressedIn), 3))
+        // And once the answer window has run out with no token to go on, presses are idle again.
+        val gone = DeviceButtonPolicy.modeAt(first, emptyList(), token = null, nowMillis = 1_000)
+        assertEquals(Mode.IDLE, gone.mode)
+    }
+
+    @Test
+    fun question_onlyForYesNoAndChoices_openIsAReply() {
+        assertEquals(yesNo, DeviceButtonPolicy.question("yes_no", null))
+        assertEquals(times, DeviceButtonPolicy.question("choice", listOf("Thursday at 10", " ", "Friday at 2")))
+        assertEquals(3, DeviceButtonPolicy.question("choice", listOf("a", "b", "c", "d"))?.answers?.size)
+        assertEquals(null, DeviceButtonPolicy.question("choice", listOf("a")))
+        assertEquals(null, DeviceButtonPolicy.question("open", null))
+        assertEquals(null, DeviceButtonPolicy.question(null, null))
+    }
+
+    @Test
+    fun howToAnswer_matchesThePresses() {
+        assertEquals("Yes: press twice. No: press 3 times.", DeviceButtonPolicy.howToAnswer(yesNo))
+        assertEquals(
+            "Thursday at 10: press twice. Friday at 2: press 3 times.",
+            DeviceButtonPolicy.howToAnswer(times),
+        )
+    }
+
     @Test
     fun statusCount_buzzesPerItemUpToThree_longForNone() {
         assertEquals(listOf(500), DeviceCue.countSteps(0))

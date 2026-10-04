@@ -13,6 +13,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -183,6 +185,7 @@ private fun PendingStatusBubble(text: String, fromUser: Boolean = false) {
  * - and its "Thinking…" bubble is still showing on return - if the user switches tabs meanwhile.
  * This composable only holds what needs an Activity: the permission prompts.
  */
+@OptIn(ExperimentalLayoutApi::class) // FlowRow, for the choice buttons
 @Composable
 fun VoiceScreen(
     bottomBarHeight: Dp = 0.dp,
@@ -433,6 +436,19 @@ fun VoiceScreen(
             ) {
                 OutlinedButton(onClick = { chatViewModel.sendMessage("Yes") }) { Text("Yes") }
                 OutlinedButton(onClick = { chatViewModel.sendMessage("No") }) { Text("No") }
+            }
+        }
+        // An ask_choice question: each label is sent word for word, which is the answer the
+        // server is waiting for.
+        val options = chatViewModel.pendingOptions
+        if (pendingConfirmation == "choice" && options.isNotEmpty() && voiceState == VoiceState.IDLE) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                options.forEach { option ->
+                    OutlinedButton(onClick = { chatViewModel.sendMessage(option) }) { Text(option) }
+                }
             }
         }
 

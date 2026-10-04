@@ -285,7 +285,7 @@ SYSTEM_PROMPT = (
 
 # web_search (tools/web_search.py) and get_current_address are context tools:
 # answered here, never gated, never recorded as Actions.
-CONTEXT_TOOLS = ("web_search", "get_current_address", "canvas")
+CONTEXT_TOOLS = ("web_search", "get_current_address", "canvas", "ask_choice")
 
 GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
     "name": "get_current_address",
@@ -303,6 +303,67 @@ GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
         "properties": {},
     },
 }
+
+# Asking the user to pick: the phone shows the options as buttons and reads
+# them out, and the device answers option N with N + 1 presses (1 press always
+# repeats) - which is why there are at most three. Offered on every turn, like
+# the other context tools, so the tool list stays the same for everyone and the
+# model server's prefix cache holds; a non-voice turn's call is refused in
+# _run_loop, since nobody is there to answer.
+ASK_CHOICE_MAX_OPTIONS = 3
+ASK_CHOICE_MAX_LABEL = 60
+
+ASK_CHOICE_TOOL: dict[str, Any] = {
+    "name": "ask_choice",
+    "description": (
+        "Ask the user to pick one of 2 or 3 clear alternatives - which time, "
+        "which reminder, which place. Use this instead of listing the "
+        "alternatives in your text. 'question' is the question as you would "
+        "say it, without the options: they are read out for you, with how to "
+        "pick each. Each option is a short label of a few words that works on "
+        "its own as the user's answer, e.g. 'Thursday at 10'. For a yes/no or "
+        "open question, just ask in your text instead. Calling this ends your "
+        "turn: the user's pick comes back as their next message, the option's "
+        "label word for word."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+            "options": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 2,
+                "maxItems": ASK_CHOICE_MAX_OPTIONS,
+            },
+        },
+        "required": ["question", "options"],
+    },
+}
+
+
+def _choice(tool_input: dict[str, Any]) -> tuple[str, list[str]] | dict[str, Any]:
+    """ask_choice's question and cleaned-up options, or the error to hand
+    back so the model can try again. Blank and repeated labels are dropped
+    before counting - a "pick one" with one real option isn't a choice."""
+    question = str(tool_input.get("question") or "").strip()
+    raw = tool_input.get("options")
+    options: list[str] = []
+    for label in raw if isinstance(raw, list) else []:
+        label = " ".join(str(label).split())
+        if label and label.casefold() not in (o.casefold() for o in options):
+            options.append(label)
+    if not question:
+        return {"success": False, "error": "ask_choice needs the question to ask."}
+    if not 2 <= len(options) <= ASK_CHOICE_MAX_OPTIONS:
+        return {"success": False, "error": (
+            f"ask_choice needs 2 to {ASK_CHOICE_MAX_OPTIONS} different options. "
+            "With more, ask an open question in your text instead.")}
+    if any(len(o) > ASK_CHOICE_MAX_LABEL for o in options):
+        return {"success": False, "error": (
+            "Keep each option to a few words - it is read aloud.")}
+    return question, options
+
 
 # Which tools exist, and which of them resolve on the phone, live in
 # tools/core/catalogue.py - so the Controller and its tests can ask what NOVA
@@ -355,7 +416,7 @@ def _build_tools(authorised: list[str]) -> list[dict[str, Any]]:
     """
     return [
         *(_as_function(t["name"], t["description"], t["input_schema"])
-          for t in (WEB_SEARCH_TOOL, GET_CURRENT_ADDRESS_TOOL, CANVAS_TOOL)),
+          for t in (WEB_SEARCH_TOOL, GET_CURRENT_ADDRESS_TOOL, CANVAS_TOOL, ASK_CHOICE_TOOL)),
         *(_tool_definition(name) for name in authorised),
     ]
 
@@ -837,8 +898,10 @@ class IntentResult(BaseModel):
     actions: list[dict[str, Any]] = []
     # Set only for a voice turn that left a question dangling (see
     # _classify_confirmation) - tells Android whether to offer Yes/No
-    # buttons alongside the usual text/voice input. None otherwise.
-    confirmation: Literal["yes_no", "open"] | None = None
+    # buttons alongside the usual text/voice input, or "choice" when the model
+    # asked one with ask_choice (`options` then holds the labels). None otherwise.
+    confirmation: Literal["yes_no", "open", "choice"] | None = None
+    options: list[str] | None = None
 
     # The Episode main.py opened for this turn. It closes that row with the
     # Actions above, and passes the id on to the phone so it can name the same
@@ -1529,6 +1592,32 @@ _BAD_ARGUMENTS = {"success": False, "error": (
     "with valid JSON arguments.")}
 
 
+def _end_on_choice(
+    messages: list[dict[str, Any]],
+    question: str,
+    options: list[str],
+    event_id: UUID,
+    ctx: TurnContext,
+) -> IntentResult:
+    """Ends a voice turn on an ask_choice question. The thread is stashed the
+    same way a question in plain speech is (_stash_pending_confirmation), with
+    the question as the assistant's last word, so the pick - the label itself,
+    as the next voice turn - continues it exactly as a spoken answer would.
+    Only the question is spoken from here; the phone reads out the options."""
+    print(f"[loop] asked a choice: {said(question)} options={options!r}")
+    _stash_pending_confirmation(
+        ctx.user_id,
+        [*messages, {"role": "assistant", "content": question}],
+        note_ids=ctx.from_notes,
+    )
+    return IntentResult(
+        event_id=event_id, speech=question, actions=ctx.for_wire(),
+        episode_id=ctx.episode_id, confirmation="choice", options=options,
+        scheduled_departure=ctx.scheduled_departure,
+        departure_unknown=ctx.departure_unknown, note_ids=ctx.from_notes,
+    )
+
+
 def _run_loop(
     messages: list[dict[str, Any]],
     iterations_left: int,
@@ -1611,6 +1700,9 @@ def _run_loop(
             # resume(). Its result is carried in _PENDING_SESSIONS and sent with
             # the device's answer there instead.
             tool_results = []
+            # ask_choice's (question, options), once one is accepted - the turn
+            # ends on it below, after every other call in this reply has run.
+            asked: tuple[str, list[str]] | None = None
             for call in calls:
                 if call is client_call and client_authorised:
                     continue
@@ -1618,6 +1710,19 @@ def _run_loop(
                 tool_input = _arguments(call)
                 if tool_input is None:
                     tool_results.append(_tool_message(call["id"], _BAD_ARGUMENTS))
+                    continue
+                if name == "ask_choice":
+                    if not is_voice:
+                        result = {"success": False, "error": (
+                            "Nobody is listening to answer - don't ask, stay quiet.")}
+                    elif client_authorised or asked is not None:
+                        result = {"success": False, "error": (
+                            "Ask once you have everything else you need, one question at a time.")}
+                    else:
+                        result = _choice(tool_input)
+                        if isinstance(result, tuple):
+                            asked, result = result, {"success": True, "asked": True}
+                    tool_results.append(_tool_message(call["id"], result))
                     continue
                 blocked = _gate(name, ctx)
                 if blocked is not None:
@@ -1698,6 +1803,8 @@ def _run_loop(
                 )
 
             messages.extend(tool_results)
+            if asked is not None:
+                return _end_on_choice(messages, *asked, event_id, ctx)
             continue
 
         # finished reasoning

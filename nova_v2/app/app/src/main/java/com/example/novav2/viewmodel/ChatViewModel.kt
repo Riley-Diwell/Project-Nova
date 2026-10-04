@@ -30,7 +30,11 @@ import com.example.novav2.network.SavedAction
 import com.example.novav2.notes.NotesRepository
 import com.example.novav2.notes.RecallChips
 import com.example.novav2.notes.data.PendingNoteDeleteEntity
+import com.example.novav2.ble.NovaDeviceConnectionState
+import com.example.novav2.ble.NovaDeviceRepository
 import com.example.novav2.state.CalendarWriter
+import com.example.novav2.state.DeviceButtonPolicy
+import com.example.novav2.state.DeviceInteraction
 import com.example.novav2.state.ReminderRepository
 import com.example.novav2.state.TurnActionApplier
 import com.example.novav2.state.UserStateCollector
@@ -88,6 +92,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // buttons; cleared as soon as any new turn is sent (button tap, typed, or spoken), same as
     // the backend's own _PENDING_CONFIRMATION is popped on the next voice turn.
     var pendingConfirmation by mutableStateOf<String?>(null)
+        private set
+    // The labels when pendingConfirmation is "choice" - one button each.
+    var pendingOptions by mutableStateOf<List<String>>(emptyList())
         private set
     // The notes the last reply's memory recall answered from - chips that open them.
     // Cleared when the next turn starts.
@@ -341,6 +348,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         val asked = addMessage(text, fromUser = true)
         pendingConfirmation = null
+        pendingOptions = emptyList()
+        DeviceInteraction.screenTurnSent()
         recallChips = emptyList()
         savedChips = emptyList()
         voiceState = VoiceState.THINKING
@@ -383,7 +392,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     viewModelScope.launch { recallChips = RecallChips.find(recall) }
                 }
                 savedChips = finalResult?.savedActions.orEmpty()
-                val reply = finalResult?.speech ?: "Sorry, I couldn't finish that."
+                val reply = finalResult?.speechWithOptions ?: "Sorry, I couldn't finish that."
                 statusText = ""
                 // Both bubbles of a turn that saved, read back or quoted a note go when it's
                 // deleted. The question was written before the answer named the notes.
@@ -393,6 +402,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 addMessage(reply, fromUser = false, noteIds = noteIds)
                 pendingConfirmation = finalResult?.confirmation
+                pendingOptions = finalResult?.options.orEmpty()
+                // The same question can be answered with the device's button, if it's connected.
+                DeviceButtonPolicy.question(finalResult?.confirmation, finalResult?.options)
+                    ?.takeIf { NovaDeviceRepository.connectionState.value == NovaDeviceConnectionState.CONNECTED }
+                    ?.let { DeviceInteraction.askedOnScreen(reply, it) }
                 speak(reply, finalResult?.episodeId)
             } catch (e: java.net.SocketTimeoutException) {
                 // Distinct from "couldn't reach": the backend IS answering, it just took longer

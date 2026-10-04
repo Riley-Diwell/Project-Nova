@@ -58,6 +58,8 @@ object NovaBleProtocol {
         const val IDLE = 0x00
         const val THINKING = 0x01
         const val REPLIED = 0x02
+        /** Nova asked a question presses can answer - the device shows its own "question" light. */
+        const val CONFIRM = 0x03
     }
 
     /** SET_LAYER's pattern byte. */
@@ -65,6 +67,7 @@ object NovaBleProtocol {
         const val SOLID = 0x00
         const val BLINK = 0x01   // on for onMs at the start of every period
         const val BREATHE = 0x02 // fades up and down once per period
+        const val DOUBLE_BLINK = 0x03 // two onMs flashes, onMs apart, at the start of every period
     }
 
     const val LAYER_ID_ALL = 0xFF
