@@ -27,27 +27,44 @@ object NoteNotifier {
     // 45 NovaDeviceService, 46-48 ReminderNotifier, 49 ReminderSpeechService.
     private const val ID_PROBLEM = 50
     private const val ID_READY = 51
+    private const val EXTRA_NOTE = "com.example.novav2.NOTE_ID"
 
     /** The note couldn't reach the server; it is kept on the phone and retried. */
-    fun queued(context: Context, text: String) = post(
+    fun queued(context: Context, noteId: String, text: String) = post(
         context, ID_PROBLEM,
         title = "Note kept on your phone",
         body = "Nova will save it as soon as it can reach the server: “${text.take(120)}”",
+        noteId = noteId,
     )
 
     /** A queued note has now been saved - replaces the "kept on your phone" notice. */
-    fun savedLater(context: Context, text: String) = post(
+    fun savedLater(context: Context, noteId: String, text: String) = post(
         context, ID_PROBLEM,
         title = "Note saved",
         body = "“${text.take(120)}”",
+        noteId = noteId,
     )
 
     /** The server refused it for good. Keeps the text so nothing is lost. */
-    fun failed(context: Context, text: String, reason: String) = post(
+    fun failed(context: Context, noteId: String, text: String, reason: String) = post(
         context, ID_PROBLEM,
         title = "Note couldn't be saved",
         body = "$reason. What was heard: “${text.take(300)}”",
+        noteId = noteId,
     )
+
+    /**
+     * Takes down any notification showing this note's words - a deleted note is gone from the
+     * shade too. The ids above are shared by every note, so each notification carries its note
+     * in [EXTRA_NOTE] and only the one about this note is cancelled. [noteId] null: every note's.
+     */
+    fun cancelFor(context: Context, noteId: String?) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        manager.activeNotifications
+            .filter { it.id == ID_PROBLEM || it.id == ID_READY }
+            .filter { noteId == null || it.notification.extras.getString(EXTRA_NOTE) == noteId }
+            .forEach { manager.cancel(it.tag, it.id) }
+    }
 
     /** Only worth interrupting for when Nova isn't already on screen. */
     fun summaryReady(context: Context, note: NotesApiClient.Note) {
@@ -63,10 +80,16 @@ object NoteNotifier {
             title = "${note.calendarTitle ?: note.displayTitle} notes ready",
             body = detail.ifEmpty { summary.tldr },
             noteId = note.id,
+            opensNote = true,
         )
     }
 
-    private fun post(context: Context, id: Int, title: String, body: String, noteId: String? = null) {
+    /** [noteId] tags the notification for [cancelFor]; [opensNote] makes tapping it open that
+     * note - only once the server has it. */
+    private fun post(
+        context: Context, id: Int, title: String, body: String,
+        noteId: String? = null, opensNote: Boolean = false,
+    ) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -76,17 +99,18 @@ object NoteNotifier {
         val open = Intent(context, MainActivity::class.java)
             .setAction(MainActivity.ACTION_OPEN_NOTE)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            .apply { noteId?.let { putExtra(MainActivity.EXTRA_NOTE_ID, it) } }
+            .apply { if (opensNote) noteId?.let { putExtra(MainActivity.EXTRA_NOTE_ID, it) } }
         val pending = PendingIntent.getActivity(
             context, id, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_nova)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(pending)
             .setAutoCancel(true)
+            .apply { noteId?.let { addExtras(android.os.Bundle().apply { putString(EXTRA_NOTE, it) }) } }
             .build()
         NotificationManagerCompat.from(context).notify(id, notification)
     }

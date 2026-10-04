@@ -16,6 +16,8 @@ The episodic Memory store: an append-only log of Episodes, backed by the
     ping()                             -> reach the table (start-up warm-up)
     reset_context(user_id)             -> older Episodes stop being context
     context_start(user_id)             -> when that last happened, or None
+    delete_episode(user_id, episode_id)        -> remove one Episode
+    delete_referencing(user_id, ref) -> ids    -> remove every Episode naming `ref`
 
 Every Episode belongs to one account, and every function takes that account
 first: a read only ever sees the caller's rows, and
@@ -34,8 +36,14 @@ should pass model_dump(mode="json").
 
 An Episode is written in two phases. `append` opens the row when the Event
 arrives - before the Intent Surface runs, so it survives a failing Claude call -
-and `close` completes it once the turn resolves. Nothing is ever replaced or
-removed; a row is only ever filled in.
+and `close` completes it once the turn resolves. Nothing is ever replaced; a row is
+only ever filled in.
+
+Append-only, with one exception: when the user deletes something they recorded
+(a note), the Episodes that hold its words go too - delete_episode() and
+delete_referencing(). The user's "delete it" wins over this log's design
+(docs/plans/notes-hard-delete-plan.md). The caller keeps an `episode:<id>`
+tombstone in persona_forgotten, so nothing derived from the row comes back.
 
 This store is chronological and exact-match only: it answers "what happened, in
 order", not "what is this about". Semantic search lives next door in
@@ -58,6 +66,7 @@ _USER_COLUMN = "user_id"
 # At or below PostgREST's max-rows, so a short page always means the end.
 _PAGE_SIZE = 1000
 _RESET_TABLE = "context_resets"
+_DELETE_REFERENCING_FN = "delete_episodes_referencing"
 
 UserId = Union[UUID, str]
 
@@ -256,6 +265,31 @@ def close(
         .eq("id", episode_id).eq(_USER_COLUMN, str(user_id))
         .execute()
     )
+
+
+def delete_episode(user_id: UserId, episode_id: str) -> None:
+    """Remove one of this user's Episodes. Does nothing to an id that isn't
+    theirs. Only for the user deleting what the Episode recorded - see the
+    module docstring."""
+    (
+        get_client().table(_TABLE).delete()
+        .eq("id", episode_id).eq(_USER_COLUMN, str(user_id))
+        .execute()
+    )
+
+
+def delete_referencing(user_id: UserId, ref: str) -> list[str]:
+    """Remove every one of this user's Episodes whose event or action contains
+    `ref` (a note id), and return their ids.
+
+    By exact id, never by text similarity: a later turn that read the note back
+    or set a reminder from it carries the note's id in its Action. A database
+    function (db/schema.sql) because PostgREST can't filter on jsonb as text.
+    """
+    if len(ref) < 8:  # an empty or tiny ref would match every row (the SQL checks too)
+        raise ValueError(f"refusing to delete episodes by a {len(ref)}-character reference")
+    rows = get_client().rpc(_DELETE_REFERENCING_FN, {"p_user": str(user_id), "p_ref": ref}).execute().data
+    return [str(r if not isinstance(r, dict) else next(iter(r.values()))) for r in rows or []]
 
 
 def ping() -> None:

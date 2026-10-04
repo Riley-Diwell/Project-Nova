@@ -60,6 +60,7 @@ from app.core import auth, llm
 from app.core.auth import AuthUser, current_user
 from app.core.request_user import bind_request_user
 from app.notes_pipeline import NotesPipelineProcessor
+from app.core.config import said
 
 
 # On a fresh container, the first request to touch Persona was paying ~28s
@@ -222,11 +223,13 @@ def _open_episode(user_id: UUID, event: Event, user_state: UserState) -> str | N
 def _close_episode(user_id: UUID, intent: IntentResult) -> None:
     if not intent.episode_id:
         return
+    record: dict[str, Any] = {"actions": intent.actions, "speech": intent.speech}
+    if intent.note_ids:
+        # Notes this turn quotes without an Action naming them, so deleting
+        # one deletes this episode too (IntentResult.note_ids).
+        record["note_ids"] = intent.note_ids
     try:
-        memory.close(user_id, intent.episode_id, action={
-            "actions": intent.actions,
-            "speech": intent.speech,
-        })
+        memory.close(user_id, intent.episode_id, action=record)
         print(f"[memory] closed episode {intent.episode_id} "
               f"({len(intent.actions)} action(s))")
     except Exception as e:
@@ -254,6 +257,7 @@ def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
         episode_id=intent.episode_id,
         confirmation=intent.confirmation,
         scheduled_departure=intent.scheduled_departure,
+        note_ids=intent.note_ids,
     )
 
 
@@ -267,7 +271,7 @@ def _to_response(intent: IntentResult | NeedMoreResult) -> EventResponse:
 # held the event loop, so one instance served one turn at a time.
 @app.post("/event", response_model=EventResponse)
 def receive_event(input_wrapper: InputWrapper, user: AuthUser = Depends(current_user)) -> EventResponse:
-    print(f"[/event] received text: {getattr(input_wrapper.event, 'text', None)!r}")
+    print(f"[/event] received text: {said(getattr(input_wrapper.event, 'text', None))}")
     us = input_wrapper.user_state
     print(f"[/event] calendar_ctx={us.calendar_ctx!r} "
           f"current_events={len(us.current_events)} upcoming_events={len(us.upcoming_events)}")
@@ -452,7 +456,7 @@ def search_persona(
         if h["cluster_id"]:
             weight[h["cluster_id"]] = weight.get(h["cluster_id"], 0.0) + h["score"]
     target = max(weight, key=lambda c: weight[c]) if weight else None
-    print(f"[persona] search {q[:40]!r}: {len(hits)} hit(s), target={target}")
+    print(f"[persona] search {said(q)}: {len(hits)} hit(s), target={target}")
     return {"hits": hits, "target_cluster": target}
 
 

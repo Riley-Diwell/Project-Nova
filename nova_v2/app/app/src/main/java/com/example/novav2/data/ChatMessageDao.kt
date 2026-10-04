@@ -18,6 +18,19 @@ interface ChatMessageDao {
     @Query("SELECT * FROM chat_messages ORDER BY timestamp ASC")
     fun observeAll(): Flow<List<ChatMessageEntity>>
 
+    /** Marks bubbles already written (the user's, inserted before the reply came back) as
+     * holding these notes' words. [noteIds] is a [NoteIdsColumn] value. */
+    @Query("UPDATE chat_messages SET noteIds = :noteIds WHERE id IN (:ids)")
+    suspend fun tagNotes(ids: List<String>, noteIds: String)
+
+    /** Every bubble holding this note's words - a deleted note goes from the Voice history too. */
+    @Query("DELETE FROM chat_messages WHERE noteIds LIKE '%,' || :noteId || ',%'")
+    suspend fun deleteForNote(noteId: String)
+
+    /** Delete all notes: every bubble that held any note's words. */
+    @Query("DELETE FROM chat_messages WHERE noteIds IS NOT NULL")
+    suspend fun deleteForAllNotes()
+
     @Query("DELETE FROM chat_messages")
     suspend fun clearAll()
 }

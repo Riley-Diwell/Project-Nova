@@ -32,8 +32,9 @@ data class NotesListState(
     val error: String? = null,
     /** Notes captured offline, still waiting in the outbox. */
     val pending: Int = 0,
-    /** A delete the user can still undo (the server call waits [UNDO_WINDOW_MS]). */
-    val pendingDelete: NotesApiClient.NoteRow? = null,
+    /** Bumped each time a note is deleted, for the list's plain "Note deleted" notice. There
+     * is no undo: a delete is confirmed first and then gone for good. */
+    val deletedCount: Int = 0,
 )
 
 data class NoteDetailState(
@@ -46,7 +47,7 @@ data class NoteDetailState(
 
 /**
  * Backs the Notes tab and the note detail view. Activity-scoped (see NotesScreen) so a delete
- * started from the detail view can show its Undo snackbar on the list it returns to.
+ * started from the detail view can show its notice on the list it returns to.
  *
  * Without a search, the list is the phone's cache of it ([NotesRepository.rows]): it shows at
  * once - on a cold start, offline - and [refresh] replaces it from the server behind the scenes.
@@ -66,14 +67,13 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
     /** The last search's results; only shown while [NotesListState.query] is not blank. */
     private val searchRows = MutableStateFlow<List<NotesApiClient.NoteRow>>(emptyList())
 
-    /** Notes whose delete has been committed but not yet confirmed by the server - kept hidden. */
+    /** Notes being deleted right now - hidden while the phone clears them out. */
     private val deleting = MutableStateFlow<Set<String>>(emptySet())
 
     val list: StateFlow<NotesListState> = combine(_list, cachedRows, searchRows, deleting) { s, cached, found, gone ->
         val searching = s.query.isNotBlank()
-        val hidden = gone + listOfNotNull(s.pendingDelete?.id)
         s.copy(
-            rows = (if (searching) found else cached.orEmpty()).filter { it.id !in hidden },
+            rows = (if (searching) found else cached.orEmpty()).filter { it.id !in gone },
             loading = s.loading || (!searching && cached == null),
         )
     }.stateIn(viewModelScope, SharingStarted.Eagerly, NotesListState(loading = true))
@@ -82,7 +82,6 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
     val detail: StateFlow<NoteDetailState> = _detail.asStateFlow()
 
     private var searchJob: Job? = null
-    private var deleteJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -93,8 +92,6 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
                 .collect {
                     // The cache itself is wiped with the account's other data (LocalData.wipe).
                     searchJob?.cancel()
-                    deleteJob?.cancel()
-                    deleteJob = null
                     _list.value = NotesListState()
                     searchRows.value = emptyList()
                     deleting.value = emptySet()
@@ -155,43 +152,22 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // --- delete with undo -----------------------------------------------------------
+    // --- delete ----------------------------------------------------------------------
 
-    /** Hides the note now and deletes it for real after [UNDO_WINDOW_MS] unless undone. */
-    fun requestDelete(noteId: String) {
-        deleteJob?.let { job ->
-            // A second delete inside the window commits the first straight away.
-            job.cancel()
-            _list.value.pendingDelete?.let { commitDelete(it.id) }
-        }
-        val row = list.value.rows.firstOrNull { it.id == noteId }
-            ?: _detail.value.note?.takeIf { it.id == noteId }?.let { it.asRow() }
-            ?: return
-        _list.update { it.copy(pendingDelete = row) }
-        deleteJob = viewModelScope.launch {
-            delay(UNDO_WINDOW_MS)
-            commitDelete(noteId)
-        }
-    }
-
-    /** The row was only ever hidden, so it reappears where it was. */
-    fun undoDelete() {
-        deleteJob?.cancel()
-        deleteJob = null
-        _list.update { it.copy(pendingDelete = null) }
-    }
-
-    private fun commitDelete(noteId: String) {
+    /**
+     * Deletes the note for good - only ever called once the user has confirmed (NoteDetailScreen's
+     * dialog). There is no undo window: deleted notes are entirely gone, and a window would mean
+     * keeping them (docs/plans/notes-hard-delete-plan.md phase 3).
+     */
+    fun delete(noteId: String) {
         deleting.update { it + noteId }
-        _list.update { it.copy(pendingDelete = null) }
-        deleteJob = null
+        _list.update { it.copy(deletedCount = it.deletedCount + 1) }
         viewModelScope.launch {
             try {
-                repository.delete(noteId) // drops it from the cache too
+                // Gone from this phone at once, and from the server now or once it's reachable
+                // (NotesRepository.delete never fails for being offline).
+                repository.delete(noteId)
                 searchRows.update { rows -> rows.filter { it.id != noteId } }
-            } catch (e: IOException) {
-                // Not deleted after all - letting it show again is the truth.
-                _list.update { it.copy(error = "Couldn't delete: ${e.message}") }
             } finally {
                 deleting.update { it - noteId }
             }
@@ -258,7 +234,6 @@ class NotesViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     companion object {
-        const val UNDO_WINDOW_MS = 5_000L
         private const val SEARCH_DEBOUNCE_MS = 300L
     }
 }

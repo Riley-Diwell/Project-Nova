@@ -27,6 +27,8 @@
 --                         token (app/store/canvas.py). Server-only: no policy.
 --  10. context_resets  - when each account last changed what NOVA knows by hand,
 --                         so older conversation stops being context (app/store/memory.py).
+--  11. delete_episodes_referencing() - a deleted note's episodes go with it.
+--  12. deletion_journal - ids of what was deleted for good, for scrubbing backups.
 --
 -- Every table is per-account: a user_id referencing Supabase Auth's auth.users
 -- with on delete cascade, and an owner RLS policy as a backstop to the server's
@@ -806,3 +808,63 @@ alter table public.context_resets enable row level security;
 drop policy if exists context_resets_owner on public.context_resets;
 create policy context_resets_owner on public.context_resets for all to authenticated
     using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+
+-- ---------------------------------------------------------------------------
+-- 11. Deleting a note's episodes
+-- ---------------------------------------------------------------------------
+-- Episodes are append-only except when the user deletes what they recorded: a
+-- deleted note's words must not survive in the voice turn that saved it, or in
+-- a later turn that read it back or set a reminder from it
+-- (docs/plans/notes-hard-delete-plan.md). Those turns carry the note's id in
+-- their event or action, so they are found by exact id - never by text.
+-- app/store/memory.py delete_referencing() calls this; PostgREST can't filter
+-- jsonb as text.
+--
+-- Invoker's rights, deliberately not security definer: the server's service
+-- key bypasses RLS, and anyone else's token is held to their own rows by the
+-- owner policy above. Execute is revoked from the API roles anyway.
+
+create or replace function public.delete_episodes_referencing(p_user uuid, p_ref text)
+returns setof uuid
+language sql volatile
+as $$
+    delete from public.episodic_memory
+    where user_id = p_user
+      and length(p_ref) >= 8
+      and (strpos(event::text, p_ref) > 0 or strpos(coalesce(action::text, ''), p_ref) > 0)
+    returning id
+$$;
+
+revoke execute on function public.delete_episodes_referencing(uuid, text) from public, anon, authenticated;
+
+
+-- ---------------------------------------------------------------------------
+-- 12. Deletion journal
+-- ---------------------------------------------------------------------------
+-- What has been deleted for good, so the nightly backups can forget it too:
+-- deploy/scrub-backups.sh removes every row listed here from every dump in
+-- data/backups, then empties the journal (docs/plans/notes-hard-delete-plan.md
+-- phase 4). Ids only, never content.
+--
+-- kind 'delete': the row is gone; delete it from the dumps.
+-- kind 'overwrite': the row survives but lost some of the deleted thing (a
+--   Persona fact that merged a deleted note, minus that note's provenance);
+--   the dumps get the live row's current metadata.
+--
+-- No foreign key to auth.users, deliberately: deleting an account must not
+-- cascade away the journal before its backups are scrubbed.
+
+create table if not exists public.deletion_journal (
+    id          bigserial   primary key,
+    user_id     uuid        not null,
+    table_name  text        not null check (table_name in ('notes', 'episodic_memory', 'persona')),
+    row_id      text        not null,
+    kind        text        not null default 'delete' check (kind in ('delete', 'overwrite')),
+    deleted_at  timestamptz not null default now()
+);
+
+create index if not exists deletion_journal_deleted_at_idx on public.deletion_journal (deleted_at);
+
+-- Server-only: RLS on and no policy, like canvas_connections.
+alter table public.deletion_journal enable row level security;

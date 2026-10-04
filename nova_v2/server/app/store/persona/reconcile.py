@@ -50,6 +50,7 @@ from typing import Any, Iterable, Optional
 
 from pydantic import BaseModel, Field
 
+from app.core.config import said
 from app.store.persona.judge import Judge, JudgeUnavailable
 from app.store.persona.models import Fact, Match, content_hash, source_keys
 from app.store.persona.store import (
@@ -126,7 +127,7 @@ def remember(
 
     with store.lock(user_id) as held:
         if not held:
-            print(f"[reconcile] Persona busy - writing {fact.text!r} unreconciled")
+            print(f"[reconcile] Persona busy - writing {said(fact.text)} unreconciled")
             result = _write_unreconciled(store, user_id, fact, None)
         else:
             result = _reconcile(store, user_id, fact, judge, candidate_limit)
@@ -278,14 +279,14 @@ def _reconcile_once(store: PersonaStore, user_id: UserId, new: Fact, judge: Judg
         if len(relations) != len(near):
             raise JudgeUnavailable(f"{len(relations)} verdicts for {len(near)} statements")
     except JudgeUnavailable as e:
-        print(f"[reconcile] judge unavailable ({e}) - {new.text!r} written unreconciled")
+        print(f"[reconcile] judge unavailable ({e}) - {said(new.text)} written unreconciled")
         if sweep:
             return RememberResult(action=RememberAction.UPDATED, fact_id=new.id, unreconciled=True)
         return _write_unreconciled(store, user_id, new, vector)
 
     for m, relation in zip(near, relations):
         print(f"[reconcile] {relation:<11} cos={m.similarity:.3f} lex={m.lexical:.3f} "
-              f"{new.text!r} vs {m.fact.text!r}")
+              f"{said(new.text)} vs {said(m.fact.text)}")
     dups = [m.fact for m, r in zip(near, relations) if r == "duplicate"]
     contras = [m.fact for m, r in zip(near, relations) if r == "contradicts"]
     if not dups and not contras:
@@ -310,7 +311,7 @@ def _apply(store: PersonaStore, user_id: UserId, new: Fact, target: Optional[Fac
             _supersede(store, user_id, target.metadata, _when(winner), winner.id)
             store.remove(user_id, target.id)
             lost.append(_superseded(target))
-        print(f"[reconcile] rejected {new.text!r}: {winner.text!r} is newer")
+        print(f"[reconcile] rejected {said(new.text)}: {said(winner.text)} is newer")
         return RememberResult(action=RememberAction.REJECTED, fact_id=winner.id,
                               superseded=lost, judged=judged)
 
@@ -362,8 +363,8 @@ def _apply(store: PersonaStore, user_id: UserId, new: Fact, target: Optional[Fac
         action = RememberAction.MERGED
     else:
         action = RememberAction.UPDATED
-    print(f"[reconcile] {action.value} {fact_id}: {body.text!r}"
-          + (f" (was {[s.text for s in superseded]!r})" if superseded else ""))
+    print(f"[reconcile] {action.value} {fact_id}: {said(body.text)}"
+          + (f" (was {said([s.text for s in superseded])})" if superseded else ""))
     return RememberResult(action=action, fact_id=fact_id, superseded=superseded,
                           merged_ids=merged, judged=judged)
 

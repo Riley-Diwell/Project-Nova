@@ -102,7 +102,16 @@ object NovaApiClient {
             /** Notes, memories and reminders this turn saved - the Voice tab's "Saved to …"
              * chips (see SavedActions.kt). */
             val savedActions: List<SavedAction> = emptyList(),
-        ) : EventResult()
+            /** Notes the turn quotes without an Action naming them (the "yes" to a reminder
+             * offer). Empty from an older server. */
+            val noteIds: List<String> = emptyList(),
+        ) : EventResult() {
+            /** Every note whose words this turn holds - saved, read back, or quoted - so its
+             * Voice history bubbles go when one of them is deleted. */
+            val referencedNoteIds: List<String>
+                get() = (savedActions.mapNotNull { it.noteId } + recallActions.flatMap { it.noteIds } + noteIds)
+                    .distinct()
+        }
         data class NeedMore(
             val sessionId: String,
             val requestType: String,
@@ -750,6 +759,9 @@ object NovaApiClient {
                 updateReminderActions = parseUpdateReminderActions(json.optJSONArray("actions")),
                 recallActions = parseRecallActions(json.optJSONArray("actions")),
                 savedActions = parseSavedActions(json.optJSONArray("actions")),
+                noteIds = json.optJSONArray("note_ids")?.let { ids ->
+                    (0 until ids.length()).mapNotNull { ids.optString(it).takeIf(String::isNotBlank) }
+                }.orEmpty(),
             )
         }
     }

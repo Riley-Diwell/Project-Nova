@@ -21,6 +21,7 @@ import android.speech.tts.UtteranceProgressListener
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.novav2.R
+import com.example.novav2.data.NoteIdsColumn
 import com.example.novav2.data.NovaDatabase
 import com.example.novav2.data.toEntity
 import com.example.novav2.model.ChatMessage
@@ -198,7 +199,8 @@ class AssistVoiceService : Service() {
         DeviceInteraction.thinking()
         val dao = NovaDatabase.getInstance(applicationContext).chatMessageDao()
         scope.launch {
-            dao.insert(ChatMessage(text = text, fromUser = true).toEntity(System.currentTimeMillis()))
+            val asked = ChatMessage(text = text, fromUser = true)
+            dao.insert(asked.toEntity(System.currentTimeMillis()))
             try {
                 val userState = ReminderRepository.attachWindow(
                     applicationContext, UserStateCollector.snapshot(applicationContext),
@@ -218,7 +220,11 @@ class AssistVoiceService : Service() {
 
                 val reply = finalResult?.speech?.takeIf { it.isNotBlank() }
                     ?: "Sorry, I couldn't finish that - try again from the app."
-                dao.insert(ChatMessage(text = reply, fromUser = false).toEntity(System.currentTimeMillis()))
+                // Tagged like ChatViewModel's, so deleting a note this turn saved, read back or
+                // quoted deletes both bubbles.
+                val noteIds = finalResult?.referencedNoteIds.orEmpty()
+                NoteIdsColumn.encode(noteIds)?.let { dao.tagNotes(listOf(asked.id), it) }
+                dao.insert(ChatMessage(text = reply, fromUser = false).toEntity(System.currentTimeMillis(), noteIds))
                 finishTurn(reply, finalResult?.episodeId)
             } catch (e: SocketTimeoutException) {
                 finishTurn("Sorry, that's taking too long - try again from the app.", episodeId = null)

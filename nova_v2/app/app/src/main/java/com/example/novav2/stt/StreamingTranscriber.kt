@@ -29,6 +29,24 @@ private const val TAG = "StreamingTranscriber"
  */
 class StreamingTranscriber(private val context: Context) : Transcriber {
     override fun newSession(): TranscriberSession = VoskSession(context.applicationContext)
+
+    companion object {
+        /** A spool older than this belongs to no live session: a capture that crashed before
+         * finishing. Far longer than the model's load wait (VoskSession.MODEL_WAIT_MS). */
+        private const val ORPHAN_AFTER_MS = 60 * 60_000L
+
+        /** Deletes spooled audio a crashed capture left in the cache - it may be a note the
+         * user has since deleted, and nothing will ever read it. A session's own spool is
+         * always deleted when it finishes or is cancelled. */
+        fun purgeOrphanSpools(context: Context, nowMillis: Long = System.currentTimeMillis()) {
+            context.cacheDir.listFiles { f -> f.name.startsWith(SPOOL_PREFIX) && f.name.endsWith(SPOOL_SUFFIX) }
+                ?.filter { nowMillis - it.lastModified() > ORPHAN_AFTER_MS }
+                ?.forEach { it.delete() }
+        }
+
+        internal const val SPOOL_PREFIX = "nova-stt-"
+        internal const val SPOOL_SUFFIX = ".pcm"
+    }
 }
 
 private class VoskSession(private val context: Context) : TranscriberSession {
@@ -126,7 +144,9 @@ private class VoskSession(private val context: Context) : TranscriberSession {
 
     private fun spoolToDisk(samples: ShortArray) {
         val out = spoolOut ?: run {
-            val file = File.createTempFile("nova-stt-", ".pcm", context.cacheDir)
+            val file = File.createTempFile(
+                StreamingTranscriber.SPOOL_PREFIX, StreamingTranscriber.SPOOL_SUFFIX, context.cacheDir,
+            )
             spool = file
             DataOutputStream(BufferedOutputStream(FileOutputStream(file))).also { spoolOut = it }
         }

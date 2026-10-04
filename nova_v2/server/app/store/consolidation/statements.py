@@ -48,6 +48,7 @@ from typing import Any, Callable, Iterable, Optional
 from app.store.consolidation.models import StatedFact
 from app.store.persona.models import normalise_text
 from app.tools.core.action import Action
+from app.core.config import said
 
 # Episode kinds whose text is the user talking.
 #
@@ -167,7 +168,7 @@ def find_statements(
     for fact in facts:
         # The extractor may only speak about utterances it was given.
         if fact.episode_id not in by_id:
-            print(f"[statements] dropped fact for unknown episode: {fact.text!r}")
+            print(f"[statements] dropped fact for unknown episode: {said(fact.text)}")
             continue
         if not fact.text.strip():
             continue

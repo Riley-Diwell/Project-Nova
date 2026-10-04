@@ -37,6 +37,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.example.novav2.network.NotesApiClient
+import com.example.novav2.notes.NotesRepository
 import com.example.novav2.notes.audio.NoteAudioStore
 import java.io.File
 import java.io.IOException
@@ -154,18 +155,21 @@ fun NotesSettingsScreen() {
         AlertDialog(
             onDismissRequest = { confirmDeleteAll = false },
             title = { Text("Delete all notes?") },
-            text = { Text("Every note will be deleted, along with anything Nova learned from them.") },
+            text = {
+                Text(
+                    "Every note will be deleted for good, with its recording and the " +
+                        "conversations it came from. Anything Nova learned from them is " +
+                        "forgotten. Reminders you set from them are kept. This can't be undone."
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDeleteAll = false
                     scope.launch {
-                        status = try {
-                            val n = NotesApiClient.deleteAll()
-                            NoteAudioStore.deleteAll(context)
-                            "Deleted $n note${if (n == 1) "" else "s"}."
-                        } catch (e: IOException) {
-                            "Couldn't delete: ${e.message}"
-                        }
+                        // Everything on this phone at once; the server now, or as soon as it
+                        // can be reached (NotesRepository.deleteAll never fails for being offline).
+                        NotesRepository(context).deleteAll()
+                        status = "All notes deleted."
                     }
                 }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
             },

@@ -18,7 +18,7 @@ from uuid import UUID
 import pytest
 
 from app.core.request_user import as_user
-from app.store import memory, notes, persona
+from app.store import deletion_journal, memory, notes, persona
 from app.store.notes import InMemoryNotesStore, NoteIn
 from app.store.persona import FakeEmbedder, InMemoryPersonaStore
 
@@ -67,6 +67,19 @@ class FakeMemory:
                 if r["created_at"] <= until and (after is None or r["created_at"] > after)]
         return min(len(rows), cap)
 
+    def delete_episode(self, user_id, episode_id: str) -> None:
+        self.rows = [r for r in self.rows if not (r["user_id"] == str(user_id) and r["id"] == episode_id)]
+
+    def delete_referencing(self, user_id, ref: str) -> list[str]:
+        """As the SQL function: this user's rows whose event or action
+        contains `ref`, by exact substring of their JSON."""
+        import json
+
+        hit = [r for r in self._mine(user_id)
+               if ref in json.dumps(r.get("event")) or ref in json.dumps(r.get("action"))]
+        self.rows = [r for r in self.rows if r not in hit]
+        return [r["id"] for r in hit]
+
     def close(self, user_id, episode_id: str, action=None, outcome=None) -> None:
         for r in self._mine(user_id):
             if r["id"] == episode_id:
@@ -95,11 +108,21 @@ def stores(monkeypatch):
     notes.set_processor(None)
 
     fake = FakeMemory()
-    for name in ("append", "get", "recent", "recent_all", "all", "since", "count_since", "close"):
+    for name in ("append", "get", "recent", "recent_all", "all", "since", "count_since", "close",
+                 "delete_episode", "delete_referencing"):
         monkeypatch.setattr(memory, name, getattr(fake, name))
 
+    journal: list[dict[str, str]] = []
+
+    def record(user_id, table, ids, kind="delete"):
+        assert table in deletion_journal.TABLES and kind in ("delete", "overwrite")
+        journal.extend({"user_id": str(user_id), "table_name": table, "row_id": str(i), "kind": kind}
+                       for i in dict.fromkeys(str(i) for i in ids if i))
+
+    monkeypatch.setattr(deletion_journal, "record", record)
+
     with as_user(USER):
-        yield {"notes": notes_store, "persona": persona_store, "memory": fake}
+        yield {"notes": notes_store, "persona": persona_store, "memory": fake, "journal": journal}
 
     persona.set_store(None)
     persona.set_embedder(None)

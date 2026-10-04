@@ -46,8 +46,45 @@ interface PendingNoteDao {
     @Query("DELETE FROM pending_notes WHERE id = :id")
     suspend fun delete(id: String)
 
+    @Query("SELECT COUNT(*) FROM pending_notes WHERE id = :id")
+    suspend fun has(id: String): Int
+
+    @Query("DELETE FROM pending_notes")
+    suspend fun clear()
+
     @Query("UPDATE pending_notes SET attempts = attempts + 1, lastError = :error WHERE id = :id")
     suspend fun recordFailure(id: String, error: String)
+}
+
+/**
+ * A note the user deleted that the server may still have - the delete waiting to reach it.
+ * Ids only, never content: the note's own rows on this phone are gone the moment the user
+ * deletes it (docs/plans/notes-hard-delete-plan.md S13), and only this remains until the server
+ * confirms. [ALL] stands for "Delete all notes".
+ */
+@Entity(tableName = "pending_note_deletes")
+data class PendingNoteDeleteEntity(
+    @PrimaryKey val id: String,
+    val requestedAtMillis: Long,
+) {
+    companion object {
+        const val ALL = "*"
+    }
+}
+
+@Dao
+interface PendingNoteDeleteDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(delete: PendingNoteDeleteEntity)
+
+    @Query("SELECT * FROM pending_note_deletes ORDER BY requestedAtMillis ASC")
+    suspend fun all(): List<PendingNoteDeleteEntity>
+
+    @Query("SELECT COUNT(*) FROM pending_note_deletes WHERE id = :id OR id = '*'")
+    suspend fun isPending(id: String): Int
+
+    @Query("DELETE FROM pending_note_deletes WHERE id = :id")
+    suspend fun delete(id: String)
 }
 
 /**
@@ -104,15 +141,17 @@ interface NoteRowDao {
  * server yet.
  */
 @Database(
-    entities = [PendingNoteEntity::class, NoteRowEntity::class],
-    version = 2,
+    entities = [PendingNoteEntity::class, NoteRowEntity::class, PendingNoteDeleteEntity::class],
+    version = 3,
     exportSchema = true,
     // 2: the list cache. A new table, so the outbox is untouched.
-    autoMigrations = [AutoMigration(from = 1, to = 2)],
+    // 3: deletes waiting to reach the server. A new table again.
+    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)],
 )
 abstract class NotesDatabase : RoomDatabase() {
     abstract fun pendingNoteDao(): PendingNoteDao
     abstract fun noteRowDao(): NoteRowDao
+    abstract fun pendingNoteDeleteDao(): PendingNoteDeleteDao
 
     companion object {
         @Volatile private var INSTANCE: NotesDatabase? = null

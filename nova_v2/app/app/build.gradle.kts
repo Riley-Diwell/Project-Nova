@@ -201,6 +201,11 @@ dependencies {
     // Android's org.json is a stub in local unit tests - the real one, for the wire parsers.
     testImplementation(libs.json)
     androidTestImplementation(libs.androidx.room.testing)
+    // room-testing reads app/schemas through room-migration, which is built against
+    // kotlinx-serialization 1.8. The app's own graph (lifecycle, navigation) settles on 1.7.3 and
+    // AGP pins the test classpath to the app's versions, so without this every MigrationTest case
+    // dies with an AbstractMethodError before a migration runs.
+    constraints { implementation(libs.kotlinx.serialization.core) }
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

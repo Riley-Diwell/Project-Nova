@@ -19,6 +19,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.novav2.data.NoteIdsColumn
 import com.example.novav2.data.NovaDatabase
 import com.example.novav2.data.toChatMessage
 import com.example.novav2.data.toEntity
@@ -26,7 +27,9 @@ import com.example.novav2.model.ChatMessage
 import com.example.novav2.network.NotesApiClient
 import com.example.novav2.network.NovaApiClient
 import com.example.novav2.network.SavedAction
+import com.example.novav2.notes.NotesRepository
 import com.example.novav2.notes.RecallChips
+import com.example.novav2.notes.data.PendingNoteDeleteEntity
 import com.example.novav2.state.CalendarWriter
 import com.example.novav2.state.ReminderRepository
 import com.example.novav2.state.TurnActionApplier
@@ -151,6 +154,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        // A deleted note's chips go with its bubbles - they show its words too.
+        viewModelScope.launch {
+            NotesRepository.deletions.collect { noteId ->
+                val all = noteId == PendingNoteDeleteEntity.ALL
+                savedChips = savedChips.filterNot { it.noteId != null && (all || it.noteId == noteId) }
+                recallChips = if (all) emptyList() else recallChips.filterNot { it.id == noteId }
+            }
+        }
+
         // Once nothing is in flight, whatever statusText still says is a one-off notice ("Didn't
         // catch that", "Stopped.", …) rather than live progress - let it fade instead of sitting
         // at the bottom of the transcript until the next turn. Restarts if the text or state changes.
@@ -188,12 +200,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         speechRecognizer?.destroy()
     }
 
-    fun addMessage(text: String, fromUser: Boolean): ChatMessage {
+    /** [noteIds]: the notes whose words this bubble holds (see ChatMessageEntity.noteIds). */
+    fun addMessage(text: String, fromUser: Boolean, noteIds: List<String> = emptyList()): ChatMessage {
         val message = ChatMessage(text = text, fromUser = fromUser)
         messages.add(message)
         val timestamp = System.currentTimeMillis()
         viewModelScope.launch(Dispatchers.IO) {
-            dao.insert(message.toEntity(timestamp))
+            dao.insert(message.toEntity(timestamp, noteIds))
         }
         return message
     }
@@ -326,7 +339,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             pendingUtterance = null
             textToSpeech.stop()
         }
-        addMessage(text, fromUser = true)
+        val asked = addMessage(text, fromUser = true)
         pendingConfirmation = null
         recallChips = emptyList()
         savedChips = emptyList()
@@ -372,7 +385,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 savedChips = finalResult?.savedActions.orEmpty()
                 val reply = finalResult?.speech ?: "Sorry, I couldn't finish that."
                 statusText = ""
-                addMessage(reply, fromUser = false)
+                // Both bubbles of a turn that saved, read back or quoted a note go when it's
+                // deleted. The question was written before the answer named the notes.
+                val noteIds = finalResult?.referencedNoteIds.orEmpty()
+                NoteIdsColumn.encode(noteIds)?.let { column ->
+                    launch(Dispatchers.IO) { dao.tagNotes(listOf(asked.id), column) }
+                }
+                addMessage(reply, fromUser = false, noteIds = noteIds)
                 pendingConfirmation = finalResult?.confirmation
                 speak(reply, finalResult?.episodeId)
             } catch (e: java.net.SocketTimeoutException) {

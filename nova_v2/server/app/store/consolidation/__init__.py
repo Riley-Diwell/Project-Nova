@@ -100,6 +100,7 @@ from app.store.consolidation.trends import (
     tallies_to_json,
     tally_rows,
 )
+from app.core.config import said
 
 
 # Resolved on every call rather than imported at module level: these are cheap
@@ -340,7 +341,7 @@ def _derive_candidates(user_id: UserId, candidates: list[Candidate], phraser: Op
     for fact in (phraser or _model_phraser)(fresh):
         key = (fact.candidate.signal, fact.candidate.value)
         if key not in counted:
-            print(f"[consolidation] dropped unsupported fact: {fact.text!r} {key}")
+            print(f"[consolidation] dropped unsupported fact: {said(fact.text)} {key}")
             continue
         if not fact.text.strip():
             continue
@@ -431,7 +432,7 @@ def _model_phraser(candidates: list[Candidate]) -> list[DerivedFact]:
     for item in _parse_json_array(text):
         candidate = by_key.get((item.get("signal"), item.get("value")))
         if candidate is None:
-            print(f"[consolidation] dropped unmatched phrasing: {item!r}")
+            print(f"[consolidation] dropped unmatched phrasing: {said(item)}")
             continue
         facts.append(DerivedFact(
             text=str(item.get("text") or "").strip(),
@@ -511,8 +512,8 @@ def _upsert_stated(user_id: UserId, fact: StatedFact) -> Any:
         confidence=fact.confidence,
         metadata=fact.evidence(),
     ), stated_at=fact.stated_at)
-    print(f"[statements] {result.action.value} {result.fact_id}: {fact.text!r} "
-          f"<- {fact.quote[:50]!r}")
+    print(f"[statements] {result.action.value} {result.fact_id}: {said(fact.text)} "
+          f"<- {said(fact.quote)}")
     return result
 
 
@@ -557,7 +558,7 @@ def _upsert(user_id: UserId, fact: DerivedFact) -> Any:
         when = last_seen
 
     result = persona.remember(user_id, written, stated_at=when)
-    print(f"[consolidation] {result.action.value} {result.fact_id}: {fact.text!r} "
+    print(f"[consolidation] {result.action.value} {result.fact_id}: {said(fact.text)} "
           f"(support={fact.candidate.support}, confidence={fact.confidence})")
     return result
 

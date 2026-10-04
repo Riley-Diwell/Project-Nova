@@ -43,6 +43,11 @@ class EventOut(BaseModel):
     # makes keeps its CPU on Cloud Run, where work the server started after
     # replying may never finish.
     consolidation_due: bool = False
+    # Notes whose words this turn holds without an Action naming them (the
+    # "yes" to a reminder offer - intent_surface's TurnContext.from_notes). The
+    # phone tags the turn's Voice history bubbles with them, so deleting the
+    # note deletes those bubbles too.
+    note_ids: list[str] = []
 
 
 class NeedMoreOut(BaseModel):
