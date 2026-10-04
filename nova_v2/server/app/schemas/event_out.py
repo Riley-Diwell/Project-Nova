@@ -37,6 +37,12 @@ class EventOut(BaseModel):
     # these fields - the model's speech is never used for it (see
     # AmbientCheckRunner.kt).
     scheduled_departure: dict[str, Any] | None = None
+    # {destination, event_title, minutes_until_start, reason} when
+    # navigation_departure_time ran this turn but could not measure a travel
+    # time - see intent_surface.py's TurnContext.departure_unknown. On an
+    # ambient check Android notifies the user that it couldn't work out when
+    # to leave, again in its own fixed wording.
+    departure_unknown: dict[str, Any] | None = None
     # True when enough has happened since NOVA last learned from this user's
     # activity (store/consolidation.due). The phone then asks for the pass in
     # the background (POST /persona/consolidate?if_due=true) - a request it

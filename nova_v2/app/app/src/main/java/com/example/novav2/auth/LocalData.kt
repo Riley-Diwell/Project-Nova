@@ -10,6 +10,7 @@ import com.example.novav2.notes.audio.NoteAudioStore
 import com.example.novav2.notes.data.NotesDatabase
 import com.example.novav2.notes.data.PendingNoteDeleteEntity
 import com.example.novav2.profile.ProfileRepository
+import com.example.novav2.state.DepartureUnknownStore
 import com.example.novav2.state.ReminderSync
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
@@ -105,6 +106,7 @@ object LocalData {
         }
         NoteAudioStore.deleteAll(app)
         ProfileRepository.clear(app)
+        DepartureUnknownStore.clear(app)
         ConsolidationWorker.cancel(app)
         withContext(Dispatchers.Main) { KnowledgeRepository.clear() }
         app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_USER_ID).apply()

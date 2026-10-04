@@ -90,6 +90,9 @@ object NovaApiClient {
              * present even when [speech] is empty (an ambient check that isn't urgent yet, but now
              * knows exactly when it will be). See [com.example.novav2.state.DepartureAlarmScheduler]. */
             val scheduledDeparture: ScheduledDeparture?,
+            /** Set instead when navigation_departure_time ran but had no travel time to give -
+             * see [com.example.novav2.state.DepartureUnknownNotice]. */
+            val departureUnknown: DepartureUnknown? = null,
             /** set_reminder Actions this turn - stored and scheduled via
              * [com.example.novav2.state.TurnActionApplier], no confirmation needed. */
             val reminderActions: List<ReminderAction> = emptyList(),
@@ -137,6 +140,17 @@ object NovaApiClient {
          * Same null condition as [minutesUntilStart]. Falls back to [destination] in the
          * notification text when absent (see AmbientCheckRunner.kt's leaveSoonText). */
         val eventTitle: String?,
+    )
+
+    /** Mirrors EventOut.departure_unknown - {destination, event_title, minutes_until_start,
+     * reason}. [minutesUntilStart] and [eventTitle] are null for a destination with no calendar
+     * anchor, the same as on [ScheduledDeparture]. */
+    data class DepartureUnknown(
+        val destination: String?,
+        val eventTitle: String?,
+        val minutesUntilStart: Double?,
+        /** The server's short reason, e.g. "no location from the phone" or "maps unavailable". */
+        val reason: String?,
     )
 
     /**
@@ -753,6 +767,15 @@ object NovaApiClient {
                         minutesUntilStart = it.optDouble("minutes_until_start")
                             .takeIf { v -> !v.isNaN() },
                         eventTitle = it.optString("event_title").takeIf { t -> t.isNotBlank() },
+                    )
+                },
+                departureUnknown = json.optJSONObject("departure_unknown")?.let {
+                    DepartureUnknown(
+                        destination = it.optString("destination").takeIf { d -> d.isNotBlank() },
+                        eventTitle = it.optString("event_title").takeIf { t -> t.isNotBlank() },
+                        minutesUntilStart = it.optDouble("minutes_until_start")
+                            .takeIf { v -> !v.isNaN() },
+                        reason = it.optString("reason").takeIf { r -> r.isNotBlank() },
                     )
                 },
                 reminderActions = parseReminderActions(json.optJSONArray("actions")),

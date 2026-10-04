@@ -477,6 +477,14 @@ class TurnContext:
     # itself from these fields instead of trusting the model to phrase it.
     scheduled_departure: dict[str, Any] | None = None
 
+    # Set instead when navigation_departure_time ran but could not measure a
+    # travel time (no location, maps unreachable, no route) - {destination,
+    # event_title, minutes_until_start, reason}. Android turns this into a
+    # fixed "couldn't work out when to leave" notification on an ambient check,
+    # so a reminder that can't be worked out is said out loud instead of just
+    # never arriving. Cleared by a later call in the same turn that succeeds.
+    departure_unknown: dict[str, Any] | None = None
+
     # The reminder ids the model has actually been shown this turn - the
     # user_state.reminders window plus any get_reminders result. None when the
     # phone sent no window at all (an older client), which turns the check in
@@ -686,7 +694,7 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
             # So a tool that needs to interpret a user-relative clock string (e.g.
             # navigation_departure_time's arrival_time) can convert it against the
             # user's own wall clock instead of the server process's - see
-            # navigation.py's _query_google_maps/_estimate_without_api.
+            # navigation.py's _query_google_maps.
             tool_input = {**tool_input, "utc_offset_minutes": ctx.utc_offset_minutes}
         if name == "memory" and ctx.episode_id and "episode_id" not in tool_input:
             # A durable "remember..." is filed straight into Persona, and the
@@ -840,6 +848,9 @@ class IntentResult(BaseModel):
     # schedule a precise alarm even on a turn where speech stayed empty (an
     # ambient check that isn't urgent yet, but now knows exactly when it will be).
     scheduled_departure: dict[str, Any] | None = None
+
+    # See TurnContext.departure_unknown.
+    departure_unknown: dict[str, Any] | None = None
 
     # Notes whose words this turn holds without an Action naming them - see
     # TurnContext.from_notes. Written to the episode (main._close_episode), not
@@ -1630,6 +1641,17 @@ def _run_loop(
                         "minutes_until_start": tool_input.get("minutes_until_start"),
                         "event_title": tool_input.get("event_title"),
                     }
+                    ctx.departure_unknown = None
+                elif (name == "navigation_departure_time"
+                        and isinstance(result, dict)
+                        and result.get("travel_unknown")
+                        and ctx.scheduled_departure is None):
+                    ctx.departure_unknown = {
+                        "destination": result.get("destination"),
+                        "event_title": tool_input.get("event_title"),
+                        "minutes_until_start": tool_input.get("minutes_until_start"),
+                        "reason": result.get("reason"),
+                    }
                 if isinstance(result, dict) and result.get("spoken"):
                     tool_spoken = str(result["spoken"])
                 tool_results.append(_tool_message(call["id"], result))
@@ -1701,7 +1723,7 @@ def _run_loop(
                 event_id=event_id, speech=speech, actions=ctx.for_wire(),
                 episode_id=ctx.episode_id, confirmation=confirmation,
                 scheduled_departure=ctx.scheduled_departure,
-                note_ids=ctx.from_notes,
+                departure_unknown=ctx.departure_unknown, note_ids=ctx.from_notes,
             )
 
         # unexpected finish_reason (length, content_filter, ...)
@@ -1715,5 +1737,5 @@ def _run_loop(
     return IntentResult(
         event_id=event_id, speech=speech, actions=ctx.for_wire(),
         episode_id=ctx.episode_id, scheduled_departure=ctx.scheduled_departure,
-        note_ids=ctx.from_notes,
+        departure_unknown=ctx.departure_unknown, note_ids=ctx.from_notes,
     )

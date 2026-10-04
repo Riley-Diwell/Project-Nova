@@ -22,13 +22,12 @@ INPUT
 
 API SETUP
 Needs google_maps_api_key in .env (same key as get_current_address's
-reverse-geocode call). Without it, the tool answers from a small table of
-hardcoded Canberra estimates so the demo still works - and for anywhere not in
-that table it says it does not know, rather than inventing a duration. There is no
-default travel time anywhere in this file, on purpose: see _FALLBACK_ESTIMATES.
+reverse-geocode call). Without it, or when the Directions call fails, the tool
+says it can't work out the travel time (see _travel_unknown) rather than
+inventing one. There is no travel time anywhere in this file that Directions
+didn't measure, on purpose.
 
-DISTANCE OVERRIDES (real Directions results only - the offline estimate table
-has no coordinates to measure either of these against)
+DISTANCE OVERRIDES
   - Short enough to walk (see WALKING_OVERRIDE_METERS) re-queries Directions
     with mode=walking regardless of what was actually asked for - waiting for a
     bus or finding parking costs more time than just walking it.
@@ -38,10 +37,10 @@ has no coordinates to measure either of these against)
 THE ERROR TERM
 This is the tool the closed loop was designed around, because it is the one with
 a real deadline: a lecture at ten and a twenty-minute drive means there is a last
-moment to leave, and how close the user is to that moment is a number. See
-error() - it deliberately uses the offline estimate table rather than the
-Directions API, because deciding whether to speak must not cost a network round
-trip on every event.
+moment to leave. error() can't measure that moment without a network round trip
+it must not make on every event, so it measures the next best thing: how soon a
+commitment with a place starts. The Directions call it authorises is what
+measures the journey itself.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -95,30 +94,21 @@ def _user_local_clock_to_utc(local_wall_clock: datetime, utc_offset_minutes: int
     _user_local_now's result), returns the real UTC instant it names."""
     return local_wall_clock - timedelta(minutes=utc_offset_minutes)
 
-# Rough Canberra-specific fallback estimates, used when MAPS_API_KEY is unset
-# or the Directions API call fails.
-_FALLBACK_ESTIMATES = {
-    "anu": 20, "university": 20,
-    "city": 15, "civic": 15, "canberra centre": 15,
-    "airport": 30, "queanbeyan": 25,
-}
-
 # ANU's timetable software spells a class location "<room(s)>_<Building Name>
 # Bldg <number>" (e.g. "Lab 1.08 and Lab 1.09_Birch Bldg 35") - it never says
-# "ANU" or "university" anywhere in the string, so the substring table above
-# never matches a class location and error() below would stay open-loop for
-# every single class regardless of how close it is. This is the one shape
-# worth recognising by itself rather than by name, since a new building next
-# semester is otherwise a new row here every time.
+# "ANU" or "university" anywhere in the string. See _clean_campus_location.
 _ANU_TIMETABLE_PATTERN = re.compile(
     r'(?:^|_)\s*(?P<building>[^_]*?\b(?:Bldg|Building)\.?\s*\d+\w*)\s*$',
     re.IGNORECASE,
 )
 
-# How much slack has to be left before leaving stops being a live concern. Above
-# this the error term is zero: half an hour of spare time is not a problem NOVA
-# should be volunteering an opinion about, however proactive its dial is.
-SLACK_HORIZON_MINUTES = 30
+# error()'s ramp, in minutes until the next located commitment starts. At or
+# beyond CHECK_FROM the term is zero; it rises linearly to 1 at URGENT_BY. The
+# trip itself is unmeasured at this point, so these are not slack - they are
+# how early a real Directions check is worth spending, which has to be early
+# enough that most trips can still be left for on time.
+CHECK_FROM_MINUTES = 60
+URGENT_BY_MINUTES = 30
 
 # Below this, walking beats waiting for a bus or finding parking, whatever mode
 # was actually asked for - roughly a 15-minute walk at an average pace. Applied
@@ -210,66 +200,39 @@ class NavigationTool(BaseTool):
         )
 
     def error(self, observation: Any) -> Optional[float]:
-        """How little slack is left before the user has to leave, in [0, 1].
+        """How soon the next commitment with a place starts, in [0, 1].
 
-        The measurement: the next thing the user is committed to has a place and
-        a start time, getting there takes a while, so there is a latest departure
-        that still meets it. Slack is the gap between now and that departure.
+            error = 0    when minutes_until_start >= CHECK_FROM_MINUTES
+                    1    when minutes_until_start <= URGENT_BY_MINUTES
+                    linear between
 
-            slack = minutes_until_start - travel_minutes
-            error = 0                       when slack >= SLACK_HORIZON_MINUTES
-                    1 - slack / horizon     as slack closes
-                    1                       when slack <= 0 (already too late)
+        What this measures is an unmeasured journey coming up, not slack. Slack
+        needs a travel time, and the only honest source of one is the Directions
+        API - which this must not call, because the error term runs on every
+        event and a network call here would put a Maps round trip in front of
+        every one. So it says "somewhere to be soon, go and measure it", and the
+        Action the model resolves afterwards makes the real Directions call. If
+        that call can't produce a travel time, the tool says so (_travel_unknown)
+        and the phone tells the user, rather than anything here guessing one.
 
-        Which gives the property the whole overhaul is for: the term is zero when
-        nothing is diverging, rises in proportion as the deadline approaches, and
-        saturates once the user is already late - past that point there is no
-        worse news to deliver, so a larger number would only distort the gain.
+        There used to be a table of Canberra travel estimates here, which made
+        "when do I leave" work only for places whose name matched a row - in
+        practice, uni - and stay silent everywhere else.
 
         Zero when there is nowhere to be. A commitment without a location is a
         commitment with no journey to be late for, and an empty horizon is the
         case NOVA should be silent in.
-
-        Travel time comes from this module's offline estimate table, never from
-        the Directions API. The error term runs on every event, including ambient
-        ones, so a network call here would put a Maps round trip in front of every
-        notification. The estimate is coarse; it only has to be good enough to
-        rank "comfortable" against "leave now", and the Action the model resolves
-        afterwards is what gets the real routing.
-
-        **None when the destination has no estimate**, which declares navigation
-        open-loop for this turn. There is no default travel time, so slack is not
-        computable, so there is no error - and the two ways of covering that up are
-        both worse:
-
-          returning 0.0    claims the journey was measured and found comfortable.
-                           It would read in the log as "nothing was diverging" when
-                           the truth is "nobody knows", and those need different
-                           fixes.
-          assuming 25 min  invents the divergence. A place two hours away would
-                           look fine until twenty-five minutes before, and NOVA
-                           would then act with total confidence on a number with
-                           nothing behind it.
-
-        Saying nothing is the honest option, and its cost is visible: NOVA will not
-        volunteer a departure time for a destination it has never measured. The fix
-        is a real travel estimate available off the request path, not a constant.
         """
         commitment = getattr(observation, "next_commitment", None)
         if commitment is None or not getattr(commitment, "location", None):
             return 0.0
 
-        travel = _estimated_travel_minutes(commitment.location)
-        if travel is None:
-            return None
-
-        slack = commitment.minutes_until_start - travel
-
-        if slack <= 0:
+        minutes = commitment.minutes_until_start
+        if minutes <= URGENT_BY_MINUTES:
             return 1.0
-        if slack >= SLACK_HORIZON_MINUTES:
+        if minutes >= CHECK_FROM_MINUTES:
             return 0.0
-        return round(1.0 - slack / SLACK_HORIZON_MINUTES, 4)
+        return round((CHECK_FROM_MINUTES - minutes) / (CHECK_FROM_MINUTES - URGENT_BY_MINUTES), 4)
 
     def _execute(self, tool_input: dict[str, Any]) -> Any:
         destination = tool_input.get("destination", "")
@@ -296,24 +259,20 @@ class NavigationTool(BaseTool):
         destination = _clean_campus_location(destination)
 
         if not origin:
-            # Covers the offline estimate table too: its numbers assume the user
-            # is somewhere in Canberra, which is exactly what isn't known here.
-            return {
-                "success": False,
-                "destination": destination,
-                "spoken": (
-                    f"I don't have your location right now, so I can't work out "
-                    f"how long it takes to get to {destination} from where you are."
-                ),
-                "reason": "no location from the phone",
-                "needs_location": True,
-            }
-
-        if MAPS_API_KEY:
-            return _query_google_maps(
-                origin, destination, arrival_time, mode, minutes_until_start, utc_offset_minutes
+            result = _travel_unknown(
+                destination,
+                f"I don't have your location right now, so I can't work out "
+                f"how long it takes to get to {destination} from where you are.",
+                "no location from the phone",
             )
-        return _estimate_without_api(destination, arrival_time, minutes_until_start, utc_offset_minutes)
+            result["needs_location"] = True
+            return result
+
+        if not MAPS_API_KEY:
+            return _maps_unavailable(destination)
+        return _query_google_maps(
+            origin, destination, arrival_time, mode, minutes_until_start, utc_offset_minutes
+        )
 
 
 def _leave_in_minutes(minutes_until_start: Any, travel_minutes: float) -> float | None:
@@ -435,40 +394,47 @@ def _query_google_maps(origin: str, destination: str, arrival_time: str | None,
             print(f"[NavigationTool] Directions retry against Places match "
                   f"{matched_address!r} status={data2.get('status')!r}")
 
-        return {
-            "success": False,
-            "spoken": f"I couldn't find a route to '{destination}' — could you confirm the address?",
-            "needs_clarification": True,
-            "api_used": True,
-        }
+        result = _travel_unknown(
+            destination,
+            f"I couldn't find a route to '{destination}' — could you confirm the address?",
+            "no route found",
+        )
+        result["needs_clarification"] = True
+        result["api_used"] = True
+        return result
     except Exception as e:
         print(f"[NavigationTool] Maps API failed: {e}")
 
-    return _estimate_without_api(destination, arrival_time, minutes_until_start, utc_offset_minutes)
+    return _maps_unavailable(destination)
 
 
-def _estimated_travel_minutes(destination: str) -> int | None:
-    """How long getting to `destination` probably takes, without asking anyone.
+def _travel_unknown(destination: str, spoken: str, reason: str) -> dict:
+    """The tool's answer when there is no measured travel time to give.
 
-    Substring match against the estimate table, longest key first so "canberra
-    centre" is not beaten to it by "city". Coarse by construction: this is the
-    number error() ranks urgency with, and the real routing happens later in the
-    Action the model resolves.
-
-    **None when the destination matches nothing.** There is deliberately no
-    default - see the comment on _FALLBACK_ESTIMATES. Callers have to decide what
-    to do with not knowing, and both of them say so rather than covering it up.
+    `travel_unknown` is what intent_surface.py looks for to tell the phone,
+    which notifies the user on an ambient check instead of staying silent - a
+    "you need to leave" that silently never comes is worse than being told to
+    check the route yourself.
     """
-    where = destination.lower()
-    for key in sorted(_FALLBACK_ESTIMATES, key=len, reverse=True):
-        if key in where:
-            return _FALLBACK_ESTIMATES[key]
-    if _ANU_TIMETABLE_PATTERN.search(destination):
-        # Same flat estimate as the "anu"/"university" rows above - see
-        # _ANU_TIMETABLE_PATTERN's comment for why a class location never
-        # matches those by name despite being on the same campus.
-        return _FALLBACK_ESTIMATES["anu"]
-    return None
+    return {
+        "success": False,
+        "destination": destination,
+        "spoken": spoken,
+        "reason": reason,
+        "travel_unknown": True,
+    }
+
+
+def _maps_unavailable(destination: str) -> dict:
+    """No API key, or the Directions call itself failed."""
+    result = _travel_unknown(
+        destination,
+        f"I can't work out how long it takes to get to {destination} right now - "
+        f"I can't reach maps.",
+        "maps unavailable",
+    )
+    result["api_used"] = False
+    return result
 
 
 def _clean_campus_location(destination: str) -> str:
@@ -573,56 +539,6 @@ def _find_place_from_text(text: str) -> tuple[str, str] | None:
     except Exception as e:
         print(f"[NavigationTool] Find Place From Text failed: {e}")
     return None
-
-
-def _estimate_without_api(destination: str, arrival_time: str | None,
-                           minutes_until_start: Any = None,
-                           utc_offset_minutes: int = 0) -> dict:
-    """Rough fallback when the Maps API isn't available or the call failed.
-
-    Only answers for destinations there is actually an estimate for. For anything
-    else it says it does not know, because the alternative is a spoken sentence
-    that sounds exactly as confident as a real answer and is not one.
-    """
-    travel_mins = _estimated_travel_minutes(destination)
-
-    if travel_mins is None:
-        return {
-            "success": False,
-            "destination": destination,
-            "spoken": (
-                f"I don't know how long it takes to get to {destination} - I can't "
-                f"reach maps at the moment."
-            ),
-            "needs_clarification": True,
-            "reason": "no travel estimate available offline",
-            "api_used": False,
-        }
-
-    spoken = f"It usually takes about {travel_mins} minutes to get to {destination}"
-    if arrival_time:
-        try:
-            h, m = _parse_time(arrival_time)
-            arr = _user_local_now(utc_offset_minutes).replace(hour=h, minute=m, second=0, microsecond=0)
-            depart = arr - timedelta(minutes=travel_mins + 5)
-            spoken = (
-                f"Leave by {depart.strftime('%H:%M')} to reach "
-                f"{destination} by {arrival_time} — about {travel_mins} minutes away"
-            )
-        except Exception as e:
-            print(f"[NavigationTool] couldn't parse arrival_time {arrival_time!r}: {e}")
-
-    result = {
-        "success": True,
-        "duration": f"{travel_mins} minutes (estimate)",
-        "destination": destination,
-        "spoken": spoken,
-        "api_used": False,
-    }
-    leave_in = _leave_in_minutes(minutes_until_start, travel_mins)
-    if leave_in is not None:
-        result["leave_in_minutes"] = leave_in
-    return result
 
 
 def _parse_time(time_str: str) -> tuple[int, int]:

@@ -70,7 +70,9 @@ object AmbientCheckRunner {
     private suspend fun handleResult(
         context: Context, result: NovaApiClient.EventResult.Final
     ): AmbientCheckResult {
-        val departure = result.scheduledDeparture ?: return AmbientCheckResult.QUIET
+        val departure = result.scheduledDeparture
+            ?: return result.departureUnknown?.let { notifyUnknown(context, it) }
+                ?: AmbientCheckResult.QUIET
         DepartureAlarmScheduler.schedule(context, departure)
 
         val text = leaveSoonText(departure) ?: return AmbientCheckResult.QUIET
@@ -93,6 +95,24 @@ object AmbientCheckRunner {
                 }
             }
         }
+        return if (delivered) AmbientCheckResult.SPOKE else AmbientCheckResult.BLOCKED
+    }
+
+    /**
+     * Tells the user a leave-by couldn't be worked out, once per event - see
+     * [DepartureUnknownNotice]. Marked as told even when the notification was blocked, so a
+     * missing permission doesn't turn into a buzz every ten minutes.
+     */
+    private fun notifyUnknown(
+        context: Context, unknown: NovaApiClient.DepartureUnknown
+    ): AmbientCheckResult {
+        val event = DepartureUnknownNotice.eventOf(unknown, System.currentTimeMillis())
+            ?: return AmbientCheckResult.QUIET
+        if (!DepartureUnknownNotice.isNew(event, DepartureUnknownStore.lastNotified(context))) {
+            return AmbientCheckResult.QUIET
+        }
+        DepartureUnknownStore.save(context, event)
+        val delivered = AmbientNotifier.notify(context, DepartureUnknownNotice.text(event.subject, unknown.reason))
         return if (delivered) AmbientCheckResult.SPOKE else AmbientCheckResult.BLOCKED
     }
 
