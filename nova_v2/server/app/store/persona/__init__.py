@@ -450,7 +450,8 @@ def knowledge_graph(
 # Bump when build_graph's output changes for the same facts (a new node field, a
 # different edge rule), so phones holding a graph from the old code fetch again.
 # 2: stated_at on facts, and meaning groups (cluster nodes) when asked for.
-GRAPH_FORMAT = 2
+# 3: created_at and edits (the History view) on facts.
+GRAPH_FORMAT = 3
 
 
 def graph_etag(

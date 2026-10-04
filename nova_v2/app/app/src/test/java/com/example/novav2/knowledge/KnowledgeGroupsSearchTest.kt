@@ -104,10 +104,16 @@ class KnowledgeGroupsSearchTest {
         ))
         assertNull(old.nodes.single().clusterId)
         assertNull(old.nodes.single().statedAt)
+        assertNull(old.nodes.single().createdAt)
+        assertTrue(old.nodes.single().edits.isEmpty())
 
         val new = KnowledgeGraph(nodes = listOf(
             GraphNode("cluster:a", "Food", "cluster", size = 3),
-            fact("f", "Likes pizza", cluster = "cluster:a").copy(statedAt = "2026-09-03T10:00:00+00:00"),
+            fact("f", "Likes pizza", cluster = "cluster:a").copy(
+                statedAt = "2026-09-03T10:00:00+00:00",
+                createdAt = "2026-09-01T09:00:00+00:00",
+                edits = listOf(NovaApiClient.FactEdit("2026-09-03T10:00:00+00:00", "Likes pasta", "Likes pizza")),
+            ),
         ))
         val back = NovaApiClient.parseKnowledgeGraph(with(NovaApiClient) { new.toJson() })
         assertEquals(new, back)

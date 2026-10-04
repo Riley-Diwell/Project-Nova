@@ -82,13 +82,22 @@ class MemoryTool(BaseTool):
                 "The user's personal notebook - their notes, including ones "
                 "they asked Nova to remember and voice notes they dictated "
                 "on their device. Two actions. "
-                "Use action 'save' whenever the user asks you to remember or "
-                "keep track of something ('remember I parked on level 3', "
-                "'remember I love a long black with sugar'), and put what they "
-                "want remembered in `text`, written as a statement about them. "
+                "Use action 'save' whenever the user asks you to remember "
+                "something about themselves or their situation ('remember I "
+                "parked on level 3', 'remember I love a long black with "
+                "sugar'), and put what they want remembered in `text`, "
+                "written as a statement about them. Never for something they "
+                "need to do later ('remember to email Dr Chen', 'don't let me "
+                "forget the form') - that is set_reminder. "
                 "Something durable about who they are (give it a `category`) "
                 "is filed into what Nova knows about them, not the Notes tab; "
                 "only situational things are kept as a short note. "
+                "When they ask you to write or make a note for them - notes "
+                "for a class, a summary, a list, what they need to know - "
+                "save the note itself, to be read later on a phone: give it a "
+                "short `title`, and lay `text` out with '## ' headings, '- ' "
+                "bullets, one point per line and a blank line between "
+                "sections. Never one long paragraph. "
                 "Use action 'recall' whenever they ask what they noted, "
                 "recorded or captured, or ask about something they may have "
                 "told you earlier ('where did I park?', 'what did I note about "
@@ -129,7 +138,18 @@ class MemoryTool(BaseTool):
                         "description": (
                             "Required for 'save'. What to remember, phrased as a "
                             "standalone statement that will still make sense weeks "
-                            "later, e.g. 'Parked on level 3 of the Kambri car park'."
+                            "later, e.g. 'Parked on level 3 of the Kambri car park'. "
+                            "For a note you write for them, the whole note, laid out "
+                            "with '## ' headings and '- ' bullets."
+                        ),
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": (
+                            "Optional for 'save'. Only for a note you write for them "
+                            "(prep for a class, a summary, a list): its heading, at "
+                            "most 8 words, e.g. 'DSP week 10 workshop prep'. Omit "
+                            "for a one-line 'remember ...'."
                         ),
                     },
                     "tags": {
@@ -216,6 +236,11 @@ class MemoryTool(BaseTool):
                 tags=[str(t) for t in (tool_input.get("tags") or [])],
                 category=[str(c) for c in (tool_input.get("category") or [])],
                 episode_id=str(episode_id) if episode_id else None,
+                title=str(tool_input.get("title") or "").strip() or None,
+                # Set by intent_surface._save_verbatim_note, never offered to
+                # the model: these are the user's words as speech-to-text
+                # heard them, so they get read back (notes_pipeline/interpret.py).
+                heard=tool_input.get("heard") is True,
             )
 
         if action == "recall":
@@ -237,13 +262,16 @@ class MemoryTool(BaseTool):
 
 def _save(
     user_id: UUID, text: str, tags: list[str], category: list[str], episode_id: Optional[str] = None,
+    title: Optional[str] = None, heard: bool = False,
 ) -> dict[str, Any]:
     """A durable thing (filed under a category) becomes a belief; anything
-    situational becomes a short note. Never both - see the module docstring."""
+    situational becomes a short note. Never both - see the module docstring.
+    A note Nova wrote (it has a title) or one the user said word for word is
+    always a note, whatever category came with it."""
     if not text:
         return {"success": False, "spoken": "I'm not sure what you'd like me to remember."}
 
-    if category:
+    if category and not title and not heard:
         result = _save_fact(user_id, text, tags, category, episode_id)
         if result is not None:
             return _saved_fact(text, result)
@@ -251,7 +279,7 @@ def _save(
         # user asked for. They can still file it from the note later.
         print("[memory tool] persona unreachable - keeping the durable save as a note")
 
-    return _save_note(user_id, text, tags)
+    return _save_note(user_id, text, tags, title=title, heard=heard)
 
 
 def _save_fact(
@@ -337,8 +365,11 @@ def _reconcile_later(user_id: UUID) -> None:
     threading.Thread(target=run, name="persona-reconcile", daemon=True).start()
 
 
-def _save_note(user_id: UUID, text: str, tags: list[str]) -> dict[str, Any]:
-    """Keep a situational thing as a short note in the Notes tab."""
+def _save_note(
+    user_id: UUID, text: str, tags: list[str], title: Optional[str] = None, heard: bool = False,
+) -> dict[str, Any]:
+    """Keep it as a note in the Notes tab: a situational thing, a note Nova
+    wrote for the user (with a title), or the user's own words as heard."""
     # Non-fatal, as everywhere a store is touched: an unreachable backend must
     # not take the whole turn down - but unlike a background write, the user
     # asked for this, so say it didn't land.
@@ -347,7 +378,11 @@ def _save_note(user_id: UUID, text: str, tags: list[str]) -> dict[str, Any]:
             id=notes.new_note_id(),
             source="assistant",
             kind="quick",
+            title=title,
             text=text,
+            # An stt record marks the words as speech-to-text's, which is what
+            # gets a note read back. The engine is the phone's; unknown here.
+            stt=notes.NoteStt() if heard else None,
             tags=tags,
             summarise="never",
         ))
@@ -356,13 +391,30 @@ def _save_note(user_id: UUID, text: str, tags: list[str]) -> dict[str, Any]:
         return {"success": False, "spoken": "I couldn't save that just now - my notes aren't reachable."}
 
     print(f"[memory tool] saved note {note.id}: {text!r}")
+    _process(note)
     return {
         "success": True,
         "note_id": note.id,
         "note": text,
         "indexed": False,
-        "spoken": "I've saved that as a note.",
+        # Short and distinct from a memory save ("Got it, I'll remember
+        # that"), so the user can hear which of the two just happened.
+        "spoken": "Noted.",
     }
+
+
+def _process(note: notes.Note) -> None:
+    """What POST /notes does for a note the phone sends: chunk a long one for
+    search, and read a spoken one back in the background. The note is saved
+    either way - processing is an enhancement, and never fails the save."""
+    processor = notes.get_processor()
+    try:
+        if hasattr(processor, "summarise"):
+            processor.after_create(note, summarise=False)
+        else:
+            processor.after_create(note)
+    except Exception as e:
+        print(f"[memory tool] processing skipped for {note.id}: {e}")
 
 
 # --- recall ---------------------------------------------------------------------
@@ -451,19 +503,26 @@ def _unreachable() -> dict[str, Any]:
 
 def _recalled(hits: list[dict[str, Any]], ordered_by_relevance: bool) -> dict[str, Any]:
     """One result shape however the hits were found. Each hit carries `tier`
-    so the model can tell a belief from a note."""
+    so the model can tell a belief from a note - and the spoken line keeps them
+    apart too, because something Nova knows about the user is not a note."""
     def label(h: dict[str, Any]) -> str:
         return h.get("title") or h.get("text") or h.get("snippet") or ""
 
-    if not hits:
-        spoken = "I haven't got any notes that match."
-    elif len(hits) == 1:
-        spoken = f"One note: {label(hits[0])}"
-    else:
+    def first_three(some: list[dict[str, Any]]) -> str:
+        line = "; ".join(label(h) for h in some[:3])
+        return line + (f" and {len(some) - 3} more" if len(some) > 3 else "")
+
+    known = [h for h in hits if h.get("tier") == "known_fact"]
+    noted = [h for h in hits if h.get("tier") != "known_fact"]
+    parts = []
+    if known:
+        parts.append(f"What I know: {first_three(known)}")
+    if len(noted) == 1:
+        parts.append(f"One note: {label(noted[0])}")
+    elif noted:
         ordering = "most relevant first" if ordered_by_relevance else "most recent first"
-        spoken = f"{len(hits)} notes, {ordering}: " + "; ".join(label(h) for h in hits[:3])
-        if len(hits) > 3:
-            spoken += f" and {len(hits) - 3} more"
+        parts.append(f"{len(noted)} notes, {ordering}: {first_three(noted)}")
+    spoken = ". ".join(parts) if parts else "I haven't got anything on that."
 
     return {
         "success": True,

@@ -25,14 +25,15 @@
 
 // events characteristic (device -> phone, Notify): 1 type byte + payload.
 enum NovaEventType : uint8_t {
-  EVENT_SINGLE_CLICK = 0x01, // no payload
-  EVENT_DOUBLE_CLICK = 0x02, // no payload
-  EVENT_MULTI_CLICK  = 0x03, // payload: 1 byte click count
-  EVENT_BATTERY      = 0x04, // payload: 1 byte percent 0-100 - NOT SENT YET,
-                              // this board revision has no confirmed battery-
-                              // sense circuit to read from. Type reserved so
-                              // the Android side can already handle it.
+  // 0x01-0x03 were single/double/multi click - replaced by EVENT_PRESS, which
+  // carries the count plus the mode it was pressed in. The phone still parses
+  // them, for firmware older than this.
+  EVENT_BATTERY      = 0x04, // payload: percent 0-100, millivolts (2 bytes LE)
+                             // - see the battery section below
   EVENT_HEARTBEAT    = 0x05, // no payload
+  EVENT_PRESS        = 0x06, // payload: count, mode, token - mode/token are
+                             // whatever COMMAND_SET_MODE last set, as of the
+                             // first press of the sequence
 };
 
 // commands characteristic (phone -> device, Write no response): 1 type byte + payload.
@@ -40,7 +41,35 @@ enum NovaCommandType : uint8_t {
   COMMAND_HAPTIC_PULSE = 0x01, // payload: 1 byte duration, x10ms
   COMMAND_LED_PULSE    = 0x02, // payload: 1 byte duration, x10ms
   COMMAND_PING         = 0x03, // no payload - device replies with EVENT_HEARTBEAT
+  COMMAND_SET_LAYER    = 0x04, // payload: id, priority, red, green, pattern,
+                               // period x10ms (2 bytes LE), on-time x10ms,
+                               // timeout seconds (2 bytes LE, 0 = until cleared)
+  COMMAND_CLEAR_LAYER  = 0x05, // payload: 1 byte layer id, LAYER_ID_ALL clears every layer
+  COMMAND_PLAY_HAPTIC  = 0x06, // payload: 1-6 bytes, alternating on/off step
+                               // durations x10ms, starting with on
+  COMMAND_SET_MODE     = 0x07, // payload: mode, token, timeout seconds
+                               // (2 bytes LE, 0 = until changed)
 };
+
+// The phone's interaction mode (COMMAND_SET_MODE). The phone decides what a
+// press means; the device only echoes the mode and token back with each press,
+// so a press made just as the phone moved on is still read against the mode
+// the user saw. Reverts to MODE_IDLE on timeout and on disconnect.
+const uint8_t MODE_IDLE = 0x00;
+uint8_t deviceMode = MODE_IDLE;
+uint8_t deviceModeToken = 0;
+uint32_t deviceModeSetAt = 0;
+uint32_t deviceModeTimeoutMs = 0; // 0 = until changed
+
+// LED layer patterns (COMMAND_SET_LAYER byte 5).
+enum LedPattern : uint8_t {
+  PATTERN_SOLID   = 0x00, // period/on-time ignored
+  PATTERN_BLINK   = 0x01, // on for on-time at the start of every period
+  PATTERN_BREATHE = 0x02, // fades up and down once per period, on-time ignored
+};
+const uint8_t LAYER_ID_ALL = 0xFF;
+// The device's own feedback layer - see showNotConnected. Never sent by the phone.
+const uint8_t LOCAL_LAYER_ID = 0xFE;
 
 // audio characteristic (device -> phone, Notify) envelope flags - see
 // docs/ble-protocol.md. Byte 0 of every notification is a wrapping sequence
@@ -48,12 +77,13 @@ enum NovaCommandType : uint8_t {
 // (empty for the dedicated end-of-utterance notification below).
 const uint8_t AUDIO_FLAG_START     = 0x01;
 const uint8_t AUDIO_FLAG_END       = 0x02;
+const uint8_t AUDIO_FLAG_NOTE      = 0x04; // on START: a dictated note (tap, then hold)
 
 // Every audio block was hex-dumped to Serial inside the ~32 ms capture loop,
 // for copy-pasting into firmware/audio_playback_test.py. That is ~520 chars
 // per block at 115200 baud - enough to stall the loop and drop audio.
 // Set to 1 only for that bench test.
-#define AUDIO_DEBUG_HEX 0
+#define AUDIO_DEBUG_HEX 1
 
 // How long setupBLE() waits for a USB serial monitor before carrying on. It
 // used to wait forever, which blocks boot on battery with no USB host.
@@ -74,8 +104,6 @@ uint32_t lastHeartbeatSent = 0;
 const uint32_t CENTRAL_STALE_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3;
 uint32_t lastCentralActivityMs = 0;
 
-#include "BLESerial.h"
-#include "Linereader.h"
 #include <Adafruit_Sensor.h>
 #include <Adafruit_HMC5883_U.h>
 
@@ -88,14 +116,24 @@ int prevDebouncedButtonStatus = 0;
 int debouncedButtonStatus = 0;
 const int debounceDelay = 10; // milliseconds
 uint32_t lastDebounceTime = 0; // milliseconds
-int pressedAt = 0; // when was the button pressed?
 
-const int audioStartTime = 500; // start recording audio after 1000 milliseconds
+// Gesture state machine over the debounced button (see checkButton):
+//   BUTTON_UP   nothing in progress
+//   BUTTON_DOWN pressed, not yet long enough to be a hold
+//   BUTTON_GAP  released after a press - another press within multiPressGapMs
+//               adds to the count, otherwise the count is sent
+//   BUTTON_HOLD held past holdMs - recording, or refused while disconnected
+enum ButtonState : uint8_t { BUTTON_UP, BUTTON_DOWN, BUTTON_GAP, BUTTON_HOLD };
+ButtonState buttonState = BUTTON_UP;
+uint32_t buttonChangedAt = 0;  // when buttonState was entered
+uint8_t pressCount = 0;        // completed presses in the current sequence
+uint8_t pressMode = MODE_IDLE; // deviceMode/token as of the sequence's first press
+uint8_t pressToken = 0;
+
+const uint32_t holdMs = 500;           // held this long = a hold, not a press
+const uint32_t multiPressGapMs = 500;  // max gap between presses of one sequence
 int isRecording = 0; // 0 for not recording, 1 for recording audio
-
-const int doubleClickDelay = 500; // max time between button press for double click
-int firstClickTime = 0;
-int clickCount =0;
+bool recordingIsNote = false; // tap-then-hold: sets AUDIO_FLAG_NOTE on START
 
 // --- microphone
 #define I2S_SCK D8
@@ -147,17 +185,46 @@ static unsigned int haptic_level = 0;
 const int LED_PWM_FREQ = 5000;
 const int LED_PWM_BITS = 8;
 
-// Per-pin pulse state, so the led2 confirmation flash and a haptic pulse
-// (driven by the phone over BLE) can run independently instead of sharing
-// one global timer like the original single-pulse implementation did.
+// A timed green flash on the RG LED - the "recording stopped" confirmation,
+// and what the phone's COMMAND_LED_PULSE plays. updateLed() shows it over the
+// compass colour until it expires. (Haptics have their own player below.)
 struct PulseState {
   uint32_t startTime = 0;
   uint32_t durationMs = 500;
   bool active = false;
 };
 PulseState greenPulse;
-PulseState hapticPulse;
-PulseState led2Pulse;
+
+// Ambient LED layers, set by the phone (COMMAND_SET_LAYER). Each one is a
+// pattern this firmware plays on its own clock, so a pending reminder can pulse
+// for an hour without the phone sending anything. Only the highest-priority
+// active layer is shown (newest wins a tie); the rest wait underneath. All of
+// them are dropped on disconnect - the phone re-sends what still applies when
+// it reconnects. See docs/ble-protocol.md "LED layers".
+struct LedLayer {
+  bool active = false;
+  uint8_t id = 0;
+  uint8_t priority = 0;
+  uint8_t red = 0;
+  uint8_t green = 0;
+  uint8_t pattern = PATTERN_SOLID;
+  uint16_t periodMs = 1000;
+  uint16_t onMs = 100;
+  uint32_t startedAt = 0;
+  uint32_t timeoutMs = 0; // 0 = until cleared
+};
+const int MAX_LED_LAYERS = 4;
+LedLayer ledLayers[MAX_LED_LAYERS];
+
+// Commands arrive on NimBLE's host task, but the LED, haptic and layer state
+// they change is read by loop(). onWrite only copies the frame onto this queue
+// and loop() applies it, so the two tasks never touch that state at once.
+// 20 bytes covers the longest command (SET_LAYER is 11).
+struct CommandFrame {
+  uint8_t len;
+  uint8_t data[20];
+};
+QueueHandle_t commandQueue = nullptr;
 
 // Haptic patterns: alternating on/off durations in ms, starting with on. A
 // phone-commanded COMMAND_HAPTIC_PULSE is a one-step pattern through this
@@ -172,7 +239,16 @@ struct HapticPattern {
 HapticPattern haptic;
 
 // --- battery
+// The battery (V_in, after the power switch) reaches A0 through a 220k/220k
+// divider (R3/R5 on the schematic), so A0 sees half the cell voltage.
 # define battPin A0
+const uint32_t BATTERY_SAMPLE_MS = 2000;      // read A0 this often
+const uint32_t BATTERY_SEND_MS = 15000;       // report to the phone this often
+const uint32_t BATTERY_FIRST_SEND_MS = 3000;  // after connecting - gives the phone
+                                              // time to subscribe to events first
+float batteryMv = 0;            // smoothed cell voltage, 0 until the first sample
+uint32_t lastBatterySample = 0;
+volatile uint32_t nextBatterySendAt = 0; // set by onConnect, read by loop()
 
 // --- bluetooth (NimBLE)
 NimBLEServer* bleServer = nullptr;
@@ -192,6 +268,7 @@ String desiredDirection = "NE"; // debug this is just a placeholder to test, we 
 const float FULL_RED_ANGLE = 180.0;
 const uint32_t COMPASS_INTERVAL_MS = 100; // read the compass 10x per second
 uint32_t lastCompassRead = 0;
+bool compassAvailable = false; // false if mag.begin() failed - see setupCompass()
 float targetHeading = 0;    // desiredDirection converted to degrees in setup()
 float currentHeading = 0;   // latest compass heading, degrees 0-360
 float headingError = 180;   // how far off target we are, degrees 0-180
@@ -214,58 +291,48 @@ void debounceButton() {
 }
 
 void checkButton() {
+  bool pressedNow = debouncedButtonStatus == HIGH && prevDebouncedButtonStatus == LOW;
+  bool releasedNow = debouncedButtonStatus == LOW && prevDebouncedButtonStatus == HIGH;
+  uint32_t inState = millis() - buttonChangedAt;
 
- // updatePulse(led2, led2Pulse);
-
-  //updatePulse(led2);
-
-  if (debouncedButtonStatus == HIGH && prevDebouncedButtonStatus == LOW) {
-    // just pressed
-    pressedAt = millis();
-  }
-
-  // button stopped being pressed
-  else if (debouncedButtonStatus == LOW && prevDebouncedButtonStatus == HIGH) {
-    if (isRecording == 1){
-      stopRecording();
-      clickCount = 0; // if we were recording audio, we don't want this to influence future single or double clicks
-    } else {
-      if (clickCount == 0) {
-        firstClickTime = millis(); // start window on first click
-        }
-    clickCount++;
-    }
-    }
-
-  // button is held for long enough to start recording audio
-  else if (debouncedButtonStatus == HIGH) {
-    if ((millis() - pressedAt) > audioStartTime) {
-      if (isRecording == 0) { // if not recording already
-        startRecording();
+  switch (buttonState) {
+    case BUTTON_UP:
+      if (pressedNow) {
+        pressCount = 0;
+        pressMode = currentMode();
+        pressToken = deviceModeToken;
+        enterButtonState(BUTTON_DOWN);
       }
-    }
-  }
+      break;
 
-  // dispatch when double click window closes
-  if (clickCount > 0 && (millis() - firstClickTime) > doubleClickDelay) {
-  switch (clickCount) {
-    case 1: {
-      Serial.println("Single click!");
-      sendEvent(EVENT_SINGLE_CLICK, nullptr, 0);
-      break;}
-    case 2: {
-      Serial.println("Double click!");
-      sendEvent(EVENT_DOUBLE_CLICK, nullptr, 0);
-      break;}
-    default: {
-      Serial.print("Multi-click: ");
-      Serial.println(clickCount);
-      uint8_t count = (uint8_t)min(clickCount, 255);
-      sendEvent(EVENT_MULTI_CLICK, &count, 1); // previously detected but never sent
-    }
+    case BUTTON_DOWN:
+      if (releasedNow) {
+        pressCount++;
+        enterButtonState(BUTTON_GAP);
+      } else if (inState >= holdMs) {
+        // One tap before the hold makes it a note; a plain hold talks to
+        // Nova; anything else (two taps, then a hold) is read as a plain hold.
+        startHold(pressCount == 1);
+        enterButtonState(BUTTON_HOLD);
+      }
+      break;
+
+    case BUTTON_GAP:
+      if (pressedNow) {
+        enterButtonState(BUTTON_DOWN);
+      } else if (inState >= multiPressGapMs) {
+        sendPress(pressCount);
+        enterButtonState(BUTTON_UP);
+      }
+      break;
+
+    case BUTTON_HOLD:
+      if (releasedNow) {
+        stopRecording();
+        enterButtonState(BUTTON_UP);
+      }
+      break;
   }
-  clickCount = 0; // reset
-}
 }
 
 void startRecording() {
@@ -274,12 +341,66 @@ void startRecording() {
   Serial.println("Begin audio recording!");
 }
 
+void enterButtonState(ButtonState next) {
+  buttonState = next;
+  buttonChangedAt = millis();
+}
+
+// The mode the phone last set, unless its timeout has run out.
+uint8_t currentMode() {
+  if (deviceModeTimeoutMs > 0 && millis() - deviceModeSetAt > deviceModeTimeoutMs) {
+    deviceMode = MODE_IDLE;
+    deviceModeToken = 0;
+    deviceModeTimeoutMs = 0;
+  }
+  return deviceMode;
+}
+
+void sendPress(uint8_t count) {
+  Serial.printf("Press x%u (mode %u, token %u)\n", count, pressMode, pressToken);
+  if (!bleConnected) {
+    showNotConnected();
+    return;
+  }
+  uint8_t payload[] = {count, pressMode, pressToken};
+  sendEvent(EVENT_PRESS, payload, sizeof(payload));
+}
+
+void startHold(bool note) {
+  if (!bleConnected) {
+    // nowhere for the audio to go - say so instead of recording into nothing
+    showNotConnected();
+    return;
+  }
+  recordingIsNote = note;
+  isRecording = 1; // updateLed() shows solid red while this is set
+  Serial.println(note ? "Begin note recording!" : "Begin audio recording!");
+}
+
+// Two quick red blinks: "the phone isn't connected". A device-local layer, so
+// it shows over the compass and is gone in under a second.
+void showNotConnected() {
+  LedLayer flash;
+  flash.active = true;
+  flash.id = LOCAL_LAYER_ID;
+  flash.priority = 0xFF;
+  flash.red = 255;
+  flash.green = 0;
+  flash.pattern = PATTERN_BLINK;
+  flash.periodMs = 300;
+  flash.onMs = 150;
+  flash.startedAt = millis();
+  flash.timeoutMs = 600;
+  setLedLayer(flash);
+}
+
 void stopRecording() {
   if (!isRecording) return;
   isRecording = 0;
   Serial.println("Stop recording audio");
   //digitalWrite(led1, LOW);
   //startPulse(led2, led2Pulse, 500); // quick pulse
+  startGreenPulse(500); // quick confirmation flash
 }
 
 // --- microphone
@@ -371,6 +492,7 @@ class NovaServerCallbacks : public NimBLEServerCallbacks {
     bleConnected = true;
     bleConnHandle = connInfo.getConnHandle();
     lastCentralActivityMs = millis(); // starts the stale-connection countdown fresh
+    nextBatterySendAt = millis() + BATTERY_FIRST_SEND_MS;
     Serial.println("[BLE] phone connected");
     // commands/audio are ENC-gated (see docs/ble-protocol.md "Connection
     // setup"), but commands is WRITE_NR (write without response), which gets
@@ -386,6 +508,15 @@ class NovaServerCallbacks : public NimBLEServerCallbacks {
   void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connInfo, int reason) override {
     bleConnected = false;
     Serial.println("[BLE] phone disconnected — resuming advertising");
+    // Nothing is left to clear a layer once the phone is gone, so drop them
+    // all now (through the queue, like any command); the phone re-sends the
+    // ones that still apply when it reconnects.
+    CommandFrame clearAll = {2, {COMMAND_CLEAR_LAYER, LAYER_ID_ALL}};
+    CommandFrame idle = {5, {COMMAND_SET_MODE, MODE_IDLE, 0, 0, 0}};
+    if (commandQueue) {
+      xQueueSend(commandQueue, &clearAll, 0);
+      xQueueSend(commandQueue, &idle, 0);
+    }
     NimBLEDevice::startAdvertising();
   }
 };
@@ -394,32 +525,90 @@ class NovaCommandsCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo) override {
     lastCentralActivityMs = millis(); // any write at all proves the phone app is still there
     std::string value = characteristic->getValue();
-    if (value.empty()) return;
+    if (value.empty() || commandQueue == nullptr) return;
 
-    uint8_t type = (uint8_t)value[0];
-    switch (type) {
-      case COMMAND_HAPTIC_PULSE: {
-        uint32_t durationMs = (value.size() > 1) ? (uint8_t)value[1] * 10 : 100;
-        Serial.printf("[BLE] command: haptic pulse (%lums)\n", durationMs);
-        uint16_t step[] = {(uint16_t)durationMs};
-        playHaptic(step, 1);
-        break;
-      }
-      case COMMAND_LED_PULSE: {
-        uint32_t durationMs = (value.size() > 1) ? (uint8_t)value[1] * 10 : 500;
-        Serial.printf("[BLE] command: LED pulse (%lums)\n", durationMs);
-       // startPulse(led2, led2Pulse, durationMs);
-        break;
-      }
-      case COMMAND_PING:
-        Serial.println("[BLE] command: ping");
-        sendHeartbeat();
-        break;
-      default:
-        Serial.printf("[BLE] unknown command type 0x%02X\n", type);
+    CommandFrame frame;
+    frame.len = (uint8_t)min(value.size(), sizeof(frame.data));
+    memcpy(frame.data, value.data(), frame.len);
+    // Don't block NimBLE's task: if loop() has fallen 8 commands behind, drop this one.
+    if (xQueueSend(commandQueue, &frame, 0) != pdTRUE) {
+      Serial.println("[BLE] command queue full - dropped a command");
     }
   }
 };
+
+uint16_t readU16LE(const uint8_t* bytes) {
+  return (uint16_t)(bytes[0] | (bytes[1] << 8));
+}
+
+// Applies one command from commandQueue. Called from loop() only.
+void handleCommand(const CommandFrame& frame) {
+  const uint8_t* value = frame.data;
+  uint8_t type = value[0];
+  switch (type) {
+    case COMMAND_HAPTIC_PULSE: {
+      uint32_t durationMs = (frame.len > 1) ? value[1] * 10 : 100;
+      Serial.printf("[BLE] command: haptic pulse (%lums)\n", durationMs);
+      uint16_t step[] = {(uint16_t)durationMs};
+      playHaptic(step, 1);
+      break;
+    }
+    case COMMAND_LED_PULSE: {
+      uint32_t durationMs = (frame.len > 1) ? value[1] * 10 : 500;
+      Serial.printf("[BLE] command: LED pulse (%lums)\n", durationMs);
+      startGreenPulse(durationMs);
+      break;
+    }
+    case COMMAND_PING:
+      Serial.println("[BLE] command: ping");
+      sendHeartbeat();
+      break;
+    case COMMAND_SET_LAYER: {
+      if (frame.len < 11) {
+        Serial.println("[BLE] SET_LAYER too short - ignored");
+        break;
+      }
+      LedLayer layer;
+      layer.active = true;
+      layer.id = value[1];
+      layer.priority = value[2];
+      layer.red = value[3];
+      layer.green = value[4];
+      layer.pattern = value[5];
+      layer.periodMs = max((uint32_t)readU16LE(value + 6) * 10, (uint32_t)100); // no divide-by-zero
+      layer.onMs = value[8] * 10;
+      layer.timeoutMs = (uint32_t)readU16LE(value + 9) * 1000;
+      layer.startedAt = millis();
+      setLedLayer(layer);
+      Serial.printf("[BLE] command: layer %u (prio %u, rgb %u/%u, pattern %u, %ums)\n",
+                    layer.id, layer.priority, layer.red, layer.green, layer.pattern, layer.periodMs);
+      break;
+    }
+    case COMMAND_CLEAR_LAYER:
+      if (frame.len < 2) break;
+      clearLedLayer(value[1]);
+      Serial.printf("[BLE] command: clear layer %u\n", value[1]);
+      break;
+    case COMMAND_SET_MODE:
+      if (frame.len < 5) break;
+      deviceMode = value[1];
+      deviceModeToken = value[2];
+      deviceModeTimeoutMs = (uint32_t)readU16LE(value + 3) * 1000;
+      deviceModeSetAt = millis();
+      Serial.printf("[BLE] command: mode %u (token %u)\n", deviceMode, deviceModeToken);
+      break;
+    case COMMAND_PLAY_HAPTIC: {
+      uint16_t steps[6];
+      uint8_t count = min((int)frame.len - 1, 6);
+      for (uint8_t i = 0; i < count; i++) steps[i] = value[1 + i] * 10;
+      Serial.printf("[BLE] command: haptic pattern (%u steps)\n", count);
+      playHaptic(steps, count);
+      break;
+    }
+    default:
+      Serial.printf("[BLE] unknown command type 0x%02X\n", type);
+  }
+}
 
 void setupBLE() {
   // Wait for a USB serial monitor, but not forever: on battery there is no
@@ -534,23 +723,80 @@ void sendAudioChunk(uint8_t flags, const uint8_t* adpcmBlock, size_t blockLen) {
 }
 
 // --- feedback (haptics and led)
-void startPulse(int pinNum, PulseState& state, uint32_t durationMs) {
-  state.startTime = millis();
-  state.durationMs = durationMs;
-  state.active = true;
-  digitalWrite(pinNum, HIGH);
-}
-
-void updatePulse(int pinNum, PulseState& state) {
-  if (state.active && (millis() - state.startTime) > state.durationMs) {
-    digitalWrite(pinNum, LOW);
-    state.active = false;
-  }
+void startGreenPulse(uint32_t durationMs) {
+  greenPulse.startTime = millis();
+  greenPulse.durationMs = durationMs;
+  greenPulse.active = true;
 }
 
 void setLedColour(uint8_t red, uint8_t green) {
   ledcWrite(LED_RED, red);
   ledcWrite(LED_GREEN, green);
+}
+
+// Adds `layer`, replacing one with the same id. With every slot taken, it
+// evicts the lowest-priority layer - unless that one outranks it, in which case
+// the new layer is dropped.
+void setLedLayer(const LedLayer& layer) {
+  int slot = -1;
+  for (int i = 0; i < MAX_LED_LAYERS; i++) {
+    if (ledLayers[i].active && ledLayers[i].id == layer.id) { slot = i; break; }
+  }
+  for (int i = 0; slot < 0 && i < MAX_LED_LAYERS; i++) {
+    if (!ledLayers[i].active) slot = i;
+  }
+  if (slot < 0) {
+    int lowest = 0;
+    for (int i = 1; i < MAX_LED_LAYERS; i++) {
+      if (ledLayers[i].priority < ledLayers[lowest].priority) lowest = i;
+    }
+    if (ledLayers[lowest].priority > layer.priority) return;
+    slot = lowest;
+  }
+  ledLayers[slot] = layer;
+}
+
+void clearLedLayer(uint8_t id) {
+  for (int i = 0; i < MAX_LED_LAYERS; i++) {
+    if (id == LAYER_ID_ALL || ledLayers[i].id == id) ledLayers[i].active = false;
+  }
+}
+
+// The layer to show right now (expiring any whose timeout has passed), or
+// nullptr if there is none.
+LedLayer* topLedLayer() {
+  LedLayer* top = nullptr;
+  uint32_t now = millis();
+  for (int i = 0; i < MAX_LED_LAYERS; i++) {
+    LedLayer& layer = ledLayers[i];
+    if (!layer.active) continue;
+    if (layer.timeoutMs > 0 && now - layer.startedAt > layer.timeoutMs) {
+      layer.active = false;
+      continue;
+    }
+    if (top == nullptr || layer.priority > top->priority ||
+        (layer.priority == top->priority && layer.startedAt > top->startedAt)) {
+      top = &layer;
+    }
+  }
+  return top;
+}
+
+// Brightness 0-255 of `layer` at this moment in its cycle.
+uint8_t layerLevel(const LedLayer& layer) {
+  uint32_t phase = (millis() - layer.startedAt) % layer.periodMs;
+  switch (layer.pattern) {
+    case PATTERN_BLINK:
+      return phase < layer.onMs ? 255 : 0;
+    case PATTERN_BREATHE: {
+      // triangle wave: 0 -> 255 over the first half of the period, back to 0 over the second
+      uint32_t half = layer.periodMs / 2;
+      uint32_t rising = phase < half ? phase : layer.periodMs - phase;
+      return (uint8_t)((rising * 255) / max(half, (uint32_t)1));
+    }
+    default:
+      return 255;
+  }
 }
 
 void updateLed() {
@@ -570,12 +816,27 @@ void updateLed() {
     }
   }
 
+  // an ambient layer from the phone owns the LED outright - including the
+  // dark half of a blink, so the compass doesn't show through it
+  LedLayer* layer = topLedLayer();
+  if (layer != nullptr) {
+    uint8_t level = layerLevel(*layer);
+    setLedColour((layer->red * level) / 255, (layer->green * level) / 255);
+    return;
+  }
+
+  // no compass, no heading to show - off rather than a constant "way off" red,
+  // which would read as recording
+  if (!compassAvailable) {
+    setLedColour(0, 0);
+    return;
+  }
+
   // green if compass is in desired direction, fades to red if not
   float error = min(headingError, FULL_RED_ANGLE);
   float closeness = 1.0 - (error / FULL_RED_ANGLE); // 0 = way off, 1 = on target
   uint8_t green = (uint8_t)(closeness * 255);
   setLedColour(255 - green, green);
-
 }
 
 // Starts `pattern` (see HapticPattern), replacing whatever was playing.
@@ -603,13 +864,50 @@ void updateHaptic() {
 
 // --- battery
 
-void checkBatteryLevel(){
-  uint32_t Vbatt = 0;
-  for(int i = 0; i < 16; i++) {
-    Vbatt = Vbatt + analogReadMilliVolts(A0); // ADC with correction
+// Cell voltage in mV: 16 calibrated ADC reads averaged, doubled for the divider.
+uint32_t readBatteryMv() {
+  uint32_t total = 0;
+  for (int i = 0; i < 16; i++) {
+    total += analogReadMilliVolts(battPin);
   }
-  float Vbattf = 2 * Vbatt / 16 / 1000.0;     // attenuation ratio 1/2, mV --> V
-  Serial.println(Vbattf, 3);
+  return 2 * total / 16;
+}
+
+// A single-cell LiPo's resting voltage -> rough charge left. The curve is flat
+// through the middle, so this is a guide, not a fuel gauge. Linear between points.
+uint8_t batteryPercent(float mv) {
+  static const uint16_t curve[][2] = {
+    {4200, 100}, {4100, 90}, {4000, 79}, {3900, 62}, {3800, 42},
+    {3750, 30}, {3700, 14}, {3600, 5}, {3300, 0},
+  };
+  const int points = sizeof(curve) / sizeof(curve[0]);
+  if (mv >= curve[0][0]) return 100;
+  for (int i = 1; i < points; i++) {
+    if (mv >= curve[i][0]) {
+      float t = (mv - curve[i][0]) / (float)(curve[i - 1][0] - curve[i][0]);
+      return (uint8_t)(curve[i][1] + t * (curve[i - 1][1] - curve[i][1]) + 0.5);
+    }
+  }
+  return 0;
+}
+
+void checkBattery() {
+  uint32_t now = millis();
+  // The motor sags the cell while it runs - skip those samples rather than
+  // report a dip that isn't really charge.
+  if (now - lastBatterySample >= BATTERY_SAMPLE_MS && !haptic.active) {
+    lastBatterySample = now;
+    uint32_t sample = readBatteryMv();
+    // Smoothed so radio bursts and ADC noise don't make the percent jump about.
+    batteryMv = (batteryMv == 0) ? sample : batteryMv * 0.8 + sample * 0.2;
+  }
+
+  if (!bleConnected || batteryMv == 0 || (int32_t)(now - nextBatterySendAt) < 0) return;
+  nextBatterySendAt = now + BATTERY_SEND_MS;
+  uint16_t mv = (uint16_t)(batteryMv + 0.5);
+  uint8_t payload[] = {batteryPercent(batteryMv), (uint8_t)(mv & 0xFF), (uint8_t)(mv >> 8)};
+  Serial.printf("[BLE] battery %u%% (%umV)\n", payload[0], mv);
+  sendEvent(EVENT_BATTERY, payload, sizeof(payload));
 }
 
 // --- compass
@@ -630,20 +928,21 @@ void displaySensorDetails()
 }
 
 void setupCompass(){
-  {
   Serial.println("HMC5883 Magnetometer Test"); Serial.println("");
 
   /* Initialise the sensor */
   if(!mag.begin())
   {
     /* There was a problem detecting the HMC5883 ... check your connections */
-    Serial.println("Ooops, no HMC5883 detected ... Check your wiring!");
-    while(1);
+    // Carry on without it rather than hanging boot (this used to be while(1)):
+    // BLE, the button and the mic don't need the compass.
+    Serial.println("Ooops, no HMC5883 detected ... Check your wiring! Continuing without the compass.");
+    return;
   }
+  compassAvailable = true;
 
   /* Display some basic information on this sensor */
   displaySensorDetails();
-}
 }
 
 // Converts an 8-point compass name ("N", "NE", ...) to degrees. Returns -1 if unknown.
@@ -655,7 +954,18 @@ float directionToDegrees(const String& dir) {
   return -1;
 }
 
+// The reverse of directionToDegrees: the nearest 8-point compass name.
+const char* degreesToDirection(float degrees) {
+  const char* names[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+  return names[(int)((degrees + 22.5) / 45.0) % 8];
+}
+
 void compassDetectionLoop(){
+  // Every loop() pass used to read the sensor and print ~4 lines - an I2C read
+  // plus Serial time the audio path can't spare (see AUDIO_DEBUG_HEX).
+  if (!compassAvailable || (millis() - lastCompassRead) < COMPASS_INTERVAL_MS) return;
+  lastCompassRead = millis();
+
   /* Get a new sensor event */
   sensors_event_t event;
   mag.getEvent(&event);
@@ -686,6 +996,7 @@ void compassDetectionLoop(){
 
   // Convert radians to degrees for readability.
   float headingDegrees = heading * 180/M_PI;
+  currentHeading = headingDegrees;
 
   //Serial.print("Heading (degrees): "); Serial.println(headingDegrees);
 
@@ -727,12 +1038,11 @@ void setup() {
   pinMode(buttonPin, INPUT_PULLUP);
   pinMode(HAPTIC, OUTPUT);
 
-  ledcAttach(LED_RED,   LED_PWM_FREQ, LED_PWM_BITS);
+  // ESP32 core 3.x LEDC: attach by pin, then ledcWrite(pin, duty) in setLedColour.
+  // Without this the LED pins never get a PWM channel and stay dark.
+  ledcAttach(LED_RED, LED_PWM_FREQ, LED_PWM_BITS);
   ledcAttach(LED_GREEN, LED_PWM_FREQ, LED_PWM_BITS);
   setLedColour(0, 0);
-
-  //pinMode(led1, OUTPUT);
-  //pinMode(led2, OUTPUT);
 
   pinMode(battPin, INPUT);
 
@@ -740,6 +1050,7 @@ void setup() {
   digitalWrite(HAPTIC, LOW);
 
   Serial.begin(115200);
+  commandQueue = xQueueCreate(8, sizeof(CommandFrame)); // before BLE, whose callbacks write to it
   setupBLE();
   Serial.println("Setting up I2S...");
   i2s_install();   // Configure and install the I2S driver
@@ -768,6 +1079,12 @@ void setup() {
 // ------------- main loop -------------
 
 void loop() {
+  // --- commands from the phone (queued by NovaCommandsCallbacks::onWrite)
+  CommandFrame command;
+  while (xQueueReceive(commandQueue, &command, 0) == pdTRUE) {
+    handleCommand(command);
+  }
+
   // --- button stuff
   debounceButton();
   checkButton();
@@ -777,6 +1094,7 @@ void loop() {
 
   // --- BLE feedback stuff (RX is callback-driven now, not polled here)
   updateHaptic();
+  checkBattery();
   if (bleConnected && (millis() - lastHeartbeatSent) > HEARTBEAT_INTERVAL_MS) {
     sendHeartbeat();
   }
@@ -818,7 +1136,7 @@ void loop() {
     audioSeq = 0;
     wasRecording = true;
     firstChunk = true;
-    startFlags = AUDIO_FLAG_START;
+    startFlags = recordingIsNote ? (AUDIO_FLAG_START | AUDIO_FLAG_NOTE) : AUDIO_FLAG_START;
   }
 
   // Blocks up to ~32 ms while the DMA fills — fine, button poll resumes after.
@@ -843,6 +1161,7 @@ void loop() {
   uint8_t flags = firstChunk ? startFlags : 0x00;
   firstChunk = false;
   sendAudioChunk(flags, adpcmOut, outBytes);
+ // Serial.printf("%02X", adpcmOut[i]); // debug
 #if AUDIO_DEBUG_HEX
   // Dump the block as hex to Serial so you can copy-paste into
   // audio_playback_test.py. Bench use only - see AUDIO_DEBUG_HEX.

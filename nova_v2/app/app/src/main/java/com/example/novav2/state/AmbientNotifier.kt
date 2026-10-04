@@ -27,13 +27,6 @@ object AmbientNotifier {
     private const val CHANNEL_ID = "nova_ambient_v2"
     private const val NOTIFICATION_ID = 43
 
-    /** How urgently the paired device's LED should flash alongside a notification - the two
-     * departure moments AmbientCheckRunner/DepartureAlarmReceiver cover read as one escalating
-     * cue rather than two identical buzzes: slow while there's still time to wrap up, fast once
-     * it's the real leave-by moment. `null` (the default) means no LED pattern at all - e.g.
-     * AssistVoiceService's own ambient replies aren't a departure cue and shouldn't borrow one. */
-    enum class LedFlash { SLOW, FAST }
-
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = context.getSystemService(NotificationManager::class.java)
@@ -54,7 +47,12 @@ object AmbientNotifier {
      * something to say" and "the device actually showed it" are different facts, and
      * AmbientCheckRunner's SPOKE/QUIET/BLOCKED outcome depends on telling them apart rather than
      * reporting success just because delivery was attempted. */
-    fun notify(context: Context, text: String, ledFlash: LedFlash? = null): Boolean {
+    /** Takes the current nudge off the shade - the device button's "got it" (DeviceInteraction). */
+    fun cancel(context: Context) {
+        NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
+    }
+
+    fun notify(context: Context, text: String): Boolean {
         if (text.isBlank()) return false
 
         // Independent of the phone-notification permission check below, and of this
@@ -63,9 +61,10 @@ object AmbientNotifier {
         // are two separate delivery channels, one denying POST_NOTIFICATIONS
         // shouldn't silence the other. No-op if nothing is connected right now
         // (NovaDeviceRepository.commandSender is only non-null while a device is),
-        // same best-effort stance as everything else here. The pulse sequencing lives in
-        // DeviceCue, shared with reminders' own (deliberately different) patterns.
-        DeviceCue.play(DeviceCue.Pattern.NUDGE, led = ledFlash)
+        // same best-effort stance as everything else here. The buzz patterns live in
+        // DeviceCue, shared with reminders' own (deliberately different) ones; any LED cue is
+        // the caller's, through DeviceLayers, since only it knows how long that should last.
+        DeviceCue.play(DeviceCue.Pattern.NUDGE)
 
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED

@@ -60,7 +60,9 @@ def world(monkeypatch):
     persona.set_embedder(embedder)
 
     log = FakeMemory()
-    for name in ("append", "get", "recent", "recent_all", "all", "close"):
+    # All of it, including the incremental reads consolidation's "due?" check
+    # makes on every /event - otherwise those reach for a real Supabase.
+    for name in ("append", "get", "recent", "recent_all", "all", "since", "count_since", "close"):
         monkeypatch.setattr(memory, name, getattr(log, name))
 
     # The tool_gain table: {user_id: {tool_name: {value, override}}}.

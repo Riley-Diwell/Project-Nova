@@ -80,3 +80,17 @@ def obligation_cue(event: Any) -> float:
     if not _OBLIGATION.search(text):
         return 0.0
     return STRONG if _TIME.search(text) else WEAK
+
+
+# A note longer than this is a record (a poem, a draft), not a to-do, even if
+# it says "tonight" somewhere.
+_REMINDABLE_NOTE_WORDS = 30
+
+
+def note_wants_reminder(body: str) -> bool:
+    """Does a "note ..." read like something to do at a time? "note submit the
+    form by 5" does; "note gate code 4471" doesn't. The note is saved word for
+    word either way - this only decides whether NOVA offers a reminder too.
+    No obligation phrase needed: a note is usually a bare imperative."""
+    text = body.strip().lower().replace("’", "'")
+    return len(text.split()) <= _REMINDABLE_NOTE_WORDS and _TIME.search(text) is not None

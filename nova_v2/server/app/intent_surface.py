@@ -31,7 +31,8 @@ from pydantic import BaseModel
 # import nova libraries
 from app.schemas.user_state import UserState
 from app.schemas.event import Event
-from app.control.commands import classify, note_body
+from app.control.commands import classify, note_body, offer_reply
+from app.control.cues import note_wants_reminder
 from app.control.controller import Decision, ProportionalController, Reason, Turn
 from app.control.observer import observe, trends_from_facts
 from app.control.gain.gain_store import GainStore
@@ -200,11 +201,21 @@ SYSTEM_PROMPT = (
     "user's LOCAL time (top-level local_time), never UTC. Both fire on the "
     "device the moment the call is made, so confirm them in speech as done, "
     "not as pending. "
+    "REMINDERS, MEMORY AND NOTES are three different things. A reminder is "
+    "something to DO later; memory is something TRUE about the user; a note is "
+    "something they want KEPT as they said it. "
     "REMINDERS. A reminder has something to say ('remind me to email Dr Chen "
     "at 4:30', 'remind me in 20 minutes to take the pasta off', 'don't let me "
-    "forget to submit the form') - call set_reminder. A timer is a bare "
-    "countdown, an alarm is a wake-up, and something with a place, people or "
-    "a duration is a calendar event. For a relative time pass in_minutes and "
+    "forget to submit the form', 'remember to call Mum tonight') - call "
+    "set_reminder. 'Remember to ...' is always a reminder, never a memory "
+    "save. A timer is a bare "
+    "countdown, an alarm is a wake-up, and an appointment with people or "
+    "a duration is a calendar event. 'When I get to the shops', 'when I leave "
+    "work', 'every time I get to the gym' is a reminder with a place instead "
+    "of a time - home, work or anyone's place goes in as its address from "
+    "what you know about the user, and if you don't know it, ask. 'When I get "
+    "to uni tomorrow' adds after_local; 'at 5 or when I leave, whichever is "
+    "first' adds due_local as a deadline. For a relative time pass in_minutes and "
     "never add it to local_time yourself. 'After this lecture' or 'after "
     "class' means copying that current_events entry's end_local exactly. If "
     "they gave no time, ask when. user_state.reminders lists their reminders "
@@ -249,8 +260,11 @@ SYSTEM_PROMPT = (
     "style from an earlier reply or request that isn't in standing_instructions "
     "- if it isn't there, the user has dropped it. "
     "The memory tool is the notebook of what the user has told you: save when "
-    "they ask you to remember or note something, and recall when they ask what "
-    "they told you. A lasting instruction about how you should behave or talk "
+    "they ask you to remember something about themselves or their situation "
+    "('remember I'm allergic to peanuts', 'remember I parked on level 3'), and "
+    "recall when they ask what they told you. After a save, say back in a few "
+    "words what you'll remember ('Got it - you're allergic to peanuts') so they "
+    "can hear what you took from it. A lasting instruction about how you should behave or talk "
     "- 'always reply in Pig Latin', 'from now on keep it short', 'stop calling "
     "me mate' - is itself a request to remember it: save it (category "
     "preferences, nova) as well as following it, so it becomes one of the "
@@ -552,7 +566,8 @@ def _memory_outcome(result: Any) -> dict[str, Any]:
     if result.get("fact_id"):
         return {"saved_as": "memory", "outcome": result.get("outcome")}
     if result.get("note_id"):
-        return {"saved_as": "note"}
+        # So the phone's "Saved to Notes" chip can open this note.
+        return {"saved_as": "note", "note_id": result["note_id"]}
     return {}
 
 
@@ -671,9 +686,24 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
             # forgotten, and what stops consolidation re-extracting it.
             tool_input = {**tool_input, "episode_id": ctx.episode_id}
         # Authorisation already happened in _gate. The dispatcher just runs it.
-        result = _DISPATCHER.dispatch_reactive(name, tool_input)
+        # A place reminder is the one exception to the no-coordinates rule above:
+        # "the shops" means the ones near the user, so the location goes in as
+        # `near` - to the search only, never into the recorded Action.
+        dispatch_input = tool_input
+        if name in DEVICE_TOOLS and tool_input.get("place") is not None and ctx.location_ctx:
+            dispatch_input = {**tool_input, "near": ctx.location_ctx}
+        result = _DISPATCHER.dispatch_reactive(name, dispatch_input)
         if name == "memory" and tool_input.get("action") == "save":
             tool_input = {**tool_input, **_memory_outcome(result)}
+        if name in DEVICE_TOOLS and isinstance(result, dict) and isinstance(result.get("place"), dict):
+            # The resolved geofences are the instruction the phone reads, so they
+            # go into the Action in place of what the model asked for. The model
+            # confirms from `found`, and needs none of the coordinates.
+            tool_input = {**tool_input, "place": result["place"]}
+            for key in ("every_time", "after_local"):
+                if result.get(key) is not None:
+                    tool_input[key] = result[key]
+            result = {k: v for k, v in result.items() if k != "place"}
         # Recorded after the call, so a tool that raises is not reported as run -
         # and with the augmented tool_input, so the Action carries the origin the
         # tool actually used rather than the one the model supplied.
@@ -882,6 +912,37 @@ def _clear_pending_confirmation(user_id: UUID | str | None) -> None:
     """Called when a voice turn resolves without leaving a question open -
     any earlier dangling question is now moot."""
     _PENDING_CONFIRMATION.pop(str(user_id), None)
+
+
+# "note submit the form by 5" is saved word for word with no model, and then
+# NOVA asks whether it should be a reminder too. The answer can't ride the
+# model thread above: a bare "yes" is not a command (control/commands.py), so
+# set_reminder would be left to gain. Instead the offer is kept here, one per
+# user with the same lifetime, and a "yes" becomes "remind me about this: ..."
+# - which is a command, because the user just asked for it.
+_PENDING_REMINDER_OFFER: dict[str, dict[str, Any]] = {}
+
+REMINDER_OFFER_SPEECH = "Noted. Do you want a reminder for it too?"
+REMINDER_DECLINED_SPEECH = "Okay, just the note."
+
+
+def _stash_reminder_offer(user_id: UUID | str | None, note_text: str) -> None:
+    now = datetime.now(timezone.utc)
+    for stale in [k for k, v in _PENDING_REMINDER_OFFER.items() if v["expires_at"] < now]:
+        _PENDING_REMINDER_OFFER.pop(stale, None)
+    _PENDING_REMINDER_OFFER[str(user_id)] = {
+        "text": note_text,
+        "expires_at": now + _PENDING_CONFIRMATION_TTL,
+    }
+
+
+def _pop_reminder_offer(user_id: UUID | str | None) -> str | None:
+    """The note an offer is waiting on, if any and still fresh. Popped, so the
+    offer is answered by the very next voice turn or not at all."""
+    offer = _PENDING_REMINDER_OFFER.pop(str(user_id), None)
+    if offer is None or datetime.now(timezone.utc) > offer["expires_at"]:
+        return None
+    return offer["text"]
 
 
 _YES_NO_LEAD_IN = re.compile(
@@ -1135,6 +1196,18 @@ def _run(
             episode_id=episode_id,
         )
 
+    # A reminder offered for the note just before this (see
+    # _PENDING_REMINDER_OFFER). Anything but a plain yes or no drops it.
+    offered = _pop_reminder_offer(user_id) if event.type == "voice" else None
+    if offered is not None:
+        answer = offer_reply(event)
+        if answer is False:
+            _clear_pending_confirmation(user_id)
+            return IntentResult(event_id=event.id, speech=REMINDER_DECLINED_SPEECH,
+                                actions=[], episode_id=episode_id)
+        if answer is True:
+            event = event.model_copy(update={"text": f"Remind me about this: {offered}"})
+
     facts = _relevant_persona(user_id, event)
 
     # event.timestamp is always UTC; local_time is that same instant converted
@@ -1221,15 +1294,25 @@ def _run(
 def _save_verbatim_note(text: str, event_id: UUID, ctx: TurnContext) -> IntentResult:
     """ "note ..." saved word for word, without the model (control/commands.py
     note_body). Through the memory tool all the same, so it is gated, recorded
-    as an Action and reinforced like any other save - just not rephrased."""
+    as an Action and reinforced like any other save - just not rephrased.
+
+    A note with a time in it ("submit the form by 5") is probably something to
+    do, so NOVA offers a reminder too - see _PENDING_REMINDER_OFFER."""
     # A note answers nothing, so a question left pending before it is dropped.
     _clear_pending_confirmation(ctx.user_id)
-    result = _run_local_tool("memory", {"action": "save", "text": text}, ctx)
+    # "heard": these are speech-to-text's words, so the note is read back for
+    # what was meant (notes_pipeline/interpret.py) - beside them, not instead.
+    result = _run_local_tool("memory", {"action": "save", "text": text, "heard": True}, ctx)
+    saved = isinstance(result, dict) and result.get("success") is True
     speech = result.get("spoken", "") if isinstance(result, dict) else ""
+    confirmation: Literal["yes_no"] | None = None
+    if saved and note_wants_reminder(text) and "set_reminder" in ctx.turn.authorised():
+        _stash_reminder_offer(ctx.user_id, text)
+        speech, confirmation = REMINDER_OFFER_SPEECH, "yes_no"
     print(f"[loop] verbatim note - final speech={speech!r} actions={ctx.ran!r}")
     return IntentResult(
         event_id=event_id, speech=speech, actions=ctx.for_wire(),
-        episode_id=ctx.episode_id,
+        episode_id=ctx.episode_id, confirmation=confirmation,
     )
 
 

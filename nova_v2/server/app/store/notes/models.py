@@ -101,6 +101,9 @@ class Note(BaseModel):
     tags: list[str] = Field(default_factory=list)
     summary: Optional[NoteSummary] = None
     summary_status: SummaryStatus = "none"
+    # For a spoken note: what Nova thinks was meant, beside `text` as heard
+    # (notes_pipeline/interpret.py). None until read, or when nothing changed.
+    interpreted_text: Optional[str] = None
     origin_episode_id: Optional[str] = None
     promoted_fact_ids: list[str] = Field(default_factory=list)
 

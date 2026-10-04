@@ -1,15 +1,19 @@
 package com.example.novav2.ble
 
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
 enum class NovaDeviceConnectionState { DISCONNECTED, CONNECTING, CONNECTED }
 
 sealed class NovaDeviceEvent {
-    data object SingleClick : NovaDeviceEvent()
-    data object DoubleClick : NovaDeviceEvent()
-    data class MultiClick(val count: Int) : NovaDeviceEvent()
-    data class Battery(val percent: Int) : NovaDeviceEvent()
+    /** [count] presses in one sequence. [mode]/[token] are what SET_MODE last set on the device
+     * when the sequence began - null from firmware that predates PRESS. */
+    data class Press(val count: Int, val mode: Int? = null, val token: Int? = null) : NovaDeviceEvent()
+    /** [millivolts] is the smoothed cell voltage - null from firmware that sends percent only. */
+    data class Battery(val percent: Int, val millivolts: Int? = null) : NovaDeviceEvent()
     data object Heartbeat : NovaDeviceEvent()
 }
 
@@ -21,6 +25,13 @@ sealed class NovaDeviceEvent {
 interface NovaCommandSender {
     fun sendHapticPulse(durationMs: Int)
     fun sendLedPulse(durationMs: Int)
+    /** A buzz pattern played by the firmware itself - see [NovaCommandFrames.playHaptic]. */
+    fun sendHapticPattern(stepsMs: List<Int>)
+    /** Adds or replaces (same id) an ambient LED layer - see [NovaLedLayer]. */
+    fun sendSetLayer(layer: NovaLedLayer)
+    fun sendClearLayer(id: Int)
+    /** Tells the device which interaction mode it is in - see [NovaCommandFrames.setMode]. */
+    fun sendSetMode(mode: Int, token: Int, timeoutSeconds: Int)
 }
 
 /**
@@ -33,8 +44,26 @@ object NovaDeviceRepository {
     private val _connectionState = MutableStateFlow(NovaDeviceConnectionState.DISCONNECTED)
     val connectionState: StateFlow<NovaDeviceConnectionState> = _connectionState
 
+    /** Display only (DeviceScreen's status line), heartbeats left out. A StateFlow conflates
+     * equal values, so a second identical press never emits here - anything that acts on
+     * presses must collect [events] instead. */
     private val _lastEvent = MutableStateFlow<NovaDeviceEvent?>(null)
     val lastEvent: StateFlow<NovaDeviceEvent?> = _lastEvent
+
+    /** Every press, once each, in order - what a button handler collects. Heartbeats and
+     * battery reports are left out ([lastHeartbeatAtMillis] and [battery] cover them) so a
+     * collector isn't woken every few seconds for nothing. Hot: an event with no collector at that moment is gone,
+     * the same best-effort stance as the firmware's own sendEvent. */
+    private val _events = MutableSharedFlow<NovaDeviceEvent>(
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST, // tryEmit never fails from the GATT thread
+    )
+    val events: SharedFlow<NovaDeviceEvent> = _events
+
+    /** The device's latest battery report (sent every ~15 s); null until the first one arrives
+     * on a connection, and again once it drops - an old reading isn't shown as current. */
+    private val _battery = MutableStateFlow<NovaDeviceEvent.Battery?>(null)
+    val battery: StateFlow<NovaDeviceEvent.Battery?> = _battery
 
     private val _lastHeartbeatAtMillis = MutableStateFlow<Long?>(null)
     val lastHeartbeatAtMillis: StateFlow<Long?> = _lastHeartbeatAtMillis
@@ -56,6 +85,7 @@ object NovaDeviceRepository {
             // the brand new link is already stuck, before it's had a chance to
             // receive its own first heartbeat.
             _lastHeartbeatAtMillis.value = null
+            _battery.value = null
         }
     }
 
@@ -64,9 +94,13 @@ object NovaDeviceRepository {
     }
 
     fun recordEvent(event: NovaDeviceEvent) {
-        _lastEvent.value = event
-        if (event is NovaDeviceEvent.Heartbeat) {
-            _lastHeartbeatAtMillis.value = System.currentTimeMillis()
+        when (event) {
+            is NovaDeviceEvent.Heartbeat -> _lastHeartbeatAtMillis.value = System.currentTimeMillis()
+            is NovaDeviceEvent.Battery -> _battery.value = event
+            is NovaDeviceEvent.Press -> {
+                _lastEvent.value = event
+                _events.tryEmit(event)
+            }
         }
     }
 }

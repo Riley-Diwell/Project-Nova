@@ -6,6 +6,7 @@ import com.example.novav2.data.NovaDatabase
 import com.example.novav2.data.ReminderDao
 import com.example.novav2.data.ReminderEntity
 import com.example.novav2.model.ReminderOrigin
+import com.example.novav2.model.ReminderPlace
 import com.example.novav2.model.ReminderPriority
 import com.example.novav2.model.ReminderRecurrence
 import com.example.novav2.model.ReminderStatus
@@ -37,7 +38,7 @@ object ReminderRepository {
     private const val TAG = "ReminderRepository"
 
     /** What voice turns carry - fired in the last 12h, all snoozed/deferred, pending
-     * within 7 days, soonest first, at most 15. */
+     * within 7 days, soonest first, then every place reminder waiting on its place, at most 15. */
     private const val WINDOW_FIRED_MILLIS = 12 * 60 * 60_000L
     private const val WINDOW_PENDING_MILLIS = 7 * 24 * 60 * 60_000L
     private const val WINDOW_MAX = 15
@@ -82,6 +83,38 @@ object ReminderRepository {
         return reminder
     }
 
+    /** A reminder that goes off at [place] - see [ReminderTransitions.createAtPlace]. Null (and
+     * nothing stored) if it has no text, nowhere to watch, or a deadline already past. */
+    suspend fun createAtPlace(
+        context: Context,
+        text: String,
+        place: ReminderPlace,
+        everyTime: Boolean,
+        priority: ReminderPriority = ReminderPriority.NORMAL,
+        origin: ReminderOrigin = ReminderOrigin.MANUAL,
+        sourceEpisodeId: String? = null,
+        deadline: LocalDateTime? = null,
+        afterLocal: String? = null,
+    ): ReminderEntity? {
+        val now = System.currentTimeMillis()
+        val reminder = ReminderTransitions.createAtPlace(
+            text, place, everyTime, now, priority, origin, sourceEpisodeId,
+            deadline = deadline, afterLocal = afterLocal, zone = zone(),
+        )
+        if (reminder.text.isBlank() || place.points.isEmpty()) {
+            Log.w(TAG, "not creating a place reminder with no text or no place")
+            return null
+        }
+        if (deadline != null && reminder.triggerAtMillis < now - PAST_TOLERANCE_MILLIS) {
+            Log.w(TAG, "not creating a place reminder whose deadline has passed: ${reminder.dueLocal}")
+            return null
+        }
+        mutex.withLock { dao(context).upsert(reminder.copy(dirty = true)) }
+        ReminderScheduler.reconcile(context)
+        ReminderSync.schedule(context)
+        return reminder
+    }
+
     suspend fun complete(context: Context, id: String): ReminderEntity? =
         mutate(context, id) { r, now ->
             if (!r.statusEnum.isActive) null else ReminderTransitions.complete(r, now, zone())
@@ -107,7 +140,8 @@ object ReminderRepository {
         else ReminderTransitions.edit(r, now, zone(), text, due, priority, recurrence, clearRecurrence)
     }
 
-    /** update_reminder's edit, with its time given the three ways the tool allows. */
+    /** update_reminder's edit, with its time given the three ways the tool allows - or a new
+     * place instead, and whether a place reminder goes off every time. */
     suspend fun editFromAction(
         context: Context,
         id: String,
@@ -116,10 +150,15 @@ object ReminderRepository {
         inMinutes: Int?,
         shiftMinutes: Int?,
         recurrence: ReminderRecurrence?,
+        place: ReminderPlace? = null,
+        everyTime: Boolean? = null,
     ): ReminderEntity? = mutate(context, id) { r, now ->
         if (r.statusEnum == ReminderStatus.CANCELLED) return@mutate null
         val due = ReminderTransitions.resolveEditDue(r, zone(), now, dueLocal, inMinutes, shiftMinutes)
-        ReminderTransitions.edit(r, now, zone(), text = text, due = due, recurrence = recurrence)
+        var next = ReminderTransitions.edit(r, now, zone(), text = text, due = due, recurrence = recurrence)
+        if (place != null) next = ReminderTransitions.moveToPlace(next, place, now)
+        if (everyTime != null && next.isPlaceReminder) next = next.copy(everyTime = everyTime)
+        next
     }
 
     suspend fun cancel(context: Context, id: String): ReminderEntity? =
@@ -202,11 +241,14 @@ object ReminderRepository {
     suspend fun serverWindow(context: Context): Pair<List<ReminderSummary>, Int> {
         val now = System.currentTimeMillis()
         val active = dao(context).active()
+        // A place reminder has no time to fall outside the window by - it's "coming up" whenever
+        // they next go there - so every one waiting is listed (after the timed ones, sorted by
+        // NO_TRIGGER), and an every-time one stays listed after it goes off.
         val window = active.filter {
             when (it.statusEnum) {
-                ReminderStatus.FIRED -> (it.firedAtMillis ?: now) >= now - WINDOW_FIRED_MILLIS
+                ReminderStatus.FIRED -> it.everyTime || (it.firedAtMillis ?: now) >= now - WINDOW_FIRED_MILLIS
                 ReminderStatus.SNOOZED, ReminderStatus.DEFERRED -> true
-                else -> it.triggerAtMillis <= now + WINDOW_PENDING_MILLIS
+                else -> it.isPlaceReminder || it.triggerAtMillis <= now + WINDOW_PENDING_MILLIS
             }
         }.sortedBy { it.triggerAtMillis }.take(WINDOW_MAX)
         return window.map { it.toSummary(now) } to active.size
@@ -278,17 +320,24 @@ object ReminderRepository {
         if (statusEnum == ReminderStatus.FIRED) ReminderTime.toMillis(dueLocal, zone()) ?: triggerAtMillis
         else triggerAtMillis
 
-    private fun ReminderEntity.toSummary(nowMillis: Long): ReminderSummary = ReminderSummary(
-        id = id,
-        text = text,
-        dueLocal = dueLocal,
-        // A fired recurring reminder's triggerAtMillis is already its next occurrence.
-        minutesUntilDue = Math.floorDiv(dueMillis() - nowMillis, 60_000L).toInt(),
-        status = status,
-        priority = priority,
-        firedMinutesAgo = if (statusEnum == ReminderStatus.FIRED) {
-            firedAtMillis?.let { ((nowMillis - it) / 60_000L).toInt() }
-        } else null,
-        recurrence = recurrence?.describe(),
-    )
+    private fun ReminderEntity.toSummary(nowMillis: Long): ReminderSummary {
+        // A place reminder has a time only while snoozed or held.
+        val due = dueMillis().takeIf { it != ReminderEntity.NO_TRIGGER }
+        return ReminderSummary(
+            id = id,
+            text = text,
+            dueLocal = dueLocal.takeIf { it.isNotBlank() } ?: due?.let { ReminderTime.format(ReminderTime.toLocal(it, zone())) },
+            // A fired recurring reminder's triggerAtMillis is already its next occurrence.
+            minutesUntilDue = due?.let { Math.floorDiv(it - nowMillis, 60_000L).toInt() },
+            status = status,
+            priority = priority,
+            firedMinutesAgo = if (statusEnum == ReminderStatus.FIRED) {
+                firedAtMillis?.let { ((nowMillis - it) / 60_000L).toInt() }
+            } else null,
+            recurrence = recurrence?.describe(),
+            place = place?.describe(),
+            everyTime = everyTime,
+            placeAfterLocal = placeAfterLocal,
+        )
+    }
 }

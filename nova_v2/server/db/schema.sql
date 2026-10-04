@@ -540,6 +540,11 @@ create index if not exists notes_fts_idx        on public.notes using gin (fts);
 create index if not exists notes_embedding_idx
     on public.notes using hnsw (embedding vector_cosine_ops);
 
+-- What Nova thinks a spoken note meant (app/notes_pipeline/interpret.py):
+-- likely mis-hearings fixed, punctuation and line breaks added. Kept beside
+-- `text`, which stays exactly as heard. Null until read, or if nothing changed.
+alter table public.notes add column if not exists interpreted_text text;
+
 comment on table public.notes is
     'NOVA V2 user notes (quick, dictation, capture), one owner each. Never read by consolidation.';
 

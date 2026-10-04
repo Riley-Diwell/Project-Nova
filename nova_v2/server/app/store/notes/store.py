@@ -46,8 +46,8 @@ UserId = Union[UUID, str]
 # store reads those, and the embedding is 1024 floats a row.
 _COLUMNS = (
     "id,user_id,created_at,updated_at,source,kind,title,text,segments,"
-    "duration_s,context,stt,tags,summary,summary_status,origin_episode_id,"
-    "promoted_fact_ids"
+    "duration_s,context,stt,tags,summary,summary_status,interpreted_text,"
+    "origin_episode_id,promoted_fact_ids"
 )
 
 # How many candidates match_notes() hands back before Python re-ranks them
@@ -75,6 +75,7 @@ class NotesStore(Protocol):
     def all_notes(self, user_id: UserId) -> list[Note]: ...
     def update(self, user_id: UserId, note_id: str, patch: NotePatch) -> Note: ...
     def set_summary(self, user_id: UserId, note_id: str, summary: Optional[NoteSummary], status: str) -> None: ...
+    def set_interpretation(self, user_id: UserId, note_id: str, text: Optional[str]) -> None: ...
     def set_promoted(self, user_id: UserId, note_id: str, fact_ids: list[str]) -> None: ...
     def replace_chunks(self, user_id: UserId, note_id: str, chunks: list[NoteChunkIn]) -> None: ...
     def search(self, user_id: UserId, q: NoteQuery) -> list[NoteMatch]: ...
@@ -113,6 +114,7 @@ def _new_row(user_id: str, note: NoteIn) -> dict[str, Any]:
         "tags": list(note.tags),
         "summary": None,
         "summary_status": "none",
+        "interpreted_text": None,
         "origin_episode_id": note.origin_episode_id,
         "promoted_fact_ids": [],
     }
@@ -120,7 +122,8 @@ def _new_row(user_id: str, note: NoteIn) -> dict[str, Any]:
 
 def _patched_fields(current: Note, patch: NotePatch) -> dict[str, Any]:
     """The columns a PATCH changes. Editing the text makes an existing summary
-    stale rather than wrong-and-silent - the user re-summarises when they want."""
+    stale rather than wrong-and-silent - the user re-summarises when they want -
+    and drops Nova's reading of it: the user has now said what they meant."""
     fields: dict[str, Any] = {"updated_at": _now().isoformat()}
     if patch.title is not None:
         fields["title"] = patch.title
@@ -130,6 +133,7 @@ def _patched_fields(current: Note, patch: NotePatch) -> dict[str, Any]:
         fields["segments"] = [s.model_dump() for s in patch.segments]
     if patch.text is not None and patch.text != current.text:
         fields["text"] = patch.text
+        fields["interpreted_text"] = None
         if current.summary_status == "done":
             fields["summary_status"] = "stale"
     return fields
@@ -206,6 +210,10 @@ class SupabaseNotesStore:
             "summary_status": status,
             "updated_at": _now().isoformat(),
         }).eq("user_id", _uid(user_id)).eq("id", note_id).execute()
+
+    def set_interpretation(self, user_id: UserId, note_id: str, text: Optional[str]) -> None:
+        self._db.table(TABLE).update({"interpreted_text": text}) \
+            .eq("user_id", _uid(user_id)).eq("id", note_id).execute()
 
     def set_promoted(self, user_id: UserId, note_id: str, fact_ids: list[str]) -> None:
         self._db.table(TABLE).update({"promoted_fact_ids": fact_ids}) \
@@ -330,6 +338,9 @@ class InMemoryNotesStore:
             "summary_status": status,
             "updated_at": _now().isoformat(),
         })
+
+    def set_interpretation(self, user_id: UserId, note_id: str, text: Optional[str]) -> None:
+        self._row(user_id, note_id)["interpreted_text"] = text
 
     def set_promoted(self, user_id: UserId, note_id: str, fact_ids: list[str]) -> None:
         self._row(user_id, note_id)["promoted_fact_ids"] = list(fact_ids)

@@ -24,6 +24,7 @@ what it should do.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 
@@ -73,8 +74,17 @@ class PromoteOut(BaseModel):
     fact_id: str
 
 
+_MARKUP = re.compile(r"^\s{0,3}(?:#{1,6}\s+|[-*•]\s+|\d+[.)]\s+)|\*\*|__", re.MULTILINE)
+
+
+def plain_text(text: str) -> str:
+    """A note's text without the light Markdown Nova writes notes in (headings,
+    bullets, bold), on one line - what a list row has room for."""
+    return " ".join(_MARKUP.sub("", text).split())
+
+
 def _row(note: Note, snippet: Optional[str] = None, snippet_start_s: Optional[float] = None) -> NoteListItem:
-    text = note.text.strip()
+    text = plain_text(note.text)
     return NoteListItem(
         id=note.id,
         created_at=note.created_at,

@@ -77,6 +77,10 @@ class GraphNode(BaseModel):
     note_id: Optional[str] = None
     # When the belief was last said or seen (Fact.stated_at), ISO 8601.
     stated_at: Optional[str] = None
+    # When NOVA first learned it (Fact.created_at), ISO 8601 - History's first entry.
+    created_at: Optional[str] = None
+    # The user's rewordings from the map, oldest first: {"at", "from", "to"}.
+    edits: list[dict[str, str]] = Field(default_factory=list)
     # A fact's meaning group ("cluster:<id>") - the map's subheading for it.
     cluster: Optional[str] = None
     # A cluster node's member count.
@@ -139,6 +143,8 @@ def build_graph(
             detail=meta.get("quote") or meta.get("value"),
             note_id=str(meta["note_id"]) if meta.get("note_id") else None,
             stated_at=fact.stated_at.isoformat() if fact.stated_at else None,
+            created_at=fact.created_at.isoformat() if fact.created_at else None,
+            edits=list(meta.get("history") or []),
             cluster=f"cluster:{membership[fact.id]}" if fact.id in membership else None,
         ))
         if clusters is None:

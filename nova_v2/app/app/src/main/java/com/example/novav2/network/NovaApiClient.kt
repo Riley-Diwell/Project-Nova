@@ -99,6 +99,9 @@ object NovaApiClient {
             /** memory-tool recalls this turn - the Voice tab shows the notes they found as
              * chips (see NoteRecallActions.kt). */
             val recallActions: List<RecallAction> = emptyList(),
+            /** Notes, memories and reminders this turn saved - the Voice tab's "Saved to …"
+             * chips (see SavedActions.kt). */
+            val savedActions: List<SavedAction> = emptyList(),
         ) : EventResult()
         data class NeedMore(
             val sessionId: String,
@@ -368,11 +371,18 @@ object NovaApiClient {
         val size: Int? = null,
         /** When the belief was last said or seen, ISO 8601. */
         val statedAt: String? = null,
+        /** When NOVA first learned it, ISO 8601 - the History view's first entry. */
+        val createdAt: String? = null,
+        /** The user's rewordings from the map, oldest first. */
+        val edits: List<FactEdit> = emptyList(),
     ) {
         val isFact: Boolean get() = kind == "fact"
         val isCluster: Boolean get() = kind == "cluster"
         val isDerived: Boolean get() = source == "derived"
     }
+
+    /** One rewording of a belief: [at] (ISO 8601) the user changed [from] to [to]. */
+    data class FactEdit(val at: String, val from: String, val to: String)
 
     /** [kind] is "category" (the declared ontology), "similar" (fact to fact, discovered by
      *  vector proximity) or "topic" (a fact to a topic it is also about, beyond its own - target
@@ -618,6 +628,14 @@ object NovaApiClient {
                 put("cluster", n.clusterId ?: JSONObject.NULL)
                 put("size", n.size ?: JSONObject.NULL)
                 put("stated_at", n.statedAt ?: JSONObject.NULL)
+                put("created_at", n.createdAt ?: JSONObject.NULL)
+                put("edits", JSONArray(n.edits.map { e ->
+                    JSONObject().apply {
+                        put("at", e.at)
+                        put("from", e.from)
+                        put("to", e.to)
+                    }
+                }))
             }
         }))
         put("edges", JSONArray(edges.map { e ->
@@ -646,6 +664,10 @@ object NovaApiClient {
         clusterId = if (isNull("cluster")) null else optString("cluster").takeIf { it.isNotEmpty() },
         size = if (isNull("size")) null else optInt("size"),
         statedAt = if (isNull("stated_at")) null else optString("stated_at").takeIf { it.isNotEmpty() },
+        createdAt = if (isNull("created_at")) null else optString("created_at").takeIf { it.isNotEmpty() },
+        edits = optJSONArray("edits").mapObjects {
+            FactEdit(at = it.optString("at"), from = it.optString("from"), to = it.optString("to"))
+        },
     )
 
     internal fun parsePersonaSearch(json: JSONObject): PersonaSearch = PersonaSearch(
@@ -727,6 +749,7 @@ object NovaApiClient {
                 reminderActions = parseReminderActions(json.optJSONArray("actions")),
                 updateReminderActions = parseUpdateReminderActions(json.optJSONArray("actions")),
                 recallActions = parseRecallActions(json.optJSONArray("actions")),
+                savedActions = parseSavedActions(json.optJSONArray("actions")),
             )
         }
     }

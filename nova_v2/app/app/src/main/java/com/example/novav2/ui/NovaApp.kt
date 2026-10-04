@@ -58,6 +58,7 @@ import com.example.novav2.ui.screens.auth.AuthFlow
 import com.example.novav2.ui.screens.onboarding.OnboardingFlow
 import com.example.novav2.ui.screens.onboarding.ProfileLoading
 import com.example.novav2.ui.screens.onboarding.ProfileUnavailable
+import com.example.novav2.ui.components.clearFocusOnTap
 
 @Composable
 fun NovaApp(
@@ -137,6 +138,7 @@ fun NovaApp(
     }
 
     Scaffold(
+        modifier = Modifier.clearFocusOnTap(),
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
         bottomBar = {
             NavigationBar {
@@ -173,6 +175,13 @@ fun NovaApp(
                     bottomBarHeight = innerPadding.calculateBottomPadding(),
                     autoListenRequested = autoListenRequested,
                     onOpenNote = { navController.navigate(noteDetailRoute(it)) },
+                    // The same move as tapping that tab in the bottom bar.
+                    onOpenTab = { destination ->
+                        navController.navigate(destination.route) {
+                            popUpTo(navController.graph.findStartDestination().id)
+                            launchSingleTop = true
+                        }
+                    },
                 )
             }
             composable(NovaDestination.Reminders.route) {

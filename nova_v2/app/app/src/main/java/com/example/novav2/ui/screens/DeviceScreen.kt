@@ -11,9 +11,16 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Battery1Bar
+import androidx.compose.material.icons.filled.Battery3Bar
+import androidx.compose.material.icons.filled.Battery5Bar
+import androidx.compose.material.icons.filled.BatteryAlert
+import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothConnected
 import androidx.compose.material.icons.filled.BluetoothDisabled
@@ -38,6 +45,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
@@ -68,6 +76,7 @@ fun DeviceScreen() {
     val context = LocalContext.current
     val connectionState by NovaDeviceRepository.connectionState.collectAsState()
     val lastEvent by NovaDeviceRepository.lastEvent.collectAsState()
+    val battery by NovaDeviceRepository.battery.collectAsState()
     val commandSender by NovaDeviceRepository.commandSender.collectAsState()
     // NovaDevicePairing.isPaired reads SharedPreferences directly, which Compose
     // can't observe - reading it as a plain val here only picked up a fresh value
@@ -168,6 +177,10 @@ fun DeviceScreen() {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                 )
+                battery?.takeIf { connected }?.let {
+                    Spacer(Modifier.height(12.dp))
+                    BatteryLevel(it)
+                }
                 Spacer(Modifier.height(24.dp))
 
                 if (!paired) {
@@ -200,6 +213,34 @@ fun DeviceScreen() {
             }
         }
     }
+}
+
+/** The device's own battery, e.g. "Battery 64% · 3.86 V". The voltage stays visible because the
+ * firmware's percent is a curve estimate - it is what to check against a multimeter. */
+@Composable
+private fun BatteryLevel(battery: NovaDeviceEvent.Battery) {
+    val low = battery.percent <= LOW_BATTERY_PERCENT
+    val tint = if (low) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(batteryIcon(battery.percent), contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = "Battery ${battery.percent}%" +
+                (battery.millivolts?.let { " · %.2f V".format(it / 1000.0) } ?: ""),
+            style = MaterialTheme.typography.bodyMedium,
+            color = tint,
+        )
+    }
+}
+
+private const val LOW_BATTERY_PERCENT = 15
+
+private fun batteryIcon(percent: Int): ImageVector = when {
+    percent <= LOW_BATTERY_PERCENT -> Icons.Default.BatteryAlert
+    percent < 40 -> Icons.Default.Battery1Bar
+    percent < 65 -> Icons.Default.Battery3Bar
+    percent < 90 -> Icons.Default.Battery5Bar
+    else -> Icons.Default.BatteryFull
 }
 
 private fun startPairing(
@@ -250,9 +291,7 @@ private fun statusSubtext(
 
 private fun describeEvent(event: NovaDeviceEvent?): String = when (event) {
     null -> "none yet"
-    is NovaDeviceEvent.SingleClick -> "single click"
-    is NovaDeviceEvent.DoubleClick -> "double click"
-    is NovaDeviceEvent.MultiClick -> "${event.count}x click"
+    is NovaDeviceEvent.Press -> if (event.count == 1) "single press" else "${event.count}x press"
     is NovaDeviceEvent.Battery -> "battery ${event.percent}%"
     is NovaDeviceEvent.Heartbeat -> "heartbeat"
 }

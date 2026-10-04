@@ -6,6 +6,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -25,6 +26,7 @@ import com.example.novav2.data.toEntity
 import com.example.novav2.model.ChatMessage
 import com.example.novav2.network.NovaApiClient
 import com.example.novav2.state.AmbientNotifier
+import com.example.novav2.state.DeviceInteraction
 import com.example.novav2.state.AppForegroundState
 import com.example.novav2.state.CalendarWriter
 import com.example.novav2.state.ReminderRepository
@@ -81,6 +83,17 @@ class AssistVoiceService : Service() {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
             )
             finishTurn("Open Nova and sign in first, then I can help.", episodeId = null)
+            return START_NOT_STICKY
+        }
+        val repeat = intent?.getStringExtra(EXTRA_REPEAT)
+        if (repeat != null) {
+            // The device button's "say that again": speech only - no turn, no chat write, no
+            // notification (the original reply already made those).
+            startForegroundWithType(
+                buildStatusNotification("Nova", alerting = false),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+            speak(repeat, episodeId = null)
             return START_NOT_STICKY
         }
         val transcript = intent?.getStringExtra(EXTRA_TRANSCRIPT)
@@ -182,6 +195,7 @@ class AssistVoiceService : Service() {
     }
 
     private fun handleTranscript(text: String) {
+        DeviceInteraction.thinking()
         val dao = NovaDatabase.getInstance(applicationContext).chatMessageDao()
         scope.launch {
             dao.insert(ChatMessage(text = text, fromUser = true).toEntity(System.currentTimeMillis()))
@@ -260,6 +274,7 @@ class AssistVoiceService : Service() {
      * observes the same DAO this writes to), so a system notification on top would just be a
      * second, redundant announcement of something already on screen. */
     private fun finishTurn(reply: String, episodeId: String?) {
+        DeviceInteraction.replied(reply)
         if (!AppForegroundState.isInForeground()) {
             AmbientNotifier.notify(applicationContext, reply)
         }
@@ -274,6 +289,7 @@ class AssistVoiceService : Service() {
             if (status == TextToSpeech.SUCCESS) {
                 textToSpeech?.speak(utterance, TextToSpeech.QUEUE_FLUSH, null, "nova-assist-response")
             } else {
+                DeviceInteraction.replyFinished()
                 stopSelfSafely()
             }
         }
@@ -287,11 +303,13 @@ class AssistVoiceService : Service() {
                 if (episodeId != null) {
                     scope.launch { NovaApiClient.postOutcome(episodeId, accepted = true) }
                 }
+                DeviceInteraction.replyFinished()
                 stopSelfSafely()
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
+                DeviceInteraction.replyFinished()
                 stopSelfSafely()
             }
         })
@@ -345,5 +363,40 @@ class AssistVoiceService : Service() {
          * device's BLE audio. Its presence is what routes onStartCommand straight to
          * handleTranscript() instead of opening the phone's own mic. */
         const val EXTRA_TRANSCRIPT = "com.example.novav2.extra.TRANSCRIPT"
+
+        /** String extra: speak this again, nothing else (see [repeat]). */
+        private const val EXTRA_REPEAT = "com.example.novav2.extra.REPEAT"
+
+        /**
+         * Runs [text] as a turn, exactly as if it had been spoken - the device's held-button
+         * recordings (NovaDeviceService) and its button actions (DeviceInteraction) both come in
+         * here. Returns false if it couldn't be started.
+         *
+         * This service's manifest foregroundServiceType includes "microphone", which Android 14+
+         * refuses to start without RECORD_AUDIO already granted - true here even though a
+         * transcript turn never touches the phone's own mic, since the type is declared per
+         * service class, not per call. Same permission AssistTrampolineActivity already requires
+         * before starting this same service for the phone-mic path.
+         */
+        fun submitTranscript(context: Context, text: String): Boolean =
+            start(context, Intent(context, AssistVoiceService::class.java).putExtra(EXTRA_TRANSCRIPT, text))
+
+        /** Speaks [text] again the way the reply was spoken - the device's "repeat". */
+        fun repeat(context: Context, text: String): Boolean =
+            start(context, Intent(context, AssistVoiceService::class.java).putExtra(EXTRA_REPEAT, text))
+
+        private fun start(context: Context, intent: Intent): Boolean {
+            val hasMicPermission = ContextCompat.checkSelfPermission(
+                context, Manifest.permission.RECORD_AUDIO,
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!hasMicPermission) return false
+            return try {
+                ContextCompat.startForegroundService(context, intent)
+                true
+            } catch (e: IllegalStateException) {
+                // Background start refused - nothing to show it on; the caller buzzes instead.
+                false
+            }
+        }
     }
 }

@@ -57,18 +57,21 @@ def test_chunk_timestamps_are_monotonic():
 # --- summarising ----------------------------------------------------------------
 
 class FakeClient:
-    """Stands in for anthropic.Anthropic - records the call, returns a canned parse."""
+    """Stands in for the OpenAI-compatible client llm.parse calls - records each
+    call and replies with `parsed` as JSON (or with text that isn't JSON)."""
 
-    def __init__(self, parsed=None, stop_reason="end_turn", raises=None):
+    def __init__(self, parsed=None, finish_reason="stop", raises=None):
         self.calls = []
-        self.messages = SimpleNamespace(parse=self._parse)
-        self._parsed, self._stop, self._raises = parsed, stop_reason, raises
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+        self._parsed, self._finish, self._raises = parsed, finish_reason, raises
 
-    def _parse(self, **kwargs):
+    def _create(self, **kwargs):
         self.calls.append(kwargs)
         if self._raises:
             raise self._raises
-        return SimpleNamespace(parsed_output=self._parsed, stop_reason=self._stop)
+        content = self._parsed.model_dump_json() if self._parsed else "I can't summarise that."
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=content), finish_reason=self._finish)])
 
 
 def long_text(n=200):
@@ -80,15 +83,17 @@ def test_summariser_sends_schema_and_delimited_transcript():
     summary = Summariser(client=client).summarise(note_of(long_text()))
     assert summary.title == "Essay structure"
     [call] = client.calls
-    assert call["output_format"] is NoteSummary
+    assert call["response_format"]["json_schema"]["name"] == "NoteSummary"
     assert call["model"] == summarise.MODEL
-    assert "<transcript>" in call["messages"][0]["content"]
+    [system, user] = call["messages"]
+    assert system["role"] == "system" and user["role"] == "user"
+    assert "<transcript>" in user["content"]
 
 
 @pytest.mark.parametrize("client", [
     FakeClient(raises=RuntimeError("network down")),
-    FakeClient(parsed=None),
-    FakeClient(parsed=NoteSummary(title="t", tldr="x"), stop_reason="refusal"),
+    FakeClient(parsed=None),                                          # never valid JSON
+    FakeClient(parsed=NoteSummary(title="t", tldr="x"), finish_reason="length"),
 ])
 def test_summariser_failures_raise(client):
     with pytest.raises(SummaryFailed):

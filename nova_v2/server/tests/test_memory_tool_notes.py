@@ -54,7 +54,8 @@ def test_forgetting_a_saved_fact_tombstones_its_episode(stores):
 def test_durable_save_falls_back_to_a_note_when_persona_is_down(stores, monkeypatch):
     def down(*_a, **_kw):
         raise RuntimeError("persona unreachable")
-    monkeypatch.setattr(persona, "upsert", down)
+    # A durable save goes through persona.remember (dedupe/contradiction).
+    monkeypatch.setattr(persona, "remember", down)
     result = save("Is allergic to peanuts", category=["facts", "health"])
     assert result["success"] and not result["indexed"]
     assert [n.text for n in notes.all_notes(USER)] == ["Is allergic to peanuts"]

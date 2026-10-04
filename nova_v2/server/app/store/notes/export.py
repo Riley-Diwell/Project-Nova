@@ -49,6 +49,9 @@ def note_markdown(note: Note) -> str:
         lines += [f"[{_clock(seg.start_s)}] {seg.text}" for seg in note.segments]
     else:
         lines.append(note.text)
+    if note.interpreted_text:
+        # A spoken note: the words above are as heard; this is Nova's reading.
+        lines += ["", "**What Nova thinks you said**", "", note.interpreted_text]
     lines.append("")
     if note.tags:
         lines += ["Tags: " + ", ".join(note.tags), ""]

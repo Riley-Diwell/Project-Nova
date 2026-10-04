@@ -94,7 +94,8 @@ class ReminderActionParsingTest {
         assertEquals(42, json.getInt("minutes_until_due"))
         assertTrue(json.isNull("fired_minutes_ago"))
         assertEquals(setOf("id", "text", "due_local", "minutes_until_due", "status", "priority",
-            "fired_minutes_ago", "recurrence"), json.keys().asSequence().toSet())
+            "fired_minutes_ago", "recurrence", "place", "every_time", "place_after_local"), json.keys().asSequence().toSet())
+        assertTrue(json.isNull("place"))
     }
 
     @Test

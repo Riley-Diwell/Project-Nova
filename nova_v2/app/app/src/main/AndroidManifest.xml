@@ -8,6 +8,10 @@
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Place reminders ("when I get to the shops") fire from geofences while the app is closed,
+         which needs "Allow all the time". Android grants it only from Settings, so it is asked for
+         from the Reminders screen when a place reminder exists (state/GeofenceRegistrar.kt). -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
@@ -126,6 +130,10 @@
 
         <receiver
             android:name=".service.ReminderActionReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".service.GeofenceReceiver"
             android:exported="false" />
 
         <!-- Separate from BootCompletedReceiver, which returns early with no wearable paired -

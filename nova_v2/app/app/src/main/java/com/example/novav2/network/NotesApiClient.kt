@@ -74,6 +74,9 @@ object NotesApiClient {
         val summary: Summary?,
         val summaryStatus: String,
         val promotedFactIds: List<String>,
+        /** For a spoken note: what Nova thinks was meant, shown under [text] as heard
+         * (server notes_pipeline/interpret.py). Null until read, or if nothing changed. */
+        val interpretedText: String? = null,
     ) {
         val displayTitle: String
             get() = title?.takeIf { it.isNotBlank() }
@@ -253,6 +256,7 @@ object NotesApiClient {
         },
         summaryStatus = o.optString("summary_status", "none"),
         promotedFactIds = o.optJSONArray("promoted_fact_ids").strings(),
+        interpretedText = o.optStringOrNull("interpreted_text"),
     )
 
     internal fun parseRows(a: JSONArray): List<NoteRow> = a.objects().map { o ->

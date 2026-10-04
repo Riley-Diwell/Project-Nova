@@ -60,7 +60,7 @@ from app.store.notes.store import (
 
 __all__ = [
     "create", "get", "list_notes", "all_notes", "update", "search", "delete",
-    "delete_all", "set_summary", "replace_chunks", "promote",
+    "delete_all", "set_summary", "set_interpretation", "replace_chunks", "promote",
     "get_store", "set_store", "get_processor", "set_processor",
     "NoteProcessor", "NotesStore", "InMemoryNotesStore", "SupabaseNotesStore",
     "NoteNotFound", "NoteIdConflict", "set_promoted", "Note", "NoteIn", "NotePatch", "NoteQuery", "NoteMatch",
@@ -164,6 +164,10 @@ def search(user_id: UserId, query: NoteQuery) -> list[NoteMatch]:
 
 def set_summary(user_id: UserId, note_id: str, summary: Optional[NoteSummary], status: str) -> None:
     get_store().set_summary(user_id, note_id, summary, status)
+
+
+def set_interpretation(user_id: UserId, note_id: str, text: Optional[str]) -> None:
+    get_store().set_interpretation(user_id, note_id, text)
 
 
 def replace_chunks(user_id: UserId, note_id: str, chunks: list[NoteChunkIn]) -> None:

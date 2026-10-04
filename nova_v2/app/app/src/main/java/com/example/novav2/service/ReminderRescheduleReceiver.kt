@@ -4,6 +4,7 @@ import android.app.AlarmManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.example.novav2.state.GeofenceRegistrar
 import com.example.novav2.state.ReminderRepository
 import com.example.novav2.state.ReminderScheduler
 import kotlinx.coroutines.CoroutineScope
@@ -19,6 +20,9 @@ import kotlinx.coroutines.launch
  *
  * Time and zone changes (and boot, which may follow either) re-resolve every pending reminder's
  * floating local time first, so "9am" is still 9am after a flight.
+ *
+ * Boot and an app update also clear every geofence, so [GeofenceRegistrar] is told to re-add
+ * them all (the reconcile inside rezoneAll does it).
  */
 class ReminderRescheduleReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -28,7 +32,10 @@ class ReminderRescheduleReceiver : BroadcastReceiver() {
             try {
                 when (intent.action) {
                     Intent.ACTION_BOOT_COMPLETED,
-                    Intent.ACTION_MY_PACKAGE_REPLACED,
+                    Intent.ACTION_MY_PACKAGE_REPLACED -> {
+                        GeofenceRegistrar.markLost(app)
+                        ReminderRepository.rezoneAll(app)
+                    }
                     Intent.ACTION_TIME_CHANGED,
                     Intent.ACTION_TIMEZONE_CHANGED -> ReminderRepository.rezoneAll(app)
                     AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED ->

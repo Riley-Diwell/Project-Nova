@@ -5,7 +5,8 @@ puts every fact under a topic, which a model then checks in the background -
 and config.py loads server/.env. So without this, any test that writes a
 belief could reach the model server. Every test gets table-driven stand-ins
 instead, and the topic check runs only when a test asks (refresh()), never on a
-background thread; tests that care install their own.
+background thread; tests that care install their own. The same goes for
+reading a spoken note back.
 """
 import pytest
 
@@ -30,3 +31,14 @@ def _offline_topics():
     yield
     clusters.set_classifier(None)
     clusters.set_background(clusters._executor.submit)
+
+
+@pytest.fixture(autouse=True)
+def _no_background_read_back():
+    """A spoken note is read back by a model on a background thread
+    (notes_pipeline/processor.py). Never in tests - they call interpret()."""
+    from app.notes_pipeline import processor
+
+    processor.set_background(None)
+    yield
+    processor.set_background(processor._executor.submit)

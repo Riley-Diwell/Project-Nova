@@ -2,6 +2,7 @@ package com.example.novav2.state
 
 import com.example.novav2.data.ReminderEntity
 import com.example.novav2.model.ReminderOrigin
+import com.example.novav2.model.ReminderPlace
 import com.example.novav2.model.ReminderPriority
 import com.example.novav2.model.ReminderRecurrence
 import com.example.novav2.model.ReminderStatus
@@ -44,6 +45,39 @@ object ReminderTransitions {
         updatedAtMillis = nowMillis,
     )
 
+    /** A reminder that goes off at a place instead of a time - no due time, and no alarm until
+     * it has one (see [ReminderEntity.NO_TRIGGER]), unless it has a [deadline]. [afterLocal]
+     * holds it off until then. */
+    fun createAtPlace(
+        text: String,
+        place: ReminderPlace,
+        everyTime: Boolean,
+        nowMillis: Long,
+        priority: ReminderPriority = ReminderPriority.NORMAL,
+        origin: ReminderOrigin = ReminderOrigin.REQUESTED,
+        sourceEpisodeId: String? = null,
+        id: String = UUID.randomUUID().toString(),
+        deadline: LocalDateTime? = null,
+        afterLocal: String? = null,
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): ReminderEntity = ReminderEntity(
+        id = id,
+        text = text.trim(),
+        dueLocal = deadline?.let(ReminderTime::format) ?: "",
+        triggerAtMillis = deadline?.let { ReminderTime.toMillis(it, zone) } ?: ReminderEntity.NO_TRIGGER,
+        status = ReminderStatus.PENDING.wire,
+        priority = priority.wire,
+        origin = origin.wire,
+        sourceEpisodeId = sourceEpisodeId,
+        createdAtMillis = nowMillis,
+        updatedAtMillis = nowMillis,
+        placeOn = place.on.wire,
+        placeLabel = place.label.trim(),
+        placePoints = ReminderPlace.encodePoints(place.points),
+        everyTime = everyTime,
+        placeAfterLocal = afterLocal,
+    )
+
     /** Delivered. An important one gets [rebuzzAtMillis] for its one follow-up buzz.
      *
      * A recurring one also arms its next occurrence: [ReminderEntity.dueLocal] stays the time
@@ -59,6 +93,8 @@ object ReminderTransitions {
             status = ReminderStatus.FIRED.wire,
             firedAtMillis = nowMillis,
             rebuzzAtMillis = rebuzzAtMillis,
+            // A place reminder held or snoozed had an instant; fired, it waits on its place again.
+            triggerAtMillis = if (r.isPlaceReminder) ReminderEntity.NO_TRIGGER else r.triggerAtMillis,
             updatedAtMillis = nowMillis,
         ),
         nowMillis,
@@ -108,8 +144,10 @@ object ReminderTransitions {
     )
 
     /** Done - or, for a recurring reminder, straight on to its next occurrence (computed in
-     * local time, skipping any already past) as the same row. */
+     * local time, skipping any already past) as the same row. An every-time place reminder
+     * goes back to waiting on its place. */
     fun complete(r: ReminderEntity, nowMillis: Long, zone: ZoneId): ReminderEntity {
+        if (r.isPlaceReminder && r.everyTime) return rearm(r, nowMillis).copy(completedAtMillis = nowMillis)
         val recurrence = r.recurrence
         val current = ReminderTime.parseLocal(r.dueLocal, zone)
         if (recurrence != null && current != null) {
@@ -155,7 +193,39 @@ object ReminderTransitions {
         )
     }
 
-    /** A new text, time or repeat. Any change of time makes it pending again at that time. */
+    /** Waiting on its place again, as if new: an every-time place reminder after it was done
+     * with, or before it goes off again ([ReminderEngine.onPlace]). */
+    fun rearm(r: ReminderEntity, nowMillis: Long): ReminderEntity = r.copy(
+        status = ReminderStatus.PENDING.wire,
+        triggerAtMillis = ReminderEntity.NO_TRIGGER,
+        deferReason = null,
+        deferCount = 0,
+        firstDeferredAtMillis = null,
+        snoozeCount = 0,
+        rebuzzAtMillis = null,
+        firedAtMillis = null,
+        clearedAtMillis = null,
+        updatedAtMillis = nowMillis,
+    )
+
+    /** Go off at [place] instead of whatever it had - a time, a repeat or another place. */
+    fun moveToPlace(r: ReminderEntity, place: ReminderPlace, nowMillis: Long): ReminderEntity = rearm(
+        r.copy(
+            dueLocal = "",
+            placeOn = place.on.wire,
+            placeLabel = place.label.trim(),
+            placePoints = ReminderPlace.encodePoints(place.points),
+            placeAfterLocal = null,
+            recurFrequency = null,
+            recurInterval = 1,
+            recurCountRemaining = null,
+            recurUntilLocal = null,
+        ),
+        nowMillis,
+    )
+
+    /** A new text, time or repeat. Any change of time makes it pending again at that time - and a
+     * place reminder given a time stops being one. */
     fun edit(
         r: ReminderEntity,
         nowMillis: Long,
@@ -179,7 +249,11 @@ object ReminderTransitions {
                 recurUntilLocal = recurrence?.untilLocal,
             )
         }
-        return if (due != null) reset(next, due, zone, nowMillis) else next
+        if (due == null) return next
+        return reset(
+            next.copy(placeOn = null, placeLabel = null, placePoints = null, everyTime = false, placeAfterLocal = null),
+            due, zone, nowMillis,
+        )
     }
 
     /** Re-resolve a pending reminder's floating time after a time or zone change, and a fired

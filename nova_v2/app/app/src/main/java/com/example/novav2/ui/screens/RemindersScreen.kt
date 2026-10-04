@@ -1,8 +1,12 @@
 package com.example.novav2.ui.screens
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,6 +32,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.NotificationsNone
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -79,6 +84,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -87,10 +93,12 @@ import com.example.novav2.ble.NovaDeviceConnectionState
 import com.example.novav2.ble.NovaDevicePairing
 import com.example.novav2.ble.NovaDeviceRepository
 import com.example.novav2.data.ReminderEntity
+import com.example.novav2.model.PlaceEvent
 import com.example.novav2.model.ReminderOrigin
 import com.example.novav2.model.ReminderPriority
 import com.example.novav2.model.ReminderRecurrence
 import com.example.novav2.model.ReminderStatus
+import com.example.novav2.state.GeofenceRegistrar
 import com.example.novav2.state.ReminderScheduler
 import com.example.novav2.state.ReminderTime
 import com.example.novav2.viewmodel.RemindersViewModel
@@ -109,6 +117,7 @@ import com.example.novav2.ui.components.Tag
 import com.example.novav2.ui.components.TagSpacing
 import com.example.novav2.ui.theme.NovaWarn
 import com.example.novav2.ui.theme.novaSwitchColors
+import com.example.novav2.ui.components.clearFocusOnTap
 
 private const val WEEK_MILLIS = 7L * 24 * 60 * 60_000
 
@@ -125,6 +134,7 @@ fun RemindersScreen(viewModel: RemindersViewModel = viewModel()) {
     val reminders by viewModel.reminders.collectAsState()
     val exactAllowed by viewModel.exactAlarmsAllowed.collectAsState()
     val notificationsAllowed by viewModel.notificationsAllowed.collectAsState()
+    val placeStatus by viewModel.placeStatus.collectAsState()
     val deviceState by NovaDeviceRepository.connectionState.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -132,6 +142,18 @@ fun RemindersScreen(viewModel: RemindersViewModel = viewModel()) {
     var editing by remember { mutableStateOf<ReminderEntity?>(null) }
     var adding by remember { mutableStateOf(false) }
     var showDone by remember { mutableStateOf(false) }
+
+    // "Allow all the time" can only be asked for once "while using the app" is granted, and on
+    // Android 11+ the request opens Settings rather than a dialog. Either result comes back
+    // through refreshPermissions, which re-registers the geofences.
+    val backgroundLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        viewModel.refreshPermissions()
+    }
+    val foregroundLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
+        if (granted[Manifest.permission.ACCESS_FINE_LOCATION] == true && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            backgroundLocation.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        } else viewModel.refreshPermissions()
+    }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -209,6 +231,34 @@ fun RemindersScreen(viewModel: RemindersViewModel = viewModel()) {
                             .setData(android.net.Uri.parse("package:${context.packageName}"))
                     }
                     context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+            }
+            if (placeStatus == GeofenceRegistrar.Status.NEEDS_BACKGROUND_LOCATION) item {
+                Banner(
+                    "Place reminders need your location",
+                    "Set location to “Allow all the time” so they can go off when you arrive.",
+                    "Allow",
+                ) {
+                    val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                        PackageManager.PERMISSION_GRANTED
+                    if (!fine) {
+                        foregroundLocation.launch(arrayOf(
+                            Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION,
+                        ))
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        backgroundLocation.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                    }
+                }
+            }
+            if (placeStatus == GeofenceRegistrar.Status.UNAVAILABLE) item {
+                Banner(
+                    "Place reminders are paused",
+                    "Location is off, so arriving somewhere can't be noticed.",
+                    "Turn on",
+                ) {
+                    context.startActivity(
+                        Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
                 }
             }
             if (NovaDevicePairing.isPaired(context) && deviceState != NovaDeviceConnectionState.CONNECTED) item {
@@ -368,6 +418,7 @@ private fun ReminderRow(
                 val important = r.priorityEnum == ReminderPriority.IMPORTANT
                 val suggested = r.originEnum == ReminderOrigin.INFERRED
                 val repeats = r.recurrence?.let { "Repeats ${it.describe()}" }
+                    ?: if (r.isPlaceReminder && r.everyTime) "Every time" else null
                 if (important || suggested || repeats != null) FlowRow(
                     modifier = Modifier.padding(top = 6.dp),
                     horizontalArrangement = TagSpacing,
@@ -386,10 +437,26 @@ private fun ReminderRow(
     }
 }
 
-/** The secondary line: when it's due, or why it's held and when it will arrive. */
+/** "When you get to the shops" / "When you leave work", with any bounds: "· from tomorrow
+ * 12:00am", "· or at 5:00pm". */
+private fun placeLine(r: ReminderEntity, nowLocal: LocalDateTime = LocalDateTime.now()): String? {
+    val place = r.place ?: return null
+    val zone = ZoneId.systemDefault()
+    val where = when (place.on) {
+        PlaceEvent.ARRIVE -> "When you get to ${place.label}"
+        PlaceEvent.LEAVE -> "When you leave ${place.label}"
+    }
+    val after = r.placeAfterLocal?.let { ReminderTime.parseLocal(it, zone) }?.takeIf { it.isAfter(nowLocal) }
+    val deadline = ReminderTime.parseLocal(r.dueLocal, zone)
+    return where +
+        (after?.let { " · from ${ReminderTime.describe(it, nowLocal)}" } ?: "") +
+        (deadline?.let { " · or at ${ReminderTime.describe(it, nowLocal)}" } ?: "")
+}
+
+/** The secondary line: when it's due (or where), or why it's held and when it will arrive. */
 private fun whenLine(r: ReminderEntity, nowLocal: LocalDateTime, zone: ZoneId, nowMillis: Long): String {
     val due = ReminderTime.parseLocal(r.dueLocal, zone)
-    val dueText = due?.let { ReminderTime.describe(it, nowLocal) } ?: r.dueLocal
+    val dueText = placeLine(r, nowLocal) ?: due?.let { ReminderTime.describe(it, nowLocal) } ?: r.dueLocal
     return when (r.statusEnum) {
         ReminderStatus.DEFERRED -> {
             val reason = if (r.deferReason == "call") "your call" else r.deferReason ?: "a busy moment"
@@ -398,7 +465,12 @@ private fun whenLine(r: ReminderEntity, nowLocal: LocalDateTime, zone: ZoneId, n
         ReminderStatus.SNOOZED -> "Snoozed · back at ${ReminderTime.clock(r.triggerAtMillis, zone)}"
         ReminderStatus.FIRED -> {
             val ago = r.firedAtMillis?.let { (nowMillis - it) / 60_000L }
-            if (ago == null || ago < 1) "Just now" else "Went off ${ago} min ago · was due $dueText"
+            val place = r.place
+            when {
+                ago == null || ago < 1 -> "Just now"
+                place != null -> "Went off ${ago} min ago · ${if (place.on == PlaceEvent.ARRIVE) "at" else "leaving"} ${place.label}"
+                else -> "Went off ${ago} min ago · was due $dueText"
+            }
         }
         ReminderStatus.DONE -> r.completedAtMillis?.let {
             "Done ${ReminderTime.describe(ReminderTime.toLocal(it, zone), nowLocal)}"
@@ -441,13 +513,17 @@ private fun ReminderEditorDialog(
     if (existing == null) LaunchedEffect(Unit) { focus.requestFocus() }
 
     val chosen = LocalDateTime.of(date, time)
+    // A place reminder keeps its place - it's set by voice ("when I get to the shops"), and here
+    // only its text and importance change.
+    val atPlace = existing?.let { placeLine(it) }
     // An edit that leaves the time alone keeps it, even if it's already passed (a reminder that
     // went off and is only having its text fixed). Anything else has to be in the future.
-    val timeUnchanged = existing != null && chosen == original
+    val timeUnchanged = existing != null && (chosen == original || atPlace != null)
     val inPast = !timeUnchanged && !chosen.isAfter(LocalDateTime.now())
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.clearFocusOnTap(),
         title = { Text(if (existing == null) "New reminder" else "Edit reminder") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -457,7 +533,11 @@ private fun ReminderEditorDialog(
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                     modifier = Modifier.fillMaxWidth().focusRequester(focus),
                 )
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (atPlace != null) Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Place, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.width(8.dp))
+                    Text(atPlace, style = MaterialTheme.typography.bodyLarge)
+                } else Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     PickerField(Icons.Default.CalendarToday, "Date", date.format(DateTimeFormatter.ofPattern("EEE d MMM yyyy")),
                         error = inPast) { pickingDate = true }
                     PickerField(Icons.Default.Schedule, "Time", ReminderTime.clock(chosen), error = inPast) { pickingTime = true }
@@ -479,7 +559,7 @@ private fun ReminderEditorDialog(
                     Spacer(Modifier.width(12.dp))
                     Switch(checked = important, onCheckedChange = { important = it }, colors = novaSwitchColors())
                 }
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (atPlace == null) Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Repeat", style = MaterialTheme.typography.bodyLarge)
                     // Wraps onto a second line instead of squeezing - a fixed Row of five chips
                     // in a dialog's width crushed "Monthly" into a vertical column of letters.

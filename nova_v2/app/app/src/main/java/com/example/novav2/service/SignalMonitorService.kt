@@ -12,6 +12,7 @@ import com.example.novav2.R
 import com.example.novav2.state.ActivitySignal
 import com.example.novav2.state.AmbientCheckRunner
 import com.example.novav2.state.AmbientNotifier
+import com.example.novav2.state.GeofenceRegistrar
 import com.example.novav2.state.LocationSignal
 import com.example.novav2.state.ReminderScheduler
 import com.example.novav2.state.SensorSignal
@@ -58,6 +59,8 @@ class SignalMonitorService : Service() {
             while (true) {
                 LocationSignal.refresh(applicationContext)
                 SignalRepository.update(applicationContext)
+                // Location switched back on after the platform dropped the geofences, say.
+                GeofenceRegistrar.retryIfFailed(applicationContext)
 
                 ticksSinceAmbientCheck++
                 if (ticksSinceAmbientCheck >= TICKS_PER_AMBIENT_CHECK) {

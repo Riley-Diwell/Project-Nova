@@ -86,7 +86,7 @@ def test_get_reminders_result_widens_the_known_ids(ctx, monkeypatch):
     # resume() would call the model; stop just before it.
     monkeypatch.setattr(intent_surface, "_run_loop", lambda messages, n, event_id, c, is_voice: c)
     intent_surface._PENDING_SESSIONS["s1"] = {
-        "messages": [], "tool_use_id": "t1", "event_id": uuid4(), "ctx": ctx,
+        "messages": [], "tool_call_id": "t1", "event_id": uuid4(), "ctx": ctx,
         "user_id": "u1", "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
     }
     resumed = intent_surface.resume("u1", "s1", {"reminders": [{"id": UNSEEN, "text": "Dentist"}]})
