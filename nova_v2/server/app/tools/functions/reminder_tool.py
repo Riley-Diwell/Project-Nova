@@ -175,22 +175,16 @@ _PLACE_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": list(places.MATCHES),
             "description": (
-                "here: where they are right now ('when I get back here'). "
-                "one: one specific place or address - 'Woolworths Dickson', "
-                "'the Chifley library', or for home, work or someone's place "
-                "the ADDRESS from what you know about the user. "
-                "chain: any branch of a named business ('any Woolworths', "
-                "'a Bunnings'). "
-                "type: any place of a kind - 'the shops' (shops), 'a petrol "
-                "station', 'the chemist' (pharmacy) - with place_type."
+                "here: where they are now ('when I get back here'). one: one "
+                "place or address - 'Woolworths Dickson', or for home, work or "
+                "someone's place its ADDRESS. chain: any branch of a business "
+                "('any Woolworths'). type: any place of a kind with place_type "
+                "- 'the shops' (shops), 'the chemist' (pharmacy)."
             ),
         },
         "query": {
             "type": "string",
-            "description": (
-                "one: the place's name or street address to search for. chain: "
-                "just the business name ('Woolworths'). Not for here or type."
-            ),
+            "description": "one: the name or street address. chain: the business name. Not for here/type.",
         },
         "place_type": {
             "type": "string",
@@ -199,10 +193,7 @@ _PLACE_SCHEMA: dict[str, Any] = {
         },
         "label": {
             "type": "string",
-            "description": (
-                "How the user said it, for the notification and the list: "
-                "'the shops', 'home', 'Woolworths', 'the gym'."
-            ),
+            "description": "How the user named it: 'the shops', 'home', 'the gym'.",
         },
     },
     "required": ["on", "match", "label"],
@@ -260,33 +251,21 @@ class SetReminderTool(BaseTool):
         super().__init__(
             name="set_reminder",
             description=(
-                "Sets a reminder that Nova delivers at the right moment - a "
-                "buzz on the wearable and a notification, held until after a "
-                "class if it would interrupt one. Use it for anything with "
-                "something to say at a time: 'remind me at 4:30 to email Dr "
-                "Chen', 'remind me in 20 minutes to take the pasta off', "
-                "'don't let me forget to submit the form by 5', 'remember to "
-                "call Mum tonight' ('remember to ...' is a reminder, not a "
-                "memory save). It can also go off when they arrive at or "
-                "leave a place instead of at a time: 'remind me to buy milk "
-                "when I get to the shops', 'when I leave work remind me to "
-                "grab my charger', 'every time I get to the gym remind me to "
-                "stretch' - use place, not due_local. Not for a bare "
+                "Sets a reminder - a buzz on the wearable and a notification, "
+                "held until after a class if it would interrupt one. For "
+                "anything to be told at a time ('remind me at 4:30 to email Dr "
+                "Chen', 'don't let me forget the form by 5', 'remember to call "
+                "Mum tonight' - 'remember to ...' is a reminder, not a memory "
+                "save) or on arriving at or leaving a place ('when I get to the "
+                "shops', 'every time I get to the gym'). Not for a bare "
                 "countdown (set_timer), a wake-up (set_alarm), or an "
                 "appointment with people or a duration (add_calendar_event). "
-                "For a relative time use in_minutes and never do the clock "
-                "arithmetic yourself. For an absolute time use due_local in "
-                "the user's LOCAL time, worked out from the top-level "
-                "local_time. For 'after this lecture/class', copy that "
-                "current_events entry's end_local exactly. For home, work or "
-                "anyone's place, pass its address from what you know about "
-                "the user (recall it with the memory tool if it isn't in "
-                "front of you); if you don't know it, ask for the address - "
-                "never search for 'home'. If they gave no time or place at "
-                "all, ask when rather than guessing. It is stored on the "
-                "device the moment this call is made, so confirm it as done "
-                "('I'll remind you at 4:30', 'I'll remind you when you get to "
-                "the shops'), not as pending."
+                "For home, work or anyone's place pass its address - recall it "
+                "with the memory tool if it isn't in front of you, ask if you "
+                "don't know it, never search for 'home'. No time or place at "
+                "all: ask when. It is stored on the device as this call is "
+                "made, so confirm it as done ('I'll remind you at 4:30'), not "
+                "pending."
             ),
             gain_description=(
                 "How readily Nova sets a reminder you didn't ask for. At 0.0 "
@@ -303,57 +282,45 @@ class SetReminderTool(BaseTool):
                     "text": {
                         "type": "string",
                         "description": (
-                            "What to remind them of, a short instruction in their "
-                            "own words WITHOUT the time, e.g. 'Email Dr Chen about "
-                            "the extension'."
+                            "A short instruction in their words WITHOUT the time - "
+                            "'Email Dr Chen about the extension'."
                         ),
                     },
                     "due_local": {
                         "type": "string",
                         "description": (
-                            "When, in the user's LOCAL time, ISO 8601 with no "
-                            "timezone suffix (2026-09-23T16:30:00), worked out from "
-                            "top-level local_time - never UTC. For 'after this "
-                            "lecture/class' copy that current_events entry's "
-                            "end_local exactly. Omit if you set in_minutes. With "
-                            "place it is a deadline: the latest it goes off, if "
-                            "they haven't got there first ('at 5 or when I leave "
-                            "work, whichever comes first') - only when they gave one."
+                            "An absolute time, LOCAL, ISO 8601 with no timezone "
+                            "suffix (2026-09-23T16:30:00), from top-level "
+                            "local_time - never UTC. 'After this lecture/class': "
+                            "copy that current_events entry's end_local exactly. "
+                            "With place, only a deadline they gave ('at 5 or when "
+                            "I leave work, whichever comes first')."
                         ),
                     },
                     "in_minutes": {
                         "type": "integer",
                         "minimum": 1,
                         "description": (
-                            "For a relative ask ('in 20 minutes', 'in an hour and a "
-                            "half') the whole minutes from now (20, 90). Do NOT add "
-                            "it to local_time yourself - the phone counts from when "
-                            "it receives this. Set exactly one of due_local / "
+                            "A relative time ('in 20 minutes', 'in an hour and a "
+                            "half') as whole minutes (20, 90). Never add it to "
+                            "local_time yourself. Set exactly one of due_local / "
                             "in_minutes / place."
                         ),
                     },
                     "place": {
                         **_PLACE_SCHEMA,
-                        "description": (
-                            "For a reminder that goes off on arriving at or "
-                            "leaving a place instead of at a time. Omit "
-                            "due_local and in_minutes when you set this."
-                        ),
+                        "description": "Goes off on arriving at or leaving a place instead of at a time.",
                     },
                     "every_time": {
                         "type": "boolean",
-                        "description": (
-                            "place only: true for 'every time I get to ...' - it "
-                            "stays set after it goes off. Default false."
-                        ),
+                        "description": "place only: true for 'every time I get to ...'.",
                     },
                     "after_local": {
                         "type": "string",
                         "description": (
-                            "place only: don't go off before this LOCAL time, same "
-                            "format as due_local - 'when I get to uni tomorrow' is "
-                            "tomorrow at 00:00, 'when I get home tonight' is today "
-                            "at 17:00. Omit for 'next time I'm there'."
+                            "place only: not before this LOCAL time - 'when I get "
+                            "to uni tomorrow' is tomorrow 00:00, 'when I get home "
+                            "tonight' today 17:00. Omit for 'next time I'm there'."
                         ),
                     },
                     "priority": {
@@ -361,16 +328,14 @@ class SetReminderTool(BaseTool):
                         "enum": list(PRIORITIES),
                         "description": (
                             "'important' only if they said it matters or not to let "
-                            "them miss it - it may arrive as a buzz during a class "
-                            "instead of waiting. Default normal."
+                            "them miss it - it may then buzz during a class."
                         ),
                     },
                     "recurrence": {
                         **_RECURRENCE_SCHEMA,
                         "description": (
-                            "Only for a repeating reminder ('every Monday at 9', "
-                            "'every day at 8pm') - omit it entirely for a one-off. "
-                            "due_local is then the FIRST occurrence."
+                            "Only for a repeating one ('every Monday at 9'); omit "
+                            "for a one-off. due_local is then the FIRST occurrence."
                         ),
                     },
                 },
@@ -495,23 +460,17 @@ class UpdateReminderTool(BaseTool):
             name="update_reminder",
             description=(
                 "Completes, snoozes, edits or deletes one of the user's "
-                "reminders. reminder_id comes only from user_state.reminders "
-                "or a get_reminders result - never invent or guess one; if "
-                "you don't have it, call get_reminders first. 'That' or 'it' "
-                "right after a reminder went off means the reminder with the "
-                "smallest fired_minutes_ago. complete: they did it. snooze: "
-                "bring it back in in_minutes (default 10). edit: change text, "
-                "or its time with due_local (a new LOCAL time), in_minutes "
-                "(relative to now) or shift_minutes ('push it back half an "
-                "hour' = 30, 'an hour earlier' = -60) - only one of those "
-                "three - or place, to make it go off at a place instead "
+                "reminders. 'That' or 'it' right after one went off means the "
+                "one with the smallest fired_minutes_ago. complete: they did "
+                "it. snooze: back in in_minutes (default 10). edit: new text, "
+                "or a new time with ONE of due_local, in_minutes or "
+                "shift_minutes, or place to go off at a place instead "
                 "('actually remind me when I get home'). 'Change my X "
-                "reminder to 4pm' is an edit with due_local on the reminder's "
-                "own date (a place reminder has none - use today's or the day "
-                "they said); 'to Friday' keeps its own time; 'to say Y' is "
-                "text. delete: remove it. All apply "
-                "on the device the moment this call is made, so confirm them "
-                "as done."
+                "reminder to 4pm' is due_local on the reminder's own date (a "
+                "place reminder has none - use today or the day they said); "
+                "'to Friday' keeps its time; 'to say Y' is text. delete: "
+                "remove it. All apply on the device as this call is made, so "
+                "confirm them as done."
             ),
             gain_description=(
                 "How readily Nova changes one of your reminders without being "
@@ -524,29 +483,23 @@ class UpdateReminderTool(BaseTool):
                     "reminder_id": {
                         "type": "string",
                         "description": (
-                            "The id exactly as listed in user_state.reminders (or "
-                            "a get_reminders result). Never invent or guess one."
+                            "Exactly as in user_state.reminders or a get_reminders "
+                            "result - never guessed. Don't have it: call "
+                            "get_reminders first."
                         ),
                     },
                     "action": {"type": "string", "enum": list(UPDATE_ACTIONS)},
                     "label": {
                         "type": "string",
-                        "description": (
-                            "The reminder's current text copied from "
-                            "user_state.reminders - for the audit log and undo "
-                            "notice."
-                        ),
+                        "description": "The reminder's current text, copied from user_state.reminders.",
                     },
                     "text": {
                         "type": "string",
-                        "description": "edit only: new text, only if changing.",
+                        "description": "edit only: new text.",
                     },
                     "due_local": {
                         "type": "string",
-                        "description": (
-                            "edit only: new LOCAL time, same format as "
-                            "set_reminder."
-                        ),
+                        "description": "edit only: new LOCAL time, same format as set_reminder.",
                     },
                     "in_minutes": {
                         "type": "integer",
@@ -565,24 +518,15 @@ class UpdateReminderTool(BaseTool):
                     },
                     "recurrence": {
                         **_RECURRENCE_SCHEMA,
-                        "description": (
-                            "edit only: a new repeat pattern. Leave it out to keep "
-                            "the current one."
-                        ),
+                        "description": "edit only: a new repeat pattern; omit to keep it.",
                     },
                     "place": {
                         **_PLACE_SCHEMA,
-                        "description": (
-                            "edit only: a new place for it to go off at, same as "
-                            "set_reminder's. Replaces any time it had."
-                        ),
+                        "description": "edit only: a new place to go off at, replacing any time.",
                     },
                     "every_time": {
                         "type": "boolean",
-                        "description": (
-                            "edit only, for a place reminder: true to keep it set "
-                            "after it goes off, false to make it a one-off."
-                        ),
+                        "description": "edit only, a place reminder: true to repeat, false for a one-off.",
                     },
                 },
                 "required": ["reminder_id", "action", "label"],
