@@ -2,6 +2,7 @@ package com.example.novav2.auth
 
 import android.content.Context
 import android.content.Intent
+import com.example.novav2.ble.NovaDevicePairing
 import com.example.novav2.network.NovaApiClient
 import com.example.novav2.network.NovaHttp
 import com.example.novav2.service.SignalMonitorService
@@ -137,6 +138,8 @@ object AuthRepository {
         val revoking = session
         forget()
         LocalData.wipe(appContext)
+        // The device is this account's too: the next person signs in and pairs their own.
+        NovaDevicePairing.forget(appContext)
         Log.i(TAG, "signed out")
         if (revoking != null) appScope.launch(Dispatchers.IO) { revoke(revoking, everywhere) }
     }

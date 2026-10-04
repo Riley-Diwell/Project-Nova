@@ -212,10 +212,7 @@ fun DeviceScreen(showSettings: Boolean = true) {
                         Spacer(Modifier.height(12.dp))
                     }
                     OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
-                        context.stopService(Intent(context, NovaDeviceService::class.java))
-                        NovaDevicePairing.clearPairedDevice(context)
-                        NovaDeviceRepository.setConnectionState(NovaDeviceConnectionState.DISCONNECTED)
-                        NovaDeviceRepository.setCommandSender(null)
+                        NovaDevicePairing.forget(context)
                         paired = false
                     }) {
                         Text("Forget device", color = MaterialTheme.colorScheme.error)
