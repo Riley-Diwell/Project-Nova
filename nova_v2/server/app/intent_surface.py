@@ -31,7 +31,7 @@ from pydantic import BaseModel
 # import nova libraries
 from app.schemas.user_state import UserState
 from app.schemas.event import Event
-from app.control.commands import classify, note_body, offer_reply
+from app.control.commands import Command, classify, note_body, offer_reply
 from app.control.cues import note_wants_reminder
 from app.control.controller import Decision, ProportionalController, Reason, Turn
 from app.control.observer import observe, trends_from_facts
@@ -568,6 +568,11 @@ class TurnContext:
     # (notes.delete -> memory.delete_referencing).
     from_notes: list[str] = field(default_factory=list)
 
+    # The request this turn's authority came from: this turn's own words, or
+    # the earlier turn whose question this one answers. Stashed with the
+    # thread when the turn ends on a question, so the answer keeps it.
+    command: Command | None = None
+
     @property
     def ran(self) -> list[str]:
         """Names of the tools that actually ran - logging only."""
@@ -975,9 +980,15 @@ _PENDING_CONFIRMATION_MAX_MESSAGES = 12
 
 def _stash_pending_confirmation(
     user_id: UUID | str | None, messages: list[dict[str, Any]], note_ids: list[str] | None = None,
+    command: Command | None = None,
 ) -> None:
     """Called when a voice turn ends on a question - keeps the live thread
-    so this user's next voice turn can continue it instead of starting over."""
+    so this user's next voice turn can continue it instead of starting over.
+
+    `command` is the request the question was asked in the service of. An
+    answer to "when should I remind you?" - "tomorrow 10am" - is no command
+    by classify()'s grammar, and without this the reminder it completes
+    would be judged by gain alone, with set_reminder usually not offered."""
     key = str(user_id)
     if len(messages) > _PENDING_CONFIRMATION_MAX_MESSAGES:
         _PENDING_CONFIRMATION.pop(key, None)
@@ -990,6 +1001,7 @@ def _stash_pending_confirmation(
     _PENDING_CONFIRMATION[key] = {
         "messages": messages,
         "note_ids": list(note_ids or []),
+        "command": command,
         "expires_at": now + _PENDING_CONFIRMATION_TTL,
     }
 
@@ -1019,6 +1031,7 @@ def _pop_pending_turn(user_id: UUID | str | None) -> dict[str, Any] | None:
     return {
         "messages": pending["messages"],
         "note_ids": list(pending.get("note_ids") or []),
+        "command": pending.get("command"),
     }
 
 
@@ -1365,13 +1378,16 @@ def _run(
     # The batcher used to keep its own copy of calendar_ctx/dnd to derive this -
     # now it just gets told, same source of truth as everything else this turn.
     set_batcher_mode(user_id, observation.mode.value)
-    command = classify(event)
     is_voice = event.type == "voice"
     # Only voice turns can be "yes"/"no" answers to a prior spoken question,
     # so only voice turns consume the pending thread - an ambient event
     # arriving in between (location update, notification, ...) must not
     # steal or clear it.
     pending = _pop_pending_turn(user_id) if is_voice else None
+    # An answer to a question asked under a command finishes that command:
+    # "tomorrow 10am" after "when should I remind you?" is the reminder
+    # request still going, whatever its own grammar says.
+    command = classify(event) or (pending["command"] if pending else None)
     gains, _ = _gains_for(user_id)
     turn = ProportionalController(gains).open_turn(observation, command)
     authorised = turn.authorised()
@@ -1425,6 +1441,7 @@ def _run(
             if user_state.reminders_pending_total is not None else None
         ),
         from_notes=from_notes,
+        command=command,
     )
     verbatim = note_body(event)
     if verbatim is not None and "memory" in authorised:
@@ -1609,6 +1626,7 @@ def _end_on_choice(
         ctx.user_id,
         [*messages, {"role": "assistant", "content": question}],
         note_ids=ctx.from_notes,
+        command=ctx.command,
     )
     return IntentResult(
         event_id=event_id, speech=question, actions=ctx.for_wire(),
@@ -1827,6 +1845,7 @@ def _run_loop(
                         ctx.user_id,
                         [*messages, {"role": "assistant", "content": speech}],
                         note_ids=ctx.from_notes,
+                        command=ctx.command,
                     )
                 else:
                     _clear_pending_confirmation(ctx.user_id)
