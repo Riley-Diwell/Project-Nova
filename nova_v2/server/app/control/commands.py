@@ -75,6 +75,7 @@ _AUXILIARIES = frozenset({
 _IMPERATIVE_VERBS = frozenset({
     # memory
     "remember", "remind", "note", "save", "store", "forget", "recall",
+    "write", "jot", "draft",
     # retrieval and speech
     "tell", "say", "read", "show", "list", "check", "find", "search", "look",
     "repeat", "summarise", "summarize",
