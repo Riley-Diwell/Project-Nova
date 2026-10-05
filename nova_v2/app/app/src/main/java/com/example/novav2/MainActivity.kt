@@ -15,12 +15,14 @@ import com.example.novav2.auth.AuthRepository
 import com.example.novav2.auth.SessionState
 import com.example.novav2.ble.NovaDevicePairing
 import com.example.novav2.notes.NotesRepository
+import com.example.novav2.profile.ProfileRepository
 import com.example.novav2.service.NovaDeviceService
 import com.example.novav2.service.SignalMonitorService
 import com.example.novav2.state.ReminderScheduler
 import com.example.novav2.ui.NovaApp
 import com.example.novav2.ui.theme.NovaTheme
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
@@ -48,8 +50,16 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        // Not until onboarding is done - its permissions step explains notifications before asking,
+        // and a bare system dialog over the sign-up screens would beat it to it.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            lifecycleScope.launch {
+                ProfileRepository.state.first {
+                    it is ProfileRepository.ProfileState.Ready &&
+                        (it.profile?.needsOnboarding == false || BuildConfig.SKIP_ONBOARDING)
+                }
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
         }
         // The ambient loop posts to the server as the signed-in user, so it runs only while
         // someone is signed in: started on sign-in, stopped on sign-out (AuthRepository also

@@ -64,10 +64,14 @@ private const val STEP_WEEK = 1
 private const val STEP_RHYTHM = 2
 private const val STEP_BEHAVIOUR = 3
 private const val STEP_CANVAS = 4
-private const val STEP_DEVICE = 5
-private const val STEPS = 6
+private const val STEP_PERMISSIONS = 5
+private const val STEP_DEVICE = 6
+private const val STEPS = 7
 
-private val TITLES = listOf("About you", "Your week", "Your rhythm", "How Nova behaves", "Your uni's Canvas", "Your Nova device")
+private val TITLES = listOf(
+    "About you", "Your week", "Your rhythm", "How Nova behaves", "Your uni's Canvas", "What Nova can use",
+    "Your Nova device",
+)
 
 /**
  * Onboarding: the few questions that let Nova fit the user from day
@@ -197,6 +201,7 @@ fun OnboardingFlow() {
                             )
                             CanvasConnectSection()
                         }
+                        STEP_PERMISSIONS -> PermissionsStep()
                     }
                     Spacer(Modifier.height(8.dp))
                 }
