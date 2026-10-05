@@ -98,7 +98,7 @@ const uint8_t AUDIO_FLAG_NOTE      = 0x04; // on START: a dictated note (tap, th
 // for copy-pasting into firmware/audio_playback_test.py. That is ~520 chars
 // per block at 115200 baud - enough to stall the loop and drop audio.
 // Set to 1 only for that bench test.
-#define AUDIO_DEBUG_HEX 1
+#define AUDIO_DEBUG_HEX 0
 
 // How long setupBLE() waits for a USB serial monitor before carrying on. It
 // used to wait forever, which blocks boot on battery with no USB host.
@@ -354,12 +354,6 @@ void checkButton() {
   }
 }
 
-void startRecording() {
-  isRecording = 1;
-  //digitalWrite(led1, HIGH);
-  Serial.println("Begin audio recording!");
-}
-
 void enterButtonState(ButtonState next) {
   buttonState = next;
   buttonChangedAt = millis();
@@ -436,8 +430,6 @@ void stopRecording() {
   if (!isRecording) return;
   isRecording = 0;
   Serial.println("Stop recording audio");
-  //digitalWrite(led1, LOW);
-  //startPulse(led2, led2Pulse, 500); // quick pulse
   startGreenPulse(500); // quick confirmation flash
 }
 
@@ -1045,11 +1037,6 @@ void compassDetectionLoop(){
   sensors_event_t event;
   mag.getEvent(&event);
 
-  /* Display the results (magnetic vector values are in micro-Tesla (uT)) */
-  //Serial.print("X: "); Serial.print(event.magnetic.x); Serial.print("  ");
- // Serial.print("Y: "); Serial.print(event.magnetic.y); Serial.print("  ");
-//  Serial.print("Z: "); Serial.print(event.magnetic.z); Serial.print("  ");Serial.println("uT");
-
   // Hold the module so that Z is pointing 'up' and you can measure the heading with x&y
   // Calculate heading when the magnetometer is level, then correct for signs of axis.
   float heading = atan2(event.magnetic.y, event.magnetic.x);
@@ -1073,28 +1060,7 @@ void compassDetectionLoop(){
   float headingDegrees = heading * 180/M_PI;
   currentHeading = headingDegrees;
 
-  //Serial.print("Heading (degrees): "); Serial.println(headingDegrees);
-
-  // convert to 8 point compass interpretation
- /* if (headingDegrees >= 337.5 || headingDegrees < 22.5) {
-  Serial.println("N");
-} else if (headingDegrees < 67.5) {
-  Serial.println("NE");
-} else if (headingDegrees < 112.5) {
-  Serial.println("E");
-} else if (headingDegrees < 157.5) {
-  Serial.println("SE");
-} else if (headingDegrees < 202.5) {
-  Serial.println("S");
-} else if (headingDegrees < 247.5) {
-  Serial.println("SW");
-} else if (headingDegrees < 292.5) {
-  Serial.println("W");
-} else {
-  Serial.println("NW");
-}
-*/
-    // Shortest angle between where we're facing and where we want to face: 0-180 deg.
+  // Shortest angle between where we're facing and where we want to face: 0-180 deg.
   float diff = fmod(headingDegrees - targetHeading + 540.0, 360.0) - 180.0;
   headingError = fabs(diff);
 
@@ -1102,8 +1068,11 @@ void compassDetectionLoop(){
   static uint32_t lastPrint = 0;
   if (!isRecording && (millis() - lastPrint) > 1000) {
     lastPrint = millis();
-    //Serial.printf("Heading %.0f deg | target %s | off by %.0f deg\n",
-      //            headingDegrees, desiredDirection.c_str(), headingError);
+    // Four specifiers, four arguments - the current direction used to be
+    // missing, so %s read a float as a string pointer.
+    Serial.printf("Heading %.0f deg (%s) | target %.0f deg (%s) | off by %.0f deg\n",
+                  headingDegrees, degreesToDirection(headingDegrees),
+                  targetHeading, degreesToDirection(targetHeading), headingError);
   }
 }
 
@@ -1134,18 +1103,6 @@ void setup() {
   delay(1000);           // give USB serial a moment to come up
   Serial.println("Ready. Press the button.");
 
-
-  //targetHeading = directionToDegrees(desiredDirection);
-  //if (targetHeading < 0) {
-  //  Serial.println("desiredDirection isn't a valid 8-point direction - defaulting to N");
-  //  targetHeading = 0;
- // }
-  //Serial.printf("Target direction: %s (%.0f deg)\n", desiredDirection.c_str(), targetHeading);
-
-    // TEMP LED test
-  setLedColour(255, 0); delay(1000);  // should be RED
-  setLedColour(0, 255); delay(1000);  // should be GREEN
-  setLedColour(0, 0);   delay(1000);  // should be OFF
   setupCompass(); // dark until the phone sends a heading (COMMAND_SET_HEADING)
 }
 
@@ -1236,7 +1193,6 @@ void loop() {
   uint8_t flags = firstChunk ? startFlags : 0x00;
   firstChunk = false;
   sendAudioChunk(flags, adpcmOut, outBytes);
- // Serial.printf("%02X", adpcmOut[i]); // debug
 #if AUDIO_DEBUG_HEX
   // Dump the block as hex to Serial so you can copy-paste into
   // audio_playback_test.py. Bench use only - see AUDIO_DEBUG_HEX.
