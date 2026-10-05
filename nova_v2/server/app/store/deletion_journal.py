@@ -10,6 +10,9 @@ then empties the journal.
     record(user_id, table, ids)                    -> rows deleted for good
     record(user_id, "persona", ids, "overwrite")   -> rows that survive changed;
                                                       the dumps get the live copy
+    record(user_id, "account", [user_id])          -> a deleted account: every
+                                                      row of it, in every table,
+                                                      and its auth.users entry
 
 Ids only, never content: the journal is itself in the dumps, and must not
 become a list of what was deleted. Table names are the database's, checked
@@ -24,9 +27,9 @@ from app.core.db import get_client
 
 _TABLE = "deletion_journal"
 
-Table = Literal["notes", "episodic_memory", "persona"]
+Table = Literal["notes", "episodic_memory", "persona", "account"]
 Kind = Literal["delete", "overwrite"]
-TABLES: frozenset[str] = frozenset({"notes", "episodic_memory", "persona"})
+TABLES: frozenset[str] = frozenset({"notes", "episodic_memory", "persona", "account"})
 
 UserId = Union[UUID, str]
 

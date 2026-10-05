@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Deleted notes leave the backups too (docs/plans/notes-hard-delete-plan.md phase 4).
+# Deleted notes and deleted accounts leave the backups too
+# (docs/plans/notes-hard-delete-plan.md phase 4, app/store/account.py).
 #
-# Every hard delete writes the ids it removed to public.deletion_journal. This
+# Every hard delete writes the ids it removed to public.deletion_journal; a
+# deleted account writes its user id, meaning every row it owned. This
 # removes the same rows from every dump in data/backups, then empties the
 # journal. Each dump is restored into `scrub-db` (a throwaway copy of `db`
 # whose data lives in RAM), cleaned, dumped back out, checked, and only then
@@ -105,11 +107,40 @@ scrub_dump() {
     fi
 
     # Only tables the journal may name (db/schema.sql section 12), each skipped
-    # if this dump predates it. A note's chunks go with it.
+    # if this dump predates it. A note's chunks go with it. A deleted account
+    # takes every row with its user_id, in any table - found from the dump
+    # itself, so a table added later is covered without changing this.
     "${PSQL_SCRATCH[@]}" <<'SQL'
 begin;
 do $$
+declare
+    t record;
 begin
+    if exists (select 1 from _scrub_journal where table_name = 'account') then
+        -- auth.users first: its cascades take most of the rest.
+        if to_regclass('auth.users') is not null then
+            delete from auth.users u using _scrub_journal j
+            where j.table_name = 'account' and u.id::text = j.row_id;
+        end if;
+        for t in
+            select c.table_schema, c.table_name
+            from information_schema.columns c
+            join information_schema.tables tb
+              on tb.table_schema = c.table_schema and tb.table_name = c.table_name
+            where c.column_name = 'user_id' and tb.table_type = 'BASE TABLE'
+              and c.table_schema in ('public', 'auth')
+        loop
+            execute format(
+                'delete from %I.%I x using _scrub_journal j
+                 where j.table_name = ''account'' and x.user_id::text = j.row_id',
+                t.table_schema, t.table_name);
+        end loop;
+        -- GoTrue's audit log names the account (and its email) in a payload.
+        if to_regclass('auth.audit_log_entries') is not null then
+            delete from auth.audit_log_entries a using _scrub_journal j
+            where j.table_name = 'account' and strpos(a.payload::text, j.row_id) > 0;
+        end if;
+    end if;
     if to_regclass('public.note_chunks') is not null then
         delete from public.note_chunks c using _scrub_journal j
         where j.table_name = 'notes' and j.kind = 'delete' and c.note_id::text = j.row_id;
@@ -167,6 +198,9 @@ if [ "$mode" = self-test ]; then
     FACT_GONE=5e1f0000-0000-4000-8000-0000000000c1
     FACT_KEPT=5e1f0000-0000-4000-8000-0000000000c2  # survives, minus the deleted note
     SECRET="selftest gate code 4417"
+    GONE_USER=5e1f0000-0000-4000-8000-000000000002  # a deleted account
+    GONE_EMAIL="gone-4417@selftest.invalid"
+    GONE_USER_NOTE=5e1f0000-0000-4000-8000-0000000000d1
     name=".selftest-$(date +%s).dump"
     dump="/backups/$name"
 
@@ -175,6 +209,18 @@ if [ "$mode" = self-test ]; then
         -f /nova-schema/schema.sql >/dev/null
     "${PSQL_SCRATCH[@]}" <<SQL
 insert into auth.users (id) values ('$U');
+insert into auth.users (id, email) values ('$GONE_USER', '$GONE_EMAIL');
+insert into public.notes (id, user_id, source, kind, text) values
+    ('$GONE_USER_NOTE', '$GONE_USER', 'typed', 'quick', '$SECRET');
+insert into public.profiles (user_id, display_name) values ('$GONE_USER', 'Selftest 4417');
+insert into public.reminders (user_id, id, data, status, updated_at_ms) values
+    ('$GONE_USER', 'r1', '{"title": "$SECRET"}', 'pending', 0);
+do \$\$ begin
+    if to_regclass('auth.audit_log_entries') is not null then
+        insert into auth.audit_log_entries (id, payload) values
+            (gen_random_uuid(), '{"actor_id": "$GONE_USER", "actor_username": "$GONE_EMAIL"}');
+    end if;
+end \$\$;
 insert into public.notes (id, user_id, source, kind, text) values
     ('$GONE', '$U', 'typed', 'quick', '$SECRET'),
     ('$KEPT', '$U', 'typed', 'quick', 'buy milk');
@@ -193,8 +239,8 @@ SQL
     before="$(docker compose exec -T scrub-db stat -c %Y "$dump")"
     cleanup_test() { docker compose exec -T scrub-db rm -f "$dump" "/backups/.scrub-$name" >/dev/null 2>&1 || true; }
 
-    JOURNAL="$(printf 'notes\t%s\tdelete\nepisodic_memory\t%s\tdelete\npersona\t%s\tdelete\npersona\t%s\toverwrite' \
-        "$GONE" "$EP_GONE" "$FACT_GONE" "$FACT_KEPT")"
+    JOURNAL="$(printf 'notes\t%s\tdelete\nepisodic_memory\t%s\tdelete\npersona\t%s\tdelete\npersona\t%s\toverwrite\naccount\t%s\tdelete' \
+        "$GONE" "$EP_GONE" "$FACT_GONE" "$FACT_KEPT" "$GONE_USER")"
     OVERWRITES="$(printf '%s\t{"also_keys": []}' "$FACT_KEPT")"
     if ! scrub_dump "$dump"; then cleanup_test; die "self-test: the scrub refused the test dump"; fi
 
@@ -209,16 +255,20 @@ SQL
             || ',' || (select count(*) from public.persona where id = '$FACT_GONE')
             || ',' || (select metadata::text from public.persona where id = '$FACT_KEPT')
             || ',' || (select count(*) from public.notes where id = '$KEPT')
-            || ',' || (select count(*) from public.episodic_memory where id = '$EP_KEPT')")"
-    expected='0,0,0,0,{"also_keys": []},1,1'
-    leaks="$(docker compose exec -T scrub-db pg_restore -f - "$dump" | grep -c "4417" || true)"
+            || ',' || (select count(*) from public.episodic_memory where id = '$EP_KEPT')
+            || ',' || (select count(*) from auth.users where id = '$U')
+            || ',' || (select count(*) from auth.users where id = '$GONE_USER')")"
+    expected='0,0,0,0,{"also_keys": []},1,1,1,0'
+    # The deleted note's text, and every trace of the deleted account: its
+    # rows all carry 4417, and its id appears nowhere.
+    leaks="$(docker compose exec -T scrub-db pg_restore -f - "$dump" | grep -cE "4417|$GONE_USER" || true)"
     after="$(docker compose exec -T scrub-db stat -c %Y "$dump")"
     cleanup_test
 
     [ "$got" = "$expected" ] || die "self-test FAILED: expected $expected, got $got"
-    [ "$leaks" = 0 ] || die "self-test FAILED: the deleted note's text is still in the dump ($leaks lines)"
+    [ "$leaks" = 0 ] || die "self-test FAILED: the deleted note or account is still in the dump ($leaks lines)"
     [ "$before" = "$after" ] || die "self-test FAILED: the dump's time changed ($before -> $after)"
-    log "self-test passed: deleted rows gone, kept rows kept, the text appears nowhere in the dump, timestamp kept"
+    log "self-test passed: deleted rows and account gone, kept rows kept, neither appears anywhere in the dump, timestamp kept"
     exit 0
 fi
 
@@ -257,6 +307,11 @@ done
 if [ "$failed" != 0 ]; then
     die "$failed dump(s) not scrubbed; the journal is kept and the next run tries again"
 fi
+
+# A deleted account's audit log lines, live, once more: the API removes them
+# right after the delete, and this catches one it missed.
+"${PSQL_LIVE[@]}" -c "select public.delete_auth_audit(row_id::uuid) from public.deletion_journal
+                      where id <= $upto and table_name = 'account'" >/dev/null
 
 # Every dump is clean of these rows, so the journal can forget them too.
 "${PSQL_LIVE[@]}" -c "delete from public.deletion_journal where id <= $upto"

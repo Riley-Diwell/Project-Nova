@@ -851,6 +851,9 @@ revoke execute on function public.delete_episodes_referencing(uuid, text) from p
 -- kind 'overwrite': the row survives but lost some of the deleted thing (a
 --   Persona fact that merged a deleted note, minus that note's provenance);
 --   the dumps get the live row's current metadata.
+-- table_name 'account': a deleted account (row_id = its user id). Every row
+--   with that user_id, in every table, and its auth schema rows leave the
+--   dumps (app/store/account.py).
 --
 -- No foreign key to auth.users, deliberately: deleting an account must not
 -- cascade away the journal before its backups are scrubbed.
@@ -858,13 +861,47 @@ revoke execute on function public.delete_episodes_referencing(uuid, text) from p
 create table if not exists public.deletion_journal (
     id          bigserial   primary key,
     user_id     uuid        not null,
-    table_name  text        not null check (table_name in ('notes', 'episodic_memory', 'persona')),
+    table_name  text        not null,
     row_id      text        not null,
     kind        text        not null default 'delete' check (kind in ('delete', 'overwrite')),
     deleted_at  timestamptz not null default now()
 );
 
+-- 'account' came later; the check is replaced so databases made before it get it.
+alter table public.deletion_journal drop constraint if exists deletion_journal_table_name_check;
+alter table public.deletion_journal add constraint deletion_journal_table_name_check
+    check (table_name in ('notes', 'episodic_memory', 'persona', 'account'));
+
 create index if not exists deletion_journal_deleted_at_idx on public.deletion_journal (deleted_at);
 
 -- Server-only: RLS on and no policy, like canvas_connections.
 alter table public.deletion_journal enable row level security;
+
+-- GoTrue's audit log keeps a line per sign-in, sign-out and admin action, with
+-- the account's id and email in its payload, and deleting the account leaves
+-- them. app/store/account.py calls this after the delete. Its own audit line
+-- names the user too, so it goes as well. Matched on the user id, which is a
+-- UUID, so it can't match anyone else's line.
+--
+-- Security definer because the server's key can't reach the auth schema;
+-- execute is revoked from the API roles, like delete_episodes_referencing.
+-- The table is GoTrue's, so it's looked up at run time rather than assumed.
+
+create or replace function public.delete_auth_audit(p_user uuid)
+returns integer
+language plpgsql volatile security definer
+set search_path = ''
+as $$
+declare
+    removed integer := 0;
+begin
+    if to_regclass('auth.audit_log_entries') is not null then
+        execute 'delete from auth.audit_log_entries where strpos(payload::text, $1) > 0'
+            using p_user::text;
+        get diagnostics removed = row_count;
+    end if;
+    return removed;
+end
+$$;
+
+revoke execute on function public.delete_auth_audit(uuid) from public, anon, authenticated;

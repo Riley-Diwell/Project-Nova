@@ -226,6 +226,15 @@ def batcher_for(user_id: UUID | str | None) -> NotificationBatcher | None:
         return batcher
 
 
+def forget_batcher(user_id: UUID | str) -> None:
+    """Stop and drop this user's batcher and whatever it was holding - their
+    account is being deleted (store/account.py)."""
+    with _batchers_lock:
+        batcher = _batchers.pop(str(user_id), None)
+    if batcher is not None:
+        batcher.stop()
+
+
 def set_batcher_mode(user_id: UUID | str, mode: str) -> None:
     """Called by intent_surface.run() every turn with the Observer's derived
     mode, so the batcher stops needing its own copy of calendar_ctx/dnd."""

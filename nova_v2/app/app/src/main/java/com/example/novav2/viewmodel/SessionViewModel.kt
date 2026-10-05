@@ -51,6 +51,11 @@ class SessionViewModel : ViewModel() {
         }
     }
 
+    /** Deletes the account for good; on success the app is back at sign-in. */
+    fun deleteAccount(password: String) = attempt {
+        AuthRepository.deleteAccount(password)
+    }
+
     fun cancelSignOut() {
         blockedSignOut = null
     }

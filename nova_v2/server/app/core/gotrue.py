@@ -37,13 +37,19 @@ class GoTrueUnavailable(Exception):
 
 
 def _call(method: str, path: str, *, json: Any = None, params: dict | None = None,
-          token: str | None = None) -> dict[str, Any]:
+          token: str | None = None, admin: bool = False) -> dict[str, Any]:
+    """`admin` sends the service-role key instead of the anon key, for
+    /admin/... - only ever for the signed-in user's own account."""
     s = settings()
     try:
         s.require_auth()
+        if admin:
+            s.require_supabase()
     except ConfigError as e:
         raise GoTrueUnavailable(str(e)) from e
-    headers = {"apikey": s.supabase_anon_key}
+    headers = {"apikey": s.supabase_service_key if admin else s.supabase_anon_key}
+    if admin:
+        token = s.supabase_service_key
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
@@ -85,3 +91,24 @@ def logout(access_token: str, scope: Literal["local", "global"]) -> None:
     """Revoke refresh tokens: this device's ("local") or every device's ("global").
     Access tokens already issued stay valid until they expire."""
     _call("POST", "/logout", params={"scope": scope}, token=access_token)
+
+
+def user_exists(user_id: str) -> bool:
+    try:
+        _call("GET", f"/admin/users/{user_id}", admin=True)
+        return True
+    except GoTrueError as e:
+        if e.status == 404:
+            return False
+        raise
+
+
+def delete_user(user_id: str) -> None:
+    """Delete the account for good. Every table's user_id references
+    auth.users with on delete cascade (db/schema.sql), so its rows go with it.
+    An account that's already gone (404) counts as deleted."""
+    try:
+        _call("DELETE", f"/admin/users/{user_id}", admin=True)
+    except GoTrueError as e:
+        if e.status != 404:
+            raise

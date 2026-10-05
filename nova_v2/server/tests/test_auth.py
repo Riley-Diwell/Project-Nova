@@ -303,3 +303,141 @@ def test_auth_disabled_opens_app_routes_for_local_dev(main_client, monkeypatch):
     monkeypatch.setenv("NOVA_AUTH_DISABLED", "1")
     settings.cache_clear()
     assert main_client.get("/tools/gain").status_code == 200
+
+
+# --- deleting the account ----------------------------------------------------
+
+@pytest.fixture
+def deleting(monkeypatch):
+    """GoTrue answering by path (.login, .admin = (status, json)), and the
+    deletion journal captured instead of written. Reads back .requests and
+    .journal, and .order - what happened, in order."""
+    from app.store import account, deletion_journal
+
+    class Fake:
+        login = (200, GOTRUE_SESSION)
+        admin = (200, {})
+        lookup = (200, {"id": USER_ID})
+        requests: list[httpx.Request] = []
+        journal: list[tuple] = []
+        order: list[str] = []
+        journal_error: Exception | None = None
+
+    def handler(request):
+        Fake.requests.append(request)
+        if request.url.path.endswith("/token"):
+            status, body = Fake.login
+        elif request.method == "GET":
+            status, body = Fake.lookup
+        else:
+            Fake.order.append("auth user deleted")
+            status, body = Fake.admin
+        return httpx.Response(status, json=body)
+
+    def record(user_id, table, ids, kind="delete"):
+        if Fake.journal_error:
+            raise Fake.journal_error
+        Fake.order.append("journalled")
+        Fake.journal.append((user_id, table, list(ids), kind))
+
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "service")
+    settings.cache_clear()
+    monkeypatch.setattr(gotrue, "_client", httpx.Client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(deletion_journal, "record", record)
+    monkeypatch.setattr(account, "_forget_in_memory", lambda user_id: Fake.order.append("memory cleared"))
+
+    class Rpc:
+        def __init__(self, name, params):
+            Fake.order.append(f"{name} {params['p_user']}")
+            self.data = 2
+
+        def execute(self):
+            return self
+
+    monkeypatch.setattr(account, "get_client", lambda: type("C", (), {"rpc": staticmethod(Rpc)})())
+    Fake.requests, Fake.journal, Fake.order = [], [], []
+    return Fake
+
+
+def test_delete_account_checks_password_then_journals_then_deletes(client, deleting):
+    r = client.post("/me/delete", json={"password": "correct-horse"}, headers=bearer(make_token()))
+    assert r.status_code == 204
+    login, admin = deleting.requests
+    assert json.loads(login.content) == {"email": "a@example.com", "password": "correct-horse"}
+    assert admin.method == "DELETE"
+    assert str(admin.url) == f"https://test.supabase.co/auth/v1/admin/users/{USER_ID}"
+    assert admin.headers["authorization"] == "Bearer service"
+    assert admin.headers["apikey"] == "service"
+    # The backups learn of it before anything is deleted.
+    assert deleting.journal == [(USER_ID, "account", [USER_ID], "delete")]
+    assert deleting.order == ["journalled", "memory cleared", "auth user deleted",
+                              f"delete_auth_audit {USER_ID}"]
+
+
+def test_delete_account_wrong_password_deletes_nothing(client, deleting):
+    deleting.login = (400, {"error_code": "invalid_credentials", "msg": "Invalid login credentials"})
+    r = client.post("/me/delete", json={"password": "nope"}, headers=bearer(make_token()))
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "wrong_password"
+    assert deleting.order == []
+
+
+def test_delete_account_retry_after_it_already_went_is_204(client, deleting):
+    # The first delete worked but its answer was lost; the token still verifies.
+    deleting.login = (400, {"error_code": "invalid_credentials", "msg": "Invalid login credentials"})
+    deleting.lookup = (404, {"error_code": "user_not_found", "msg": "User not found"})
+    deleting.admin = (404, {"error_code": "user_not_found", "msg": "User not found"})
+    r = client.post("/me/delete", json={"password": "correct-horse"}, headers=bearer(make_token()))
+    assert r.status_code == 204
+    assert deleting.journal == [(USER_ID, "account", [USER_ID], "delete")]
+
+
+def test_delete_account_rate_limited_stays_429(client, deleting):
+    deleting.login = (429, {"error_code": "over_request_rate_limit", "msg": "slow down"})
+    assert client.post("/me/delete", json={"password": "x"}, headers=bearer(make_token())).status_code == 429
+    assert deleting.order == []
+
+
+def test_delete_account_journal_failure_deletes_nothing(client, deleting):
+    deleting.journal_error = RuntimeError("db down")
+    r = client.post("/me/delete", json={"password": "correct-horse"}, headers=bearer(make_token()))
+    assert r.status_code == 503
+    assert deleting.order == []
+
+
+def test_delete_account_gotrue_failure_is_503(client, deleting):
+    deleting.admin = (500, {})
+    r = client.post("/me/delete", json={"password": "correct-horse"}, headers=bearer(make_token()))
+    assert r.status_code == 503
+
+
+def test_delete_account_already_gone_is_204(client, deleting):
+    deleting.admin = (404, {"error_code": "user_not_found", "msg": "User not found"})
+    assert client.post("/me/delete", json={"password": "correct-horse"},
+                       headers=bearer(make_token())).status_code == 204
+
+
+def test_delete_account_needs_a_token(client, deleting):
+    assert client.post("/me/delete", json={"password": "x"}).status_code == 401
+    assert deleting.requests == []
+
+
+def test_delete_account_refused_with_auth_disabled(client, deleting, monkeypatch):
+    monkeypatch.setenv("NOVA_AUTH_DISABLED", "1")
+    settings.cache_clear()
+    assert client.post("/me/delete", json={"password": "x"}).status_code == 400
+    assert deleting.requests == []
+
+
+def test_delete_account_drops_in_memory_state(capsys):
+    from app.store import account
+    from app.tools.functions import notification_management
+
+    notification_management.start_batchers()
+    try:
+        assert notification_management.batcher_for(USER_ID) is not None
+        account._forget_in_memory(USER_ID)
+        assert USER_ID not in notification_management._batchers
+    finally:
+        notification_management.stop_batchers()
+    assert "not cleared" not in capsys.readouterr().out

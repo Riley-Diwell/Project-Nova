@@ -5,6 +5,7 @@ import android.content.Intent
 import com.example.novav2.ble.NovaDevicePairing
 import com.example.novav2.network.NovaApiClient
 import com.example.novav2.network.NovaHttp
+import com.example.novav2.network.NovaHttp.withNovaAuth
 import com.example.novav2.service.SignalMonitorService
 import com.example.novav2.widget.WidgetUpdater
 import android.util.Log
@@ -77,6 +78,16 @@ object AuthRepository {
         .build()
     private val JSON = "application/json".toMediaType()
 
+    // Deleting the account is an ordinary signed-in call (bearer token, refreshed on a 401), so
+    // it gets the API's own client setup rather than [http]'s.
+    private val signedInHttp by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .withNovaAuth()
+            .build()
+    }
+
     fun init(context: Context) {
         if (::store.isInitialized) return
         appContext = context.applicationContext
@@ -142,6 +153,41 @@ object AuthRepository {
         NovaDevicePairing.forget(appContext)
         Log.i(TAG, "signed out")
         if (revoking != null) appScope.launch(Dispatchers.IO) { revoke(revoking, everywhere) }
+    }
+
+    /**
+     * Deletes the account and everything in it, for good (server/app/store/account.py), then
+     * wipes this phone the way signing out does. [password] is checked again on the server.
+     * Nothing is uploaded first - it would only be deleted. Throws [AuthException] with a message
+     * for the user if the server didn't confirm the delete, and the user stays signed in.
+     */
+    suspend fun deleteAccount(password: String) = withContext(Dispatchers.IO) {
+        Log.i(TAG, "deleting the account")
+        val request = Request.Builder()
+            .url("${NovaApiClient.BASE_URL}/me/delete")
+            .post(JSONObject().put("password", password).toString().toRequestBody(JSON))
+            .build()
+        val response = try {
+            signedInHttp.newCall(request).execute()
+        } catch (e: IOException) {
+            throw AuthException("Can't reach Nova. Check your connection and try again.")
+        }
+        response.use {
+            if (!it.isSuccessful) {
+                val detail = runCatching { JSONObject(it.body?.string().orEmpty()).opt("detail") }.getOrNull()
+                val code = (detail as? JSONObject)?.optString("code").orEmpty()
+                throw AuthException(when {
+                    code == "wrong_password" -> "Wrong password."
+                    it.code == 429 -> "Too many attempts. Wait a minute and try again."
+                    it.code == 401 -> "You've been signed out. Sign in again to delete your account."
+                    else -> "Couldn't delete your account right now. Nothing was deleted - try again soon."
+                })
+            }
+        }
+        forget()
+        LocalData.wipe(appContext)
+        NovaDevicePairing.forget(appContext)
+        Log.i(TAG, "account deleted")
     }
 
     /**

@@ -23,6 +23,12 @@ class Credentials(BaseModel):
     password: str = Field(..., min_length=8, max_length=72)
 
 
+class DeleteAccountIn(BaseModel):
+    """The password again: deleting is permanent, so an unlocked phone alone
+    isn't enough."""
+    password: str = Field(..., min_length=1, max_length=72)
+
+
 class RefreshIn(BaseModel):
     refresh_token: str = Field(..., min_length=1)
 

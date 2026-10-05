@@ -36,6 +36,12 @@ CACHE_TTL_S = 300
 _cache: dict[tuple[str, str, str], tuple[float, Any]] = {}
 
 
+
+def clear_cache() -> None:
+    """Forget every cached response. Keyed by token, not user, so a deleted
+    account (store/account.py) clears the lot - it refills within a turn."""
+    _cache.clear()
+
 class CanvasError(Exception):
     """A Canvas request that failed in a way worth telling the user about."""
 

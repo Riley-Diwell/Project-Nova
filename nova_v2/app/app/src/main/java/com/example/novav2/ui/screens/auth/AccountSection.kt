@@ -17,8 +17,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -27,17 +29,24 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.novav2.auth.SessionState
 import com.example.novav2.viewmodel.SessionViewModel
 
-/** Settings' account block: who's signed in, and signing out (here or on every device). */
+/** Settings' account block: who's signed in, signing out (here or on every device), and deleting
+ * the account. */
 @Composable
 fun AccountSection(viewModel: SessionViewModel = viewModel()) {
     val session by viewModel.session.collectAsState()
     val signedIn = session as? SessionState.SignedIn ?: return
     // null = no dialog; otherwise whether it's "sign out everywhere".
     var confirming by remember { mutableStateOf<Boolean?>(null) }
+    var deleting by remember { mutableStateOf(false) }
+    // The busy row's words: which of the two long actions is running.
+    var deletingStarted by remember { mutableStateOf(false) }
 
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -66,7 +75,8 @@ fun AccountSection(viewModel: SessionViewModel = viewModel()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.width(12.dp))
-                Text("Signing out…", style = MaterialTheme.typography.bodyMedium)
+                Text(if (deletingStarted) "Deleting your account…" else "Signing out…",
+                    style = MaterialTheme.typography.bodyMedium)
             }
         } else {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -78,8 +88,14 @@ fun AccountSection(viewModel: SessionViewModel = viewModel()) {
                     Text("Sign out everywhere", maxLines = 1)
                 }
             }
+            TextButton(
+                onClick = { viewModel.clearMessages(); deleting = true },
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) {
+                Text("Delete account")
+            }
         }
-        viewModel.error?.let {
+        if (!deleting) viewModel.error?.let {
             Text(text = it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
     }
@@ -127,4 +143,75 @@ fun AccountSection(viewModel: SessionViewModel = viewModel()) {
             }
         )
     }
+
+    if (deleting) {
+        DeleteAccountDialog(
+            busy = viewModel.busy,
+            error = viewModel.error,
+            onDelete = { password -> deletingStarted = true; viewModel.deleteAccount(password) },
+            onDismiss = { deleting = false; deletingStarted = false; viewModel.clearMessages() },
+        )
+    }
+}
+
+/**
+ * Deleting is permanent, so the dialog says exactly what goes and asks for the password again.
+ * It stays open while the server works and shows its refusal (a wrong password, say); on
+ * success the session ends and the app goes back to sign-in, taking the dialog with it.
+ */
+@Composable
+private fun DeleteAccountDialog(
+    busy: Boolean,
+    error: String?,
+    onDelete: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var password by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("Delete your account?") },
+        text = {
+            Column {
+                Text(
+                    "This permanently deletes your account and everything in it: your notes, " +
+                        "reminders, what Nova has learned about you, your conversations, your " +
+                        "profile and your Canvas connection. It's removed from Nova's backups " +
+                        "too. This phone is signed out and cleared, and your Nova device is " +
+                        "unpaired.\n\nThis can't be undone."
+                )
+                Spacer(Modifier.height(16.dp))
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("Password") },
+                    singleLine = true,
+                    enabled = !busy,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                )
+                if (error != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                if (busy) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Text("Deleting…", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onDelete(password) },
+                enabled = password.isNotEmpty() && !busy,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text("Delete forever") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") }
+        },
+    )
 }
