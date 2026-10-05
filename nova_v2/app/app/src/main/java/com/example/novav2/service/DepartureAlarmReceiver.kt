@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import com.example.novav2.state.AmbientNotifier
 import com.example.novav2.state.DeviceLayers
+import com.example.novav2.widget.WidgetUpdater
 
 /**
  * Fires when a [com.example.novav2.state.DepartureAlarmScheduler] alarm goes off - the precise
@@ -24,6 +25,7 @@ class DepartureAlarmReceiver : BroadcastReceiver() {
         }
         AmbientNotifier.notify(context, text)
         DeviceLayers.show(DeviceLayers.Cue.LEAVE_NOW, LEAVE_NOW_GLOW_MILLIS, text = text)
+        WidgetUpdater.requestUpdate(context)
     }
 
     companion object {

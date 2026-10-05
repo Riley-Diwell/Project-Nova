@@ -20,9 +20,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
-from typing import Any, Optional, TypeVar
+from typing import Any, Iterator, Optional, TypeVar
 
 from openai import BadRequestError, OpenAI
 from pydantic import BaseModel, ValidationError
@@ -60,6 +64,52 @@ def client(timeout: float = 60.0, max_retries: int = 1) -> OpenAI:
                   timeout=timeout, max_retries=max_retries)
 
 
+# --- voice first ---------------------------------------------------------------
+# One GPU serves every call, and two at once slow both: a warm voice step took
+# 6.4 s instead of 2.4 s beside a background request. So work nobody is
+# waiting on holds back while a voice turn runs - before each call, not
+# during one, since a request the server has started can't be paused. The
+# wait is capped so nothing starves, and so an ambient /event still answers
+# inside the phone's 60 s read timeout.
+VOICE_YIELD_MAX_S = 15.0
+
+_voice_turns = 0
+_voice_idle = threading.Condition()
+_in_voice_turn: ContextVar[bool] = ContextVar("in_voice_turn", default=False)
+
+
+@contextmanager
+def voice_turn() -> Iterator[None]:
+    """A voice turn is running for the length of the block. Model calls made
+    inside it never wait; everyone else's wait for it (yield_to_voice). New
+    threads don't inherit the mark, so work a turn hands to a thread waits too."""
+    global _voice_turns
+    token = _in_voice_turn.set(True)
+    with _voice_idle:
+        _voice_turns += 1
+    try:
+        yield
+    finally:
+        with _voice_idle:
+            _voice_turns -= 1
+            _voice_idle.notify_all()
+        _in_voice_turn.reset(token)
+
+
+def yield_to_voice(max_wait: float = VOICE_YIELD_MAX_S) -> None:
+    """Wait, at most max_wait seconds, until no voice turn is running. A call
+    from inside a voice turn goes straight through."""
+    if _in_voice_turn.get():
+        return
+    deadline = time.monotonic() + max_wait
+    with _voice_idle:
+        while _voice_turns:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            _voice_idle.wait(remaining)
+
+
 _THINK = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
@@ -88,6 +138,7 @@ def complete(
 ) -> str:
     """One system + user exchange; the reply's text. `max_tokens` is for the
     answer; the model's thinking gets THINKING_TOKENS on top."""
+    yield_to_voice()
     response = (llm or client(timeout, max_retries)).chat.completions.create(
         model=model or MODEL,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -150,6 +201,7 @@ def parse(
     }
     last_error = ""
     for attempt in range(2):
+        yield_to_voice()
         kwargs: dict[str, Any] = dict(
             model=model or MODEL, messages=messages, max_tokens=max_tokens,
             temperature=0, extra_body=NO_THINKING,

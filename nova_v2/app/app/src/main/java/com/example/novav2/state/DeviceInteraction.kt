@@ -10,6 +10,7 @@ import com.example.novav2.service.ReminderSpeechService
 import com.example.novav2.state.DeviceButtonPolicy.Action
 import com.example.novav2.state.DeviceButtonPolicy.Mode
 import com.example.novav2.state.DeviceButtonPolicy.ModeState
+import com.example.novav2.widget.WidgetUpdater
 import kotlinx.coroutines.flow.filterIsInstance
 
 /**
@@ -25,6 +26,10 @@ import kotlinx.coroutines.flow.filterIsInstance
 object DeviceInteraction {
     /** How long after a reply finishes speaking a press still means "repeat that". */
     const val REPLY_WINDOW_MILLIS = 15_000L
+    /** How long after a question finishes speaking presses can answer it. Must stay under the
+     * server's _PENDING_CONFIRMATION_TTL (3 min, intent_surface.py), so a press can never answer
+     * a question the server has already dropped. */
+    const val ANSWER_WINDOW_MILLIS = 60_000L
     /** Covers a slow network turn; a turn that dies without replying stops "thinking" by itself. */
     private const val THINKING_TIMEOUT_MILLIS = 60_000L
     private const val STATUS_HORIZON_MILLIS = 60 * 60_000L
@@ -52,20 +57,44 @@ object DeviceInteraction {
         enter(Mode.REPLIED, THINKING_TIMEOUT_MILLIS, text)
     }
 
-    /** Speech ended (or failed) - the repeat window runs from now. No-op unless still REPLIED:
-     * a repeat started from idle doesn't open one. */
+    /** [text] - a question presses can answer - is about to be spoken. As [replied], with the
+     * device in CONFIRM (its own "question" light and buzz) until the answer window runs out. */
+    fun asked(text: String, question: DeviceButtonPolicy.Question) {
+        lastReply = text
+        DeviceLayers.clear(DeviceLayers.Slot.INTERACTION)
+        enter(Mode.CONFIRM, THINKING_TIMEOUT_MILLIS, text, question)
+    }
+
+    /** A question asked on the phone's screen (ChatViewModel), answerable from the device as well
+     * as by its buttons. Its answer window starts now: the screen shows the question at once. */
+    fun askedOnScreen(text: String, question: DeviceButtonPolicy.Question) {
+        asked(text, question)
+        replyFinished()
+    }
+
+    /** The phone's screen sent a turn - a tapped option, or anything else. A question the device
+     * was holding open is over: a press mustn't answer it a second time. */
+    fun screenTurnSent() {
+        if (synchronized(lock) { current.mode } == Mode.CONFIRM) idle()
+    }
+
+    /** Speech ended (or failed) - the repeat or answer window runs from now. No-op unless still
+     * REPLIED or CONFIRM: a repeat started from idle doesn't open one. */
     fun replyFinished() {
-        val text = synchronized(lock) { current.takeIf { it.mode == Mode.REPLIED }?.replyText } ?: return
-        enter(Mode.REPLIED, REPLY_WINDOW_MILLIS, text)
+        val state = synchronized(lock) { current.takeIf { it.mode == Mode.REPLIED || it.mode == Mode.CONFIRM } } ?: return
+        val window = if (state.mode == Mode.CONFIRM) ANSWER_WINDOW_MILLIS else REPLY_WINDOW_MILLIS
+        // Same mode again, so a fresh token: a press made in the old one is still found in
+        // [recent] and means the same thing.
+        enter(state.mode, window, state.replyText, state.question)
     }
 
     private fun idle() = enter(Mode.IDLE, null, null)
 
-    private fun enter(mode: Mode, durationMillis: Long?, replyText: String?) {
+    private fun enter(mode: Mode, durationMillis: Long?, replyText: String?, question: DeviceButtonPolicy.Question? = null) {
         val now = System.currentTimeMillis()
         val state = synchronized(lock) {
             lastToken = lastToken % 255 + 1 // 1-255; 0 means "no mode" on the wire
-            val next = ModeState(mode, lastToken, durationMillis?.let { now + it }, replyText)
+            val next = ModeState(mode, lastToken, durationMillis?.let { now + it }, replyText, question)
             recent.addFirst(current)
             while (recent.size > RECENT_MODES) recent.removeLast()
             current = next
@@ -109,6 +138,13 @@ object DeviceInteraction {
         return DeviceButtonPolicy.resolve(situation, press.count)
     }
 
+    /** The settings screen's "Try it": runs what [count] presses do when nothing else is going on,
+     * as a press would - but never acts on a showing alert, which a real press would. */
+    suspend fun tryIdleAction(context: Context, count: Int) {
+        val app = context.applicationContext
+        perform(app, DeviceButtonPolicy.idleAction(DevicePreferences.idleActions(app)[count], lastReply))
+    }
+
     /** The same set the reminder LED pulses for (DeviceLayers.syncReminders). */
     private suspend fun firedReminders(context: Context, nowMillis: Long): List<DeviceButtonPolicy.FiredReminder> =
         NovaDatabase.getInstance(context).reminderDao().active()
@@ -123,6 +159,8 @@ object DeviceInteraction {
             Action.AcknowledgeDeparture -> {
                 DeviceLayers.clear(DeviceLayers.Slot.DEPARTURE)
                 AmbientNotifier.cancel(context)
+                DepartureStore.clear(context)
+                WidgetUpdater.requestUpdate(context)
             }
             is Action.ReadAloud -> {
                 // Never through the phone speaker - the same rule ReminderSpeechService enforces;
@@ -144,6 +182,13 @@ object DeviceInteraction {
             }
             is Action.Ask -> {
                 if (!AssistVoiceService.submitTranscript(context, action.instruction)) {
+                    DeviceCue.play(DeviceCue.Pattern.NOTHING)
+                    return
+                }
+            }
+            is Action.Answer -> {
+                // The same path as a spoken answer: the server continues the question's thread.
+                if (!AssistVoiceService.submitTranscript(context, action.text)) {
                     DeviceCue.play(DeviceCue.Pattern.NOTHING)
                     return
                 }

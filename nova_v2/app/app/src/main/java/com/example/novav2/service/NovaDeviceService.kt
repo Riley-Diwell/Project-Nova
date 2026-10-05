@@ -11,19 +11,23 @@ import androidx.core.app.NotificationCompat
 import com.example.novav2.R
 import com.example.novav2.ble.NovaDeviceConnectionState
 import com.example.novav2.ble.NovaDevicePairing
+import com.example.novav2.ble.NovaDeviceEvent
 import com.example.novav2.ble.NovaDeviceRepository
 import com.example.novav2.ble.NovaGattClient
 import com.example.novav2.notes.capture.DeviceRecordingRouter
+import com.example.novav2.state.DeviceCompass
 import com.example.novav2.state.DeviceInteraction
 import com.example.novav2.state.DeviceLayers
 import com.example.novav2.stt.StreamingTranscriber
 import com.example.novav2.stt.VoskTranscriber
+import com.example.novav2.widget.WidgetUpdater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.launch
 
 /**
@@ -57,6 +61,14 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
         // Started once here, not in connectIfPaired (which a stuck link re-runs): presses come
         // through one app-wide flow, and a second collector would act on every press twice.
         scope.launch { DeviceInteraction.run(applicationContext) }
+        // Two taps then a hold on the device: forget the destination, or the next sync re-sends it.
+        scope.launch {
+            NovaDeviceRepository.events.filterIsInstance<NovaDeviceEvent.ClearHeading>()
+                .collect { DeviceCompass.clear(applicationContext) }
+        }
+        // Only matters while a device can be connected, which is while this service runs.
+        // The widget's "Nova · 64%" line - once here for the same reason as above.
+        scope.launch { WidgetUpdater.followDevice(applicationContext) }
         connectIfPaired()
     }
 
@@ -137,10 +149,12 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
         NovaDeviceRepository.setCommandSender(
             if (state == NovaDeviceConnectionState.CONNECTED) gattClient else null
         )
-        // The firmware dropped its LED layers and mode when the link went down - put back what applies.
+        // The firmware dropped its LED layers, mode and heading when the link went down - put back
+        // what applies.
         if (state == NovaDeviceConnectionState.CONNECTED) {
             DeviceLayers.onConnected(applicationContext)
             DeviceInteraction.onConnected()
+            DeviceCompass.onConnected(applicationContext)
         }
     }
 
@@ -165,7 +179,7 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Nova")
             .setContentText("Connected to your Nova device")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_nova)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()

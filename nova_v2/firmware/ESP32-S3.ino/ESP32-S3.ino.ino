@@ -34,6 +34,8 @@ enum NovaEventType : uint8_t {
   EVENT_PRESS        = 0x06, // payload: count, mode, token - mode/token are
                              // whatever COMMAND_SET_MODE last set, as of the
                              // first press of the sequence
+  EVENT_CLEAR_HEADING = 0x07, // no payload - two taps then a hold: the user
+                              // turned the compass off (see clearHeadingGesture)
 };
 
 // commands characteristic (phone -> device, Write no response): 1 type byte + payload.
@@ -49,13 +51,21 @@ enum NovaCommandType : uint8_t {
                                // durations x10ms, starting with on
   COMMAND_SET_MODE     = 0x07, // payload: mode, token, timeout seconds
                                // (2 bytes LE, 0 = until changed)
+  COMMAND_SET_HEADING  = 0x08, // payload: bearing to the destination, x0.1 deg
+                               // (2 bytes LE, 0-3599), HEADING_NONE = no destination
 };
+
+// COMMAND_SET_HEADING's "no destination" - the compass goes dark.
+const uint16_t HEADING_NONE = 0xFFFF;
 
 // The phone's interaction mode (COMMAND_SET_MODE). The phone decides what a
 // press means; the device only echoes the mode and token back with each press,
 // so a press made just as the phone moved on is still read against the mode
 // the user saw. Reverts to MODE_IDLE on timeout and on disconnect.
 const uint8_t MODE_IDLE = 0x00;
+// Nova asked a question presses can answer - see enterConfirm. (1 = thinking
+// and 2 = replied mean nothing to the firmware; it only echoes them.)
+const uint8_t MODE_CONFIRM = 0x03;
 uint8_t deviceMode = MODE_IDLE;
 uint8_t deviceModeToken = 0;
 uint32_t deviceModeSetAt = 0;
@@ -66,10 +76,15 @@ enum LedPattern : uint8_t {
   PATTERN_SOLID   = 0x00, // period/on-time ignored
   PATTERN_BLINK   = 0x01, // on for on-time at the start of every period
   PATTERN_BREATHE = 0x02, // fades up and down once per period, on-time ignored
+  PATTERN_DOUBLE_BLINK = 0x03, // two on-time flashes, an on-time apart, at the start of every period
 };
 const uint8_t LAYER_ID_ALL = 0xFF;
 // The device's own feedback layer - see showNotConnected. Never sent by the phone.
 const uint8_t LOCAL_LAYER_ID = 0xFE;
+// The device's own "question" layer while in MODE_CONFIRM - see enterConfirm.
+// Priority 35: over the phone's thinking layer (30), under its preview (40).
+const uint8_t CONFIRM_LAYER_ID = 0xFD;
+const uint8_t CONFIRM_LAYER_PRIORITY = 35;
 
 // audio characteristic (device -> phone, Notify) envelope flags - see
 // docs/ble-protocol.md. Byte 0 of every notification is a wrapping sequence
@@ -264,12 +279,15 @@ uint8_t audioSeq = 0;
 /* Assign a unique ID to this sensor at the same time */
 Adafruit_HMC5883_Unified mag = Adafruit_HMC5883_Unified(12345);
 
-String desiredDirection = "NE"; // debug this is just a placeholder to test, we will need to replace this with some incoming ble signal
 const float FULL_RED_ANGLE = 180.0;
 const uint32_t COMPASS_INTERVAL_MS = 100; // read the compass 10x per second
 uint32_t lastCompassRead = 0;
 bool compassAvailable = false; // false if mag.begin() failed - see setupCompass()
-float targetHeading = 0;    // desiredDirection converted to degrees in setup()
+// The phone sets these (COMMAND_SET_HEADING) while it has a destination: the
+// bearing from where it is to there, true north, refreshed as the user moves.
+// No destination, no compass - the LED stays dark. Dropped on disconnect.
+bool hasTargetHeading = false;
+float targetHeading = 0;    // degrees 0-360
 float currentHeading = 0;   // latest compass heading, degrees 0-360
 float headingError = 180;   // how far off target we are, degrees 0-180
 
@@ -310,9 +328,10 @@ void checkButton() {
         pressCount++;
         enterButtonState(BUTTON_GAP);
       } else if (inState >= holdMs) {
-        // One tap before the hold makes it a note; a plain hold talks to
-        // Nova; anything else (two taps, then a hold) is read as a plain hold.
-        startHold(pressCount == 1);
+        // One tap before the hold makes it a note; two taps clear the
+        // compass; a plain hold (or 3+ taps first) talks to Nova.
+        if (pressCount == 2) clearHeadingGesture();
+        else startHold(pressCount == 1);
         enterButtonState(BUTTON_HOLD);
       }
       break;
@@ -349,6 +368,9 @@ void enterButtonState(ButtonState next) {
 // The mode the phone last set, unless its timeout has run out.
 uint8_t currentMode() {
   if (deviceModeTimeoutMs > 0 && millis() - deviceModeSetAt > deviceModeTimeoutMs) {
+    // The question layer times out on the same clock; cleared anyway so the
+    // two can't disagree by a loop.
+    if (deviceMode == MODE_CONFIRM) clearLedLayer(CONFIRM_LAYER_ID);
     deviceMode = MODE_IDLE;
     deviceModeToken = 0;
     deviceModeTimeoutMs = 0;
@@ -375,6 +397,22 @@ void startHold(bool note) {
   recordingIsNote = note;
   isRecording = 1; // updateLed() shows solid red while this is set
   Serial.println(note ? "Begin note recording!" : "Begin audio recording!");
+}
+
+// Two taps then a hold: compass off. Dark here at once, with a buzz, and the
+// phone is told - it owns the destination and would otherwise send it again.
+// The rest of the hold does nothing (stopRecording is a no-op on release).
+void clearHeadingGesture() {
+  if (!bleConnected) {
+    // the heading went with the connection anyway - nothing to clear
+    showNotConnected();
+    return;
+  }
+  hasTargetHeading = false;
+  uint16_t buzz[] = {120};
+  playHaptic(buzz, 1);
+  Serial.println("Compass cleared by the button");
+  sendEvent(EVENT_CLEAR_HEADING, nullptr, 0);
 }
 
 // Two quick red blinks: "the phone isn't connected". A device-local layer, so
@@ -513,9 +551,11 @@ class NovaServerCallbacks : public NimBLEServerCallbacks {
     // ones that still apply when it reconnects.
     CommandFrame clearAll = {2, {COMMAND_CLEAR_LAYER, LAYER_ID_ALL}};
     CommandFrame idle = {5, {COMMAND_SET_MODE, MODE_IDLE, 0, 0, 0}};
+    CommandFrame noHeading = {3, {COMMAND_SET_HEADING, 0xFF, 0xFF}}; // HEADING_NONE
     if (commandQueue) {
       xQueueSend(commandQueue, &clearAll, 0);
       xQueueSend(commandQueue, &idle, 0);
+      xQueueSend(commandQueue, &noHeading, 0);
     }
     NimBLEDevice::startAdvertising();
   }
@@ -589,20 +629,40 @@ void handleCommand(const CommandFrame& frame) {
       clearLedLayer(value[1]);
       Serial.printf("[BLE] command: clear layer %u\n", value[1]);
       break;
-    case COMMAND_SET_MODE:
+    case COMMAND_SET_MODE: {
       if (frame.len < 5) break;
+      bool newQuestion = value[1] == MODE_CONFIRM &&
+                         (deviceMode != MODE_CONFIRM || deviceModeToken != value[2]);
       deviceMode = value[1];
       deviceModeToken = value[2];
       deviceModeTimeoutMs = (uint32_t)readU16LE(value + 3) * 1000;
       deviceModeSetAt = millis();
+      if (newQuestion) {
+        enterConfirm();
+      } else if (deviceMode != MODE_CONFIRM) {
+        clearLedLayer(CONFIRM_LAYER_ID);
+      }
       Serial.printf("[BLE] command: mode %u (token %u)\n", deviceMode, deviceModeToken);
       break;
+    }
     case COMMAND_PLAY_HAPTIC: {
       uint16_t steps[6];
       uint8_t count = min((int)frame.len - 1, 6);
       for (uint8_t i = 0; i < count; i++) steps[i] = value[1 + i] * 10;
       Serial.printf("[BLE] command: haptic pattern (%u steps)\n", count);
       playHaptic(steps, count);
+      break;
+    }
+    case COMMAND_SET_HEADING: {
+      if (frame.len < 3) break;
+      uint16_t tenths = readU16LE(value + 1);
+      hasTargetHeading = tenths != HEADING_NONE;
+      if (hasTargetHeading) {
+        targetHeading = (tenths % 3600) / 10.0;
+        Serial.printf("[BLE] command: heading %.1f deg (%s)\n", targetHeading, degreesToDirection(targetHeading));
+      } else {
+        Serial.println("[BLE] command: no heading");
+      }
       break;
     }
     default:
@@ -734,6 +794,26 @@ void setLedColour(uint8_t red, uint8_t green) {
   ledcWrite(LED_GREEN, green);
 }
 
+// Nova asked a question presses can answer (MODE_CONFIRM, new token): one
+// short buzz, and a green double blink that lasts as long as the mode. What
+// the presses mean is the phone's call - this only says "your turn".
+void enterConfirm() {
+  LedLayer question;
+  question.active = true;
+  question.id = CONFIRM_LAYER_ID;
+  question.priority = CONFIRM_LAYER_PRIORITY;
+  question.red = 0;
+  question.green = 255;
+  question.pattern = PATTERN_DOUBLE_BLINK;
+  question.periodMs = 2000;
+  question.onMs = 120;
+  question.startedAt = millis();
+  question.timeoutMs = deviceModeTimeoutMs; // 0 = until the mode changes, like the mode
+  setLedLayer(question);
+  uint16_t buzz[] = {80};
+  playHaptic(buzz, 1);
+}
+
 // Adds `layer`, replacing one with the same id. With every slot taken, it
 // evicts the lowest-priority layer - unless that one outranks it, in which case
 // the new layer is dropped.
@@ -788,6 +868,9 @@ uint8_t layerLevel(const LedLayer& layer) {
   switch (layer.pattern) {
     case PATTERN_BLINK:
       return phase < layer.onMs ? 255 : 0;
+    case PATTERN_DOUBLE_BLINK:
+      // on, off, on - each on-time long - then dark for the rest of the period
+      return (phase < layer.onMs || (phase >= 2 * layer.onMs && phase < 3 * layer.onMs)) ? 255 : 0;
     case PATTERN_BREATHE: {
       // triangle wave: 0 -> 255 over the first half of the period, back to 0 over the second
       uint32_t half = layer.periodMs / 2;
@@ -825,9 +908,9 @@ void updateLed() {
     return;
   }
 
-  // no compass, no heading to show - off rather than a constant "way off" red,
-  // which would read as recording
-  if (!compassAvailable) {
+  // no compass or no destination, no heading to show - off rather than a
+  // constant "way off" red, which would read as recording
+  if (!compassAvailable || !hasTargetHeading) {
     setLedColour(0, 0);
     return;
   }
@@ -945,16 +1028,7 @@ void setupCompass(){
   displaySensorDetails();
 }
 
-// Converts an 8-point compass name ("N", "NE", ...) to degrees. Returns -1 if unknown.
-float directionToDegrees(const String& dir) {
-  const char* names[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
-  for (int i = 0; i < 8; i++) {
-    if (dir.equalsIgnoreCase(names[i])) return i * 45.0;
-  }
-  return -1;
-}
-
-// The reverse of directionToDegrees: the nearest 8-point compass name.
+// The nearest 8-point compass name ("N", "NE", ...) - for the Serial log.
 const char* degreesToDirection(float degrees) {
   const char* names[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
   return names[(int)((degrees + 22.5) / 45.0) % 8];
@@ -963,7 +1037,8 @@ const char* degreesToDirection(float degrees) {
 void compassDetectionLoop(){
   // Every loop() pass used to read the sensor and print ~4 lines - an I2C read
   // plus Serial time the audio path can't spare (see AUDIO_DEBUG_HEX).
-  if (!compassAvailable || (millis() - lastCompassRead) < COMPASS_INTERVAL_MS) return;
+  // Nothing reads the heading without a destination, so skip the I2C read too.
+  if (!compassAvailable || !hasTargetHeading || (millis() - lastCompassRead) < COMPASS_INTERVAL_MS) return;
   lastCompassRead = millis();
 
   /* Get a new sensor event */
@@ -1059,19 +1134,19 @@ void setup() {
   delay(1000);           // give USB serial a moment to come up
   Serial.println("Ready. Press the button.");
 
-  setupCompass();
 
-  targetHeading = directionToDegrees(desiredDirection);
-  if (targetHeading < 0) {
-    Serial.println("desiredDirection isn't a valid 8-point direction - defaulting to N");
-    targetHeading = 0;
-  }
-  Serial.printf("Target direction: %s (%.0f deg)\n", desiredDirection.c_str(), targetHeading);
+  //targetHeading = directionToDegrees(desiredDirection);
+  //if (targetHeading < 0) {
+  //  Serial.println("desiredDirection isn't a valid 8-point direction - defaulting to N");
+  //  targetHeading = 0;
+ // }
+  //Serial.printf("Target direction: %s (%.0f deg)\n", desiredDirection.c_str(), targetHeading);
 
     // TEMP LED test
   setLedColour(255, 0); delay(1000);  // should be RED
   setLedColour(0, 255); delay(1000);  // should be GREEN
   setLedColour(0, 0);   delay(1000);  // should be OFF
+  setupCompass(); // dark until the phone sends a heading (COMMAND_SET_HEADING)
 }
 
 

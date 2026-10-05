@@ -150,7 +150,7 @@ fun OnboardingFlow() {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = ScreenGutter),
                 )
-                Box(Modifier.weight(1f).fillMaxWidth()) { DeviceScreen() }
+                Box(Modifier.weight(1f).fillMaxWidth()) { DeviceScreen(showSettings = false) }
             } else {
                 Column(
                     modifier = Modifier

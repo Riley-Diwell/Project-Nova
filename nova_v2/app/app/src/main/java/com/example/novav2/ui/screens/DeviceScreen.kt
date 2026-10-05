@@ -9,6 +9,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -38,6 +40,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,6 +60,7 @@ import com.example.novav2.ble.NovaDeviceEvent
 import com.example.novav2.ble.NovaDevicePairing
 import com.example.novav2.ble.NovaDeviceRepository
 import com.example.novav2.service.NovaDeviceService
+import com.example.novav2.state.DeviceCompass
 import com.example.novav2.ui.theme.NovaOk
 
 /**
@@ -72,12 +76,15 @@ import com.example.novav2.ui.theme.NovaOk
  * beyond that is still unverified.
  */
 @Composable
-fun DeviceScreen() {
+fun DeviceScreen(showSettings: Boolean = true) {
     val context = LocalContext.current
     val connectionState by NovaDeviceRepository.connectionState.collectAsState()
     val lastEvent by NovaDeviceRepository.lastEvent.collectAsState()
     val battery by NovaDeviceRepository.battery.collectAsState()
     val commandSender by NovaDeviceRepository.commandSender.collectAsState()
+    val compass by DeviceCompass.status.collectAsState()
+    // The status is only refreshed by signal ticks - measure once now so it isn't stale or empty.
+    LaunchedEffect(Unit) { DeviceCompass.sync(context) }
     // NovaDevicePairing.isPaired reads SharedPreferences directly, which Compose
     // can't observe - reading it as a plain val here only picked up a fresh value
     // when something else (e.g. connectionState) happened to force a recomposition,
@@ -124,12 +131,16 @@ fun DeviceScreen() {
         }
     }
 
+    // Settings only once paired - and never in onboarding, which only wants the pairing card.
+    val withSettings = showSettings && paired
     Column(
         modifier = Modifier
             .fillMaxSize()
+            // Only when there is more than the card: a scrolling column can't centre it.
+            .then(if (withSettings) Modifier.verticalScroll(rememberScrollState()) else Modifier)
             .padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = if (withSettings) Arrangement.Top else Arrangement.Center
     ) {
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -201,10 +212,7 @@ fun DeviceScreen() {
                         Spacer(Modifier.height(12.dp))
                     }
                     OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
-                        context.stopService(Intent(context, NovaDeviceService::class.java))
-                        NovaDevicePairing.clearPairedDevice(context)
-                        NovaDeviceRepository.setConnectionState(NovaDeviceConnectionState.DISCONNECTED)
-                        NovaDeviceRepository.setCommandSender(null)
+                        NovaDevicePairing.forget(context)
                         paired = false
                     }) {
                         Text("Forget device", color = MaterialTheme.colorScheme.error)
@@ -212,8 +220,49 @@ fun DeviceScreen() {
                 }
             }
         }
+        compass?.takeIf { paired }?.let {
+            Spacer(Modifier.height(16.dp))
+            CompassCard(it, onClear = { DeviceCompass.clear(context) })
+        }
+        if (withSettings) {
+            DeviceSettingsSection(connected = paired && connectionState == NovaDeviceConnectionState.CONNECTED)
+        }
     }
 }
+
+/** Where the device's compass is pointing, with a way to stop it - a shared place otherwise
+ * lasts two hours or until arrival. */
+@Composable
+private fun CompassCard(status: DeviceCompass.Status, onClear: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = "Compass: " + (status.label ?: if (status.manual) "shared place" else "your next trip"),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = status.degrees?.let { "Pointing %.0f° %s".format(it, compassPoint(it)) }
+                        ?: "Waiting for a location fix",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            OutlinedButton(onClick = onClear) { Text("Clear") }
+        }
+    }
+}
+
+/** The nearest 8-point name for [degrees] ("N", "NE", ...). */
+private fun compassPoint(degrees: Double): String =
+    listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")[(((degrees % 360) + 360 + 22.5) / 45).toInt() % 8]
 
 /** The device's own battery, e.g. "Battery 64% · 3.86 V". The voltage stays visible because the
  * firmware's percent is a curve estimate - it is what to check against a multimeter. */
@@ -294,4 +343,5 @@ private fun describeEvent(event: NovaDeviceEvent?): String = when (event) {
     is NovaDeviceEvent.Press -> if (event.count == 1) "single press" else "${event.count}x press"
     is NovaDeviceEvent.Battery -> "battery ${event.percent}%"
     is NovaDeviceEvent.Heartbeat -> "heartbeat"
+    is NovaDeviceEvent.ClearHeading -> "compass cleared"
 }

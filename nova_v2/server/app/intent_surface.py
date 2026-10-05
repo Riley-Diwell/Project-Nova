@@ -31,7 +31,7 @@ from pydantic import BaseModel
 # import nova libraries
 from app.schemas.user_state import UserState
 from app.schemas.event import Event
-from app.control.commands import classify, note_body, offer_reply
+from app.control.commands import Command, classify, note_body, offer_reply
 from app.control.cues import note_wants_reminder
 from app.control.controller import Decision, ProportionalController, Reason, Turn
 from app.control.observer import observe, trends_from_facts
@@ -52,6 +52,7 @@ from app.tools.canvas.tool import CANVAS_TOOL, run_canvas
 from app.store import memory
 from app.store import persona
 from app.store import profile
+from app.core.config import said
 
 MAX_ITERATIONS = 5
 
@@ -284,7 +285,7 @@ SYSTEM_PROMPT = (
 
 # web_search (tools/web_search.py) and get_current_address are context tools:
 # answered here, never gated, never recorded as Actions.
-CONTEXT_TOOLS = ("web_search", "get_current_address", "canvas")
+CONTEXT_TOOLS = ("web_search", "get_current_address", "canvas", "ask_choice")
 
 GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
     "name": "get_current_address",
@@ -302,6 +303,67 @@ GET_CURRENT_ADDRESS_TOOL: dict[str, Any] = {
         "properties": {},
     },
 }
+
+# Asking the user to pick: the phone shows the options as buttons and reads
+# them out, and the device answers option N with N + 1 presses (1 press always
+# repeats) - which is why there are at most three. Offered on every turn, like
+# the other context tools, so the tool list stays the same for everyone and the
+# model server's prefix cache holds; a non-voice turn's call is refused in
+# _run_loop, since nobody is there to answer.
+ASK_CHOICE_MAX_OPTIONS = 3
+ASK_CHOICE_MAX_LABEL = 60
+
+ASK_CHOICE_TOOL: dict[str, Any] = {
+    "name": "ask_choice",
+    "description": (
+        "Ask the user to pick one of 2 or 3 clear alternatives - which time, "
+        "which reminder, which place. Use this instead of listing the "
+        "alternatives in your text. 'question' is the question as you would "
+        "say it, without the options: they are read out for you, with how to "
+        "pick each. Each option is a short label of a few words that works on "
+        "its own as the user's answer, e.g. 'Thursday at 10'. For a yes/no or "
+        "open question, just ask in your text instead. Calling this ends your "
+        "turn: the user's pick comes back as their next message, the option's "
+        "label word for word."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+            "options": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 2,
+                "maxItems": ASK_CHOICE_MAX_OPTIONS,
+            },
+        },
+        "required": ["question", "options"],
+    },
+}
+
+
+def _choice(tool_input: dict[str, Any]) -> tuple[str, list[str]] | dict[str, Any]:
+    """ask_choice's question and cleaned-up options, or the error to hand
+    back so the model can try again. Blank and repeated labels are dropped
+    before counting - a "pick one" with one real option isn't a choice."""
+    question = str(tool_input.get("question") or "").strip()
+    raw = tool_input.get("options")
+    options: list[str] = []
+    for label in raw if isinstance(raw, list) else []:
+        label = " ".join(str(label).split())
+        if label and label.casefold() not in (o.casefold() for o in options):
+            options.append(label)
+    if not question:
+        return {"success": False, "error": "ask_choice needs the question to ask."}
+    if not 2 <= len(options) <= ASK_CHOICE_MAX_OPTIONS:
+        return {"success": False, "error": (
+            f"ask_choice needs 2 to {ASK_CHOICE_MAX_OPTIONS} different options. "
+            "With more, ask an open question in your text instead.")}
+    if any(len(o) > ASK_CHOICE_MAX_LABEL for o in options):
+        return {"success": False, "error": (
+            "Keep each option to a few words - it is read aloud.")}
+    return question, options
+
 
 # Which tools exist, and which of them resolve on the phone, live in
 # tools/core/catalogue.py - so the Controller and its tests can ask what NOVA
@@ -354,7 +416,7 @@ def _build_tools(authorised: list[str]) -> list[dict[str, Any]]:
     """
     return [
         *(_as_function(t["name"], t["description"], t["input_schema"])
-          for t in (WEB_SEARCH_TOOL, GET_CURRENT_ADDRESS_TOOL, CANVAS_TOOL)),
+          for t in (WEB_SEARCH_TOOL, GET_CURRENT_ADDRESS_TOOL, CANVAS_TOOL, ASK_CHOICE_TOOL)),
         *(_tool_definition(name) for name in authorised),
     ]
 
@@ -469,12 +531,21 @@ class TurnContext:
 
     # Set when navigation_departure_time ran this turn and returned a
     # leave_in_minutes - {destination, mode, leave_in_minutes,
-    # minutes_until_start, event_title}. Carried separately from `actions`
+    # minutes_until_start, event_title, destination_lat, destination_lng}.
+    # Carried separately from `actions`
     # because that records the tool's *input*, not its *result*, and this is
     # the one result Android needs structured rather than folded into speech
     # (see the tool loop below) - it builds the leave-soon notification text
     # itself from these fields instead of trusting the model to phrase it.
     scheduled_departure: dict[str, Any] | None = None
+
+    # Set instead when navigation_departure_time ran but could not measure a
+    # travel time (no location, maps unreachable, no route) - {destination,
+    # event_title, minutes_until_start, reason}. Android turns this into a
+    # fixed "couldn't work out when to leave" notification on an ambient check,
+    # so a reminder that can't be worked out is said out loud instead of just
+    # never arriving. Cleared by a later call in the same turn that succeeds.
+    departure_unknown: dict[str, Any] | None = None
 
     # The reminder ids the model has actually been shown this turn - the
     # user_state.reminders window plus any get_reminders result. None when the
@@ -489,6 +560,18 @@ class TurnContext:
     # offer either way (_build_tools) - and its calls so far, against CANVAS_MAX_USES.
     canvas: bool = False
     canvas_calls: int = 0
+
+    # Notes this turn carries the words of without an Action that names them:
+    # the "yes" to a reminder offer is rewritten to "remind me about this:
+    # <note text>", and a follow-up question keeps that text in its thread.
+    # Recorded on the episode so deleting the note deletes this turn too
+    # (notes.delete -> memory.delete_referencing).
+    from_notes: list[str] = field(default_factory=list)
+
+    # The request this turn's authority came from: this turn's own words, or
+    # the earlier turn whose question this one answers. Stashed with the
+    # thread when the turn ends on a question, so the answer keeps it.
+    command: Command | None = None
 
     @property
     def ran(self) -> list[str]:
@@ -678,7 +761,7 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
             # So a tool that needs to interpret a user-relative clock string (e.g.
             # navigation_departure_time's arrival_time) can convert it against the
             # user's own wall clock instead of the server process's - see
-            # navigation.py's _query_google_maps/_estimate_without_api.
+            # navigation.py's _query_google_maps.
             tool_input = {**tool_input, "utc_offset_minutes": ctx.utc_offset_minutes}
         if name == "memory" and ctx.episode_id and "episode_id" not in tool_input:
             # A durable "remember..." is filed straight into Persona, and the
@@ -695,6 +778,12 @@ def _run_local_tool(name: str, tool_input: dict[str, Any], ctx: TurnContext) -> 
         result = _DISPATCHER.dispatch_reactive(name, dispatch_input)
         if name == "memory" and tool_input.get("action") == "save":
             tool_input = {**tool_input, **_memory_outcome(result)}
+        if (name == "memory" and tool_input.get("action") == "recall"
+                and isinstance(result, dict) and result.get("note_ids")):
+            # The notes this turn read out, by id: the turn's speech now holds
+            # their words, so deleting one of them deletes this episode too
+            # (notes.delete -> memory.delete_referencing).
+            tool_input = {**tool_input, "note_ids": list(result["note_ids"])}
         if name in DEVICE_TOOLS and isinstance(result, dict) and isinstance(result.get("place"), dict):
             # The resolved geofences are the instruction the phone reads, so they
             # go into the Action in place of what the model asked for. The model
@@ -814,8 +903,10 @@ class IntentResult(BaseModel):
     actions: list[dict[str, Any]] = []
     # Set only for a voice turn that left a question dangling (see
     # _classify_confirmation) - tells Android whether to offer Yes/No
-    # buttons alongside the usual text/voice input. None otherwise.
-    confirmation: Literal["yes_no", "open"] | None = None
+    # buttons alongside the usual text/voice input, or "choice" when the model
+    # asked one with ask_choice (`options` then holds the labels). None otherwise.
+    confirmation: Literal["yes_no", "open", "choice"] | None = None
+    options: list[str] | None = None
 
     # The Episode main.py opened for this turn. It closes that row with the
     # Actions above, and passes the id on to the phone so it can name the same
@@ -826,6 +917,14 @@ class IntentResult(BaseModel):
     # schedule a precise alarm even on a turn where speech stayed empty (an
     # ambient check that isn't urgent yet, but now knows exactly when it will be).
     scheduled_departure: dict[str, Any] | None = None
+
+    # See TurnContext.departure_unknown.
+    departure_unknown: dict[str, Any] | None = None
+
+    # Notes whose words this turn holds without an Action naming them - see
+    # TurnContext.from_notes. Written to the episode (main._close_episode), not
+    # sent to the phone.
+    note_ids: list[str] = []
 
 
 class NeedMoreResult(BaseModel):
@@ -879,9 +978,17 @@ _PENDING_CONFIRMATION_TTL = timedelta(minutes=3)
 _PENDING_CONFIRMATION_MAX_MESSAGES = 12
 
 
-def _stash_pending_confirmation(user_id: UUID | str | None, messages: list[dict[str, Any]]) -> None:
+def _stash_pending_confirmation(
+    user_id: UUID | str | None, messages: list[dict[str, Any]], note_ids: list[str] | None = None,
+    command: Command | None = None,
+) -> None:
     """Called when a voice turn ends on a question - keeps the live thread
-    so this user's next voice turn can continue it instead of starting over."""
+    so this user's next voice turn can continue it instead of starting over.
+
+    `command` is the request the question was asked in the service of. An
+    answer to "when should I remind you?" - "tomorrow 10am" - is no command
+    by classify()'s grammar, and without this the reminder it completes
+    would be judged by gain alone, with set_reminder usually not offered."""
     key = str(user_id)
     if len(messages) > _PENDING_CONFIRMATION_MAX_MESSAGES:
         _PENDING_CONFIRMATION.pop(key, None)
@@ -893,6 +1000,8 @@ def _stash_pending_confirmation(user_id: UUID | str | None, messages: list[dict[
         _PENDING_CONFIRMATION.pop(stale, None)
     _PENDING_CONFIRMATION[key] = {
         "messages": messages,
+        "note_ids": list(note_ids or []),
+        "command": command,
         "expires_at": now + _PENDING_CONFIRMATION_TTL,
     }
 
@@ -900,12 +1009,30 @@ def _stash_pending_confirmation(user_id: UUID | str | None, messages: list[dict[
 def _pop_pending_confirmation(user_id: UUID | str | None) -> list[dict[str, Any]] | None:
     """Consumes this user's pending thread, if any and still fresh. Popped
     rather than peeked so a resolved or abandoned turn can't be answered twice."""
+    pending = _pop_pending_thread(user_id)
+    return pending[0] if pending else None
+
+
+def _pop_pending_thread(user_id: UUID | str | None) -> tuple[list[dict[str, Any]], list[str]] | None:
+    """As _pop_pending_confirmation, with the notes whose words the thread
+    carries (TurnContext.from_notes)."""
+    pending = _pop_pending_turn(user_id)
+    return (pending["messages"], pending["note_ids"]) if pending else None
+
+
+def _pop_pending_turn(user_id: UUID | str | None) -> dict[str, Any] | None:
+    """The whole stashed entry - messages, note_ids and the command the
+    question was asked under - if any and still fresh."""
     pending = _PENDING_CONFIRMATION.pop(str(user_id), None)
     if pending is None:
         return None
     if datetime.now(timezone.utc) > pending["expires_at"]:
         return None
-    return pending["messages"]
+    return {
+        "messages": pending["messages"],
+        "note_ids": list(pending.get("note_ids") or []),
+        "command": pending.get("command"),
+    }
 
 
 def _clear_pending_confirmation(user_id: UUID | str | None) -> None:
@@ -926,12 +1053,13 @@ REMINDER_OFFER_SPEECH = "Noted. Do you want a reminder for it too?"
 REMINDER_DECLINED_SPEECH = "Okay, just the note."
 
 
-def _stash_reminder_offer(user_id: UUID | str | None, note_text: str) -> None:
+def _stash_reminder_offer(user_id: UUID | str | None, note_text: str, note_id: str | None = None) -> None:
     now = datetime.now(timezone.utc)
     for stale in [k for k, v in _PENDING_REMINDER_OFFER.items() if v["expires_at"] < now]:
         _PENDING_REMINDER_OFFER.pop(stale, None)
     _PENDING_REMINDER_OFFER[str(user_id)] = {
         "text": note_text,
+        "note_id": note_id,
         "expires_at": now + _PENDING_CONFIRMATION_TTL,
     }
 
@@ -939,10 +1067,28 @@ def _stash_reminder_offer(user_id: UUID | str | None, note_text: str) -> None:
 def _pop_reminder_offer(user_id: UUID | str | None) -> str | None:
     """The note an offer is waiting on, if any and still fresh. Popped, so the
     offer is answered by the very next voice turn or not at all."""
+    offer = _pop_reminder_offer_with_note(user_id)
+    return offer[0] if offer else None
+
+
+def _pop_reminder_offer_with_note(user_id: UUID | str | None) -> tuple[str, str | None] | None:
+    """As _pop_reminder_offer, with the id of the note it was offered for."""
     offer = _PENDING_REMINDER_OFFER.pop(str(user_id), None)
     if offer is None or datetime.now(timezone.utc) > offer["expires_at"]:
         return None
-    return offer["text"]
+    return offer["text"], offer.get("note_id")
+
+
+def forget_pending_for_user(user_id: UUID | str) -> None:
+    """Drop everything this user has waiting in process memory - a reminder
+    offer, a dangling question's thread, a paused client-tool conversation.
+    Called when they delete a note: any of these may hold its words, and losing
+    a pending "yes" is harmless."""
+    key = str(user_id)
+    _PENDING_REMINDER_OFFER.pop(key, None)
+    _PENDING_CONFIRMATION.pop(key, None)
+    for session_id in [k for k, v in _PENDING_SESSIONS.items() if str(v.get("user_id")) == key]:
+        _PENDING_SESSIONS.pop(session_id, None)
 
 
 _YES_NO_LEAD_IN = re.compile(
@@ -1117,7 +1263,7 @@ def _relevant_persona(user_id: UUID | str, event: Event) -> list[dict[str, Any]]
         print(f"[persona] search skipped: {e}")
         return []
 
-    print(f"[persona] {len(matches)} fact(s) for {query[:40]!r}")
+    print(f"[persona] {len(matches)} fact(s) for {said(query)}")
     return [
         {
             "text": m.fact.text,
@@ -1198,8 +1344,10 @@ def _run(
 
     # A reminder offered for the note just before this (see
     # _PENDING_REMINDER_OFFER). Anything but a plain yes or no drops it.
-    offered = _pop_reminder_offer(user_id) if event.type == "voice" else None
-    if offered is not None:
+    offer = _pop_reminder_offer_with_note(user_id) if event.type == "voice" else None
+    from_notes: list[str] = []
+    if offer is not None:
+        offered, offered_note = offer
         answer = offer_reply(event)
         if answer is False:
             _clear_pending_confirmation(user_id)
@@ -1207,6 +1355,8 @@ def _run(
                                 actions=[], episode_id=episode_id)
         if answer is True:
             event = event.model_copy(update={"text": f"Remind me about this: {offered}"})
+            if offered_note:
+                from_notes.append(offered_note)
 
     facts = _relevant_persona(user_id, event)
 
@@ -1228,7 +1378,16 @@ def _run(
     # The batcher used to keep its own copy of calendar_ctx/dnd to derive this -
     # now it just gets told, same source of truth as everything else this turn.
     set_batcher_mode(user_id, observation.mode.value)
-    command = classify(event)
+    is_voice = event.type == "voice"
+    # Only voice turns can be "yes"/"no" answers to a prior spoken question,
+    # so only voice turns consume the pending thread - an ambient event
+    # arriving in between (location update, notification, ...) must not
+    # steal or clear it.
+    pending = _pop_pending_turn(user_id) if is_voice else None
+    # An answer to a question asked under a command finishes that command:
+    # "tomorrow 10am" after "when should I remind you?" is the reminder
+    # request still going, whatever its own grammar says.
+    command = classify(event) or (pending["command"] if pending else None)
     gains, _ = _gains_for(user_id)
     turn = ProportionalController(gains).open_turn(observation, command)
     authorised = turn.authorised()
@@ -1259,12 +1418,9 @@ def _run(
     if saved_profile and saved_profile.display_name:
         payload["user_name"] = saved_profile.display_name
 
-    is_voice = event.type == "voice"
-    # Only voice turns can be "yes"/"no" answers to a prior spoken question,
-    # so only voice turns consume the pending thread - an ambient event
-    # arriving in between (location update, notification, ...) must not
-    # steal or clear it.
-    carried = _pop_pending_confirmation(user_id) if is_voice else None
+    carried = pending["messages"] if pending else None
+    if pending:
+        from_notes.extend(n for n in pending["note_ids"] if n not in from_notes)
     new_turn: dict[str, Any] = {"role": "user", "content": json.dumps(payload)}
     messages: list[dict[str, Any]] = [*carried, new_turn] if carried else [new_turn]
     if carried:
@@ -1284,6 +1440,8 @@ def _run(
             {r.id for r in user_state.reminders}
             if user_state.reminders_pending_total is not None else None
         ),
+        from_notes=from_notes,
+        command=command,
     )
     verbatim = note_body(event)
     if verbatim is not None and "memory" in authorised:
@@ -1307,9 +1465,9 @@ def _save_verbatim_note(text: str, event_id: UUID, ctx: TurnContext) -> IntentRe
     speech = result.get("spoken", "") if isinstance(result, dict) else ""
     confirmation: Literal["yes_no"] | None = None
     if saved and note_wants_reminder(text) and "set_reminder" in ctx.turn.authorised():
-        _stash_reminder_offer(ctx.user_id, text)
+        _stash_reminder_offer(ctx.user_id, text, result.get("note_id"))
         speech, confirmation = REMINDER_OFFER_SPEECH, "yes_no"
-    print(f"[loop] verbatim note - final speech={speech!r} actions={ctx.ran!r}")
+    print(f"[loop] verbatim note - final speech={said(speech)} actions={ctx.ran!r}")
     return IntentResult(
         event_id=event_id, speech=speech, actions=ctx.for_wire(),
         episode_id=ctx.episode_id, confirmation=confirmation,
@@ -1408,8 +1566,31 @@ def _force_answer(
     if finish == "length" and assistant["content"] and not calls:
         finish = "stop"
     print(f"[loop] forced answer finish_reason={finish!r} "
-          f"tool_calls={[c['function']['name'] for c in calls]!r} speech={assistant['content']!r}")
+          f"tool_calls={[c['function']['name'] for c in calls]!r} speech={said(assistant['content'])}")
     return assistant, calls, finish
+
+
+def warm_prefix() -> None:
+    """Have the model server read the system prompt and tool list once for the
+    two tool sets most turns are offered, so the first such turn after a restart
+    finds them in its prefix cache instead of spending 6-10 s on them. One token
+    out each; the replies are thrown away.
+
+    The two sets: every tool (a command authorises them all) and none of the
+    Function tools (an unasked turn usually has no authority). The server keeps
+    both cached at once. A turn offered any other set re-reads its whole prompt
+    the first time that set comes up - the template puts the tools before the
+    system prompt."""
+    for authorised in (_REGISTRY.all_names(), []):
+        # Start-up's leash, not a voice turn's: the model may still be loading.
+        llm.client(120.0, 1).chat.completions.create(
+            model=llm.MODEL,
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": "{}"}],
+            tools=_build_tools(authorised),
+            tool_choice="auto",
+            max_tokens=1,
+            extra_body=llm.THINKING,
+        )
 
 
 def _tool_message(call_id: str, result: Any) -> dict[str, Any]:
@@ -1451,12 +1632,54 @@ _BAD_ARGUMENTS = {"success": False, "error": (
     "with valid JSON arguments.")}
 
 
+def _end_on_choice(
+    messages: list[dict[str, Any]],
+    question: str,
+    options: list[str],
+    event_id: UUID,
+    ctx: TurnContext,
+) -> IntentResult:
+    """Ends a voice turn on an ask_choice question. The thread is stashed the
+    same way a question in plain speech is (_stash_pending_confirmation), with
+    the question as the assistant's last word, so the pick - the label itself,
+    as the next voice turn - continues it exactly as a spoken answer would.
+    Only the question is spoken from here; the phone reads out the options."""
+    print(f"[loop] asked a choice: {said(question)} options={options!r}")
+    _stash_pending_confirmation(
+        ctx.user_id,
+        [*messages, {"role": "assistant", "content": question}],
+        note_ids=ctx.from_notes,
+        command=ctx.command,
+    )
+    return IntentResult(
+        event_id=event_id, speech=question, actions=ctx.for_wire(),
+        episode_id=ctx.episode_id, confirmation="choice", options=options,
+        scheduled_departure=ctx.scheduled_departure,
+        departure_unknown=ctx.departure_unknown, note_ids=ctx.from_notes,
+    )
+
+
 def _run_loop(
     messages: list[dict[str, Any]],
     iterations_left: int,
     event_id: UUID,
     ctx: TurnContext,
     is_voice: bool = False,
+) -> IntentResult | NeedMoreResult:
+    """The turn's model calls. Someone is waiting on a voice turn, so while one
+    runs the model is kept for it - other work holds back (llm.voice_turn)."""
+    if not is_voice:
+        return _loop(messages, iterations_left, event_id, ctx, is_voice)
+    with llm.voice_turn():
+        return _loop(messages, iterations_left, event_id, ctx, is_voice)
+
+
+def _loop(
+    messages: list[dict[str, Any]],
+    iterations_left: int,
+    event_id: UUID,
+    ctx: TurnContext,
+    is_voice: bool,
 ) -> IntentResult | NeedMoreResult:
     # Read off the Turn rather than passed in.
     tools = _build_tools(ctx.turn.authorised())
@@ -1468,6 +1691,8 @@ def _run_loop(
 
     # iterate until an appropriate answer is reached
     for _ in range(iterations_left):
+        # An ambient turn has nobody listening; it goes after any voice turn.
+        llm.yield_to_voice()
         # call model
         print(f"[loop] tools={[t['function']['name'] for t in tools]!r}")
         response = llm.client(LOOP_TIMEOUT_S, 1).chat.completions.create(
@@ -1533,6 +1758,9 @@ def _run_loop(
             # resume(). Its result is carried in _PENDING_SESSIONS and sent with
             # the device's answer there instead.
             tool_results = []
+            # ask_choice's (question, options), once one is accepted - the turn
+            # ends on it below, after every other call in this reply has run.
+            asked: tuple[str, list[str]] | None = None
             for call in calls:
                 if call is client_call and client_authorised:
                     continue
@@ -1540,6 +1768,19 @@ def _run_loop(
                 tool_input = _arguments(call)
                 if tool_input is None:
                     tool_results.append(_tool_message(call["id"], _BAD_ARGUMENTS))
+                    continue
+                if name == "ask_choice":
+                    if not is_voice:
+                        result = {"success": False, "error": (
+                            "Nobody is listening to answer - don't ask, stay quiet.")}
+                    elif client_authorised or asked is not None:
+                        result = {"success": False, "error": (
+                            "Ask once you have everything else you need, one question at a time.")}
+                    else:
+                        result = _choice(tool_input)
+                        if isinstance(result, tuple):
+                            asked, result = result, {"success": True, "asked": True}
+                    tool_results.append(_tool_message(call["id"], result))
                     continue
                 blocked = _gate(name, ctx)
                 if blocked is not None:
@@ -1563,6 +1804,20 @@ def _run_loop(
                         # anchor.
                         "minutes_until_start": tool_input.get("minutes_until_start"),
                         "event_title": tool_input.get("event_title"),
+                        # Where the route ends, for the device's compass.
+                        "destination_lat": result.get("destination_lat"),
+                        "destination_lng": result.get("destination_lng"),
+                    }
+                    ctx.departure_unknown = None
+                elif (name == "navigation_departure_time"
+                        and isinstance(result, dict)
+                        and result.get("travel_unknown")
+                        and ctx.scheduled_departure is None):
+                    ctx.departure_unknown = {
+                        "destination": result.get("destination"),
+                        "event_title": tool_input.get("event_title"),
+                        "minutes_until_start": tool_input.get("minutes_until_start"),
+                        "reason": result.get("reason"),
                     }
                 if isinstance(result, dict) and result.get("spoken"):
                     tool_spoken = str(result["spoken"])
@@ -1606,15 +1861,17 @@ def _run_loop(
                 )
 
             messages.extend(tool_results)
+            if asked is not None:
+                return _end_on_choice(messages, *asked, event_id, ctx)
             continue
 
         # finished reasoning
         if finish in ("stop", "eos", None):
             speech = assistant["content"] or ""
             if not speech:
-                print(f"[loop] empty speech - raw content: {choice.message.content!r}")
+                print(f"[loop] empty speech - raw content: {said(choice.message.content)}")
                 speech = tool_spoken
-            print(f"[loop] final speech={speech!r} actions={ctx.ran!r}")
+            print(f"[loop] final speech={said(speech)} actions={ctx.ran!r}")
             # A voice turn that ends by asking a question is left dangling on
             # purpose: stash the real thread (assistant question included) so
             # a same-topic "yes" a moment later continues it verbatim instead
@@ -1627,6 +1884,8 @@ def _run_loop(
                     _stash_pending_confirmation(
                         ctx.user_id,
                         [*messages, {"role": "assistant", "content": speech}],
+                        note_ids=ctx.from_notes,
+                        command=ctx.command,
                     )
                 else:
                     _clear_pending_confirmation(ctx.user_id)
@@ -1634,6 +1893,7 @@ def _run_loop(
                 event_id=event_id, speech=speech, actions=ctx.for_wire(),
                 episode_id=ctx.episode_id, confirmation=confirmation,
                 scheduled_departure=ctx.scheduled_departure,
+                departure_unknown=ctx.departure_unknown, note_ids=ctx.from_notes,
             )
 
         # unexpected finish_reason (length, content_filter, ...)
@@ -1643,8 +1903,9 @@ def _run_loop(
     # Someone who spoke gets an answer, even if it's that this one went wrong;
     # an ambient event stays silent, as it always may.
     speech = (tool_spoken or STUCK_SPEECH) if is_voice else ""
-    print(f"[loop] exited loop with no end_turn - speech={speech!r}")
+    print(f"[loop] exited loop with no end_turn - speech={said(speech)}")
     return IntentResult(
         event_id=event_id, speech=speech, actions=ctx.for_wire(),
         episode_id=ctx.episode_id, scheduled_departure=ctx.scheduled_departure,
+        departure_unknown=ctx.departure_unknown, note_ids=ctx.from_notes,
     )

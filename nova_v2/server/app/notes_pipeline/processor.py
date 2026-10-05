@@ -28,6 +28,7 @@ from app.notes_pipeline.summarise import (
 )
 from app.store import notes
 from app.store.notes import Note, NoteNotFound
+from app.core.config import said
 
 
 def _mock_llm() -> bool:
@@ -70,7 +71,7 @@ class NotesPipelineProcessor:
                 return
             notes.set_interpretation(note.user_id, note.id, meant)
             if meant:
-                print(f"[notes pipeline] read back {note.id}: {meant[:80]!r}")
+                print(f"[notes pipeline] read back {note.id}: {said(meant)}")
         except NoteNotFound:
             pass  # deleted while it was being read
         except Exception as e:
@@ -94,7 +95,7 @@ class NotesPipelineProcessor:
             notes.set_summary(note.user_id, note.id, note.summary, "failed")
             return notes.get(note.user_id, note.id)
         notes.set_summary(note.user_id, note.id, summary, "done")
-        print(f"[notes pipeline] summarised {note.id}: {summary.title!r}")
+        print(f"[notes pipeline] summarised {note.id}: {said(summary.title)}")
         return notes.get(note.user_id, note.id)
 
     def _rechunk(self, note: Note) -> None:

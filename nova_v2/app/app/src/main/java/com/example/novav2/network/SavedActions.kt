@@ -27,7 +27,7 @@ internal fun parseSavedActions(actions: JSONArray?): List<SavedAction> {
         when (input.optString("saved_as")) {
             "memory" -> SavedAction(SavedAction.Kind.MEMORY, text)
             "note" -> SavedAction(
-                SavedAction.Kind.NOTE, text,
+                SavedAction.Kind.NOTE, noteChipText(input.optString("title"), text),
                 noteId = input.optString("note_id").takeIf { it.isNotBlank() },
             )
             // No outcome recorded - the save didn't land anywhere we can point to.
@@ -36,4 +36,20 @@ internal fun parseSavedActions(actions: JSONArray?): List<SavedAction> {
     }
     val reminders = parseReminderActions(actions).map { SavedAction(SavedAction.Kind.REMINDER, it.text) }
     return saves + reminders
+}
+
+private val LINE_MARKER = Regex("""^\s*(?:#{1,6}\s+|[-*•]\s+|\d+[.)]\s+)""")
+private val BOLD_MARKER = Regex("""\*\*|__""")
+
+/**
+ * What a note's chip says. A note Nova writes is laid out in Markdown ('## ' headings, '- '
+ * bullets - server memory_tool.py), which the Notes tab renders but a one-line chip would show
+ * raw ("Note: ## Door code"). So: its title if the model gave one, else its first line with the
+ * markers dropped.
+ */
+internal fun noteChipText(title: String, text: String): String {
+    title.trim().takeIf { it.isNotEmpty() }?.let { return it }
+    val first = text.lines().map { it.replace(LINE_MARKER, "").replace(BOLD_MARKER, "").trim() }
+        .firstOrNull { it.isNotEmpty() }
+    return first ?: text.trim()
 }

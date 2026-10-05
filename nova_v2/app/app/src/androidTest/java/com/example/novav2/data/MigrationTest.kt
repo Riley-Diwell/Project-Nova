@@ -120,6 +120,39 @@ class MigrationTest {
         }
     }
 
+    @Test
+    fun migrate5To6KeepsChatAndOnlyTaggedBubblesGoWithANote() {
+        helper.createDatabase(dbName, 5).apply {
+            execSQL(
+                "INSERT INTO chat_messages (id, text, fromUser, timestamp) " +
+                    "VALUES ('m1', 'note the gate code is 4417', 1, 1000)"
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(dbName, 6, true).close()
+
+        val db = Room.databaseBuilder(
+            ApplicationProvider.getApplicationContext(), NovaDatabase::class.java, dbName,
+        ).build()
+        try {
+            val dao = db.chatMessageDao()
+            runBlocking {
+                // A bubble from before the column existed has no tag, so a delete can't reach it.
+                assertNull(dao.observeAll().first().single().noteIds)
+                dao.insert(ChatMessageEntity("m2", "Noted.", false, 2000, noteIds = ",n1,n12,"))
+                dao.insert(ChatMessageEntity("m3", "Read back", false, 3000, noteIds = ",n12,"))
+                dao.tagNotes(listOf("m1"), ",n1,")
+
+                dao.deleteForNote("n1")
+
+                assertEquals(listOf("m3"), dao.observeAll().first().map { it.id })
+            }
+        } finally {
+            db.close()
+        }
+    }
+
     private companion object {
         /** A row in the version 2 shape - no dirty, no clearedAtMillis. */
         const val INSERT_V2_REMINDER =

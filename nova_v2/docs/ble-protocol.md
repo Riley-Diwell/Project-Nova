@@ -44,6 +44,7 @@ dropped").
 | Battery level | `0x04` | 3 bytes: percentage 0–100, millivolts (2 bytes LE) |
 | Heartbeat | `0x05` | none |
 | Press | `0x06` | 3 bytes: press count, mode, token |
+| Clear heading | `0x07` | none — two taps then a hold; the phone forgets the compass destination |
 
 Battery is sent 3 s after connecting (time for the phone to subscribe) and
 every 15 s after that. The firmware reads the cell through the 220k/220k
@@ -110,6 +111,7 @@ lockstep with button state.
 | Clear LED layer | `0x05` | 1 byte: layer id, `0xFF` clears every layer |
 | Play haptic | `0x06` | 1–6 bytes: alternating on/off step durations in 10ms units, starting with on |
 | Set mode | `0x07` | 4 bytes: mode, token, timeout seconds (little-endian, `0` = until changed) |
+| Set heading | `0x08` | 2 bytes: bearing to the destination in 0.1° units, clockwise from true north (little-endian, 0–3599); `0xFFFF` = no destination |
 
 Set LED layer payload (11 bytes with the type byte):
 
@@ -119,7 +121,7 @@ Set LED layer payload (11 bytes with the type byte):
 | 2 | priority | highest active layer is shown; newest wins a tie |
 | 3 | red | 0–255 |
 | 4 | green | 0–255 |
-| 5 | pattern | `0x00` solid, `0x01` blink (on for on-time at the start of each period), `0x02` breathe |
+| 5 | pattern | `0x00` solid, `0x01` blink (on for on-time at the start of each period), `0x02` breathe, `0x03` double blink (two on-time flashes, an on-time apart, at the start of each period) |
 | 6–7 | period | 10ms units, little-endian |
 | 8 | on-time | 10ms units (blink only) |
 | 9–10 | timeout | seconds, little-endian; `0` = until cleared |
@@ -140,8 +142,34 @@ What the LED shows, first match wins:
 1. recording: solid red
 2. the release / `LED pulse` green flash
 3. the top layer, including the dark half of a blink
-4. the compass heading gradient, if a compass is fitted
+4. the compass heading gradient, if a compass is fitted and the phone has set a heading
 5. off
+
+### Compass
+
+The compass is dark unless the phone has a destination. The device has no GPS,
+so the phone (`DeviceCompass`) works out the bearing from its latest fix to the
+destination and sends it with Set heading. The device compares that bearing to
+its magnetometer heading (corrected to true north) and fades the LED from green
+when it faces the destination to red when it faces the opposite way.
+
+The destination is the end of the route behind the latest leave-by (the
+server's `scheduled_departure`, `destination_lat`/`destination_lng`). The phone
+re-sends the bearing as the user moves, on its ~10 s signal tick, but only when
+it has moved 2° or more. It sends `0xFFFF` once the user is within 150 m of the
+destination, 30 minutes after the event starts, or when a new leave-by has no
+coordinates. Acknowledging "leave now"
+on the device leaves the compass on, because that is when the walk starts.
+
+A place shared from Google Maps (Share, then "Nova compass") overrides the
+leave-by. Maps has no way for another app to read where it is navigating to, so
+sharing is how the user tells Nova. The phone follows the share link's
+redirects for coordinates, or geocodes the place name. A later leave-by doesn't
+replace a shared place until it ends, which is 2 hours after sharing or within
+150 m of the place.
+
+The heading is dropped on disconnect like the layers, and the phone sends it
+again when it reconnects.
 
 **All layers are dropped on disconnect.** The phone (`DeviceLayers`) is the
 source of truth: on every connect it clears all and re-sends the layers that
@@ -167,9 +195,10 @@ One button, read by a small state machine in the firmware (`checkButton`):
 |---|---|
 | Hold (≥ 500 ms) | records for Nova: audio, START. LED solid red, green flash on release |
 | Tap, then hold | records a note: audio, START + NOTE |
+| Two taps, then hold | compass off: drops the heading, buzzes once, `events` Clear heading |
 | 1–n presses, ≤ 500 ms apart | `events` Press with the count, once 500 ms pass with no further press |
 
-Two taps then a hold is a plain hold. With no phone connected, a press or a
+Three or more taps then a hold is a plain hold. With no phone connected, a press or a
 hold just blinks the LED red twice — nothing is recorded or sent.
 
 **What a press means is the phone's call** (`DeviceButtonPolicy`), because it
@@ -178,6 +207,8 @@ depends on things only the phone knows:
 | Situation | 1 press | 2 presses | 3 presses |
 |---|---|---|---|
 | Nova is thinking | busy | busy | busy |
+| Nova asked yes or no | repeat it | yes | no |
+| Nova asked you to pick (up to 3 options) | repeat it | option 1 | option 2 (4 presses: option 3) |
 | Nova just replied (15 s after it finishes speaking) | repeat it | done | — |
 | "Leave soon/now" showing | got it | got it | read it aloud |
 | A reminder went off unanswered | done | snooze | read it aloud |
@@ -190,11 +221,21 @@ buzzes once per reminder due in the next hour (up to three; one long buzz for
 none). "Read aloud" only ever uses headphones.
 
 **Modes and tokens.** The phone sends Set mode as it moves between idle (`0`),
-thinking (`1`, LED breathes green) and replied (`2`). Each change carries a new
+thinking (`1`, LED breathes green), replied (`2`) and confirm (`3`). Each change carries a new
 token (1–255). The device echoes the mode and token with every press,
 captured at the press's first touch, so a press made in the last moment of the
 reply window still means "repeat" even though it reaches the phone 500 ms
 later. The device drops back to idle when the timeout passes or the link drops.
+
+**Confirm (`3`)** means Nova has asked a question that presses can answer.
+On entering it (a new token), the device buzzes once briefly and shows its own
+"question" layer: a green double blink every 2 s, priority 35 (over the
+phone's thinking layer, under its preview). The layer lasts as long as the
+mode's timeout, and goes as soon as any other mode is set. Presses are
+reported as in every mode; what N presses answer is the phone's call, so the
+device needs no option count. Firmware older than this treats `3` as an
+unknown mode: no question light or buzz, but presses still carry the mode
+and token.
 
 The phone confirms a saved note with its own haptic command (one buzz = saved,
 two long = failed).

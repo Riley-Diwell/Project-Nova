@@ -41,6 +41,19 @@ class SavedActionParsingTest {
     }
 
     @Test
+    fun aMarkdownNoteChipShowsItsTitleOrPlainFirstLine() {
+        val parsed = parseSavedActions(actions(
+            """{"tool":"memory","ran":true,"input":{"action":"save","text":"## Door code\n- 4417",
+               "title":"Door code 4417","saved_as":"note","note_id":"n3"}}""",
+            """{"tool":"memory","ran":true,"input":{"action":"save","text":"## **Door code**\n- 4417",
+               "saved_as":"note","note_id":"n4"}}""",
+            """{"tool":"memory","ran":true,"input":{"action":"save","text":"\n- buy milk\n- eggs",
+               "saved_as":"note","note_id":"n5"}}""",
+        ))
+        assertEquals(listOf("Door code 4417", "Door code", "buy milk"), parsed.map { it.text })
+    }
+
+    @Test
     fun failedRefusedAndRecallsMakeNoChip() {
         val parsed = parseSavedActions(actions(
             """{"tool":"memory","ran":true,"input":{"action":"save","text":"x","failed":true}}""",

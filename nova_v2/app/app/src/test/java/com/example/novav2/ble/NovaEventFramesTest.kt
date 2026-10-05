@@ -22,6 +22,11 @@ class NovaEventFramesTest {
     }
 
     @Test
+    fun clearHeading() {
+        assertEquals(NovaDeviceEvent.ClearHeading, NovaEventFrames.parse(bytes(0x07)))
+    }
+
+    @Test
     fun heartbeatAndUnknown() {
         assertEquals(NovaDeviceEvent.Heartbeat, NovaEventFrames.parse(bytes(0x05)))
         assertNull(NovaEventFrames.parse(bytes(0x7F)))

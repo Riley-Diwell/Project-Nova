@@ -108,7 +108,7 @@ class DeviceRecordingRouter(
         when (val outcome = repository.submit(note)) {
             is NoteSubmitResult.Saved -> {
                 savedBuzz()
-                chatBubble("Note saved: ${note.text.take(80)}")
+                chatBubble("Note saved: ${note.text.take(80)}", note.id)
                 if (NotesRepository.wantsSummary(note)) {
                     repository.summarise(note.id)?.let { saved ->
                         summaryBuzz()
@@ -120,22 +120,23 @@ class DeviceRecordingRouter(
             }
             is NoteSubmitResult.Queued -> {
                 failureBuzz()
-                NoteNotifier.queued(appContext, note.text)
+                NoteNotifier.queued(appContext, note.id, note.text)
             }
             is NoteSubmitResult.Rejected -> {
                 failureBuzz()
                 NoteAudioStore.delete(appContext, note.id)
-                NoteNotifier.failed(appContext, note.text, outcome.reason)
+                NoteNotifier.failed(appContext, note.id, note.text, outcome.reason)
             }
         }
     }
 
     /** The Voice tab's record that it happened - the phone stays in the bag, but later the
      * thread shows it. */
-    private suspend fun chatBubble(text: String) {
+    private suspend fun chatBubble(text: String, noteId: String) {
         runCatching {
-            NovaDatabase.getInstance(appContext).chatMessageDao()
-                .insert(ChatMessage(text = text, fromUser = false).toEntity(System.currentTimeMillis()))
+            NovaDatabase.getInstance(appContext).chatMessageDao().insert(
+                ChatMessage(text = text, fromUser = false).toEntity(System.currentTimeMillis(), listOf(noteId)),
+            )
         }
     }
 

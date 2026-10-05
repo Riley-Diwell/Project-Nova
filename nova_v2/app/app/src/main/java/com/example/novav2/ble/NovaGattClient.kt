@@ -162,6 +162,9 @@ class NovaGattClient(
     override fun sendSetMode(mode: Int, token: Int, timeoutSeconds: Int) =
         sendCommand(NovaCommandFrames.setMode(mode, token, timeoutSeconds))
 
+    override fun sendSetHeading(degrees: Double?) = sendCommand(NovaCommandFrames.setHeading(degrees))
+
+
     /** [payload] is one encoded command (see [NovaCommandFrames], which owns the byte
      * layouts and clamping).
      *

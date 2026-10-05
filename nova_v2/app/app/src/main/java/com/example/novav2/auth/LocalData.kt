@@ -8,7 +8,11 @@ import com.example.novav2.network.NotesApiClient
 import com.example.novav2.notes.NotesRepository
 import com.example.novav2.notes.audio.NoteAudioStore
 import com.example.novav2.notes.data.NotesDatabase
+import com.example.novav2.notes.data.PendingNoteDeleteEntity
 import com.example.novav2.profile.ProfileRepository
+import com.example.novav2.state.DepartureStore
+import com.example.novav2.state.DepartureUnknownStore
+import com.example.novav2.state.DeviceCompass
 import com.example.novav2.state.ReminderSync
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
@@ -53,8 +57,10 @@ object LocalData {
     }
 
     /**
-     * Before signing out: try to upload every unsent reminder change and note. Returns how many
-     * are still stuck on the phone (offline, or the server is down) - signing out now loses them.
+     * Before signing out: try to upload every unsent reminder change and note, and send every
+     * note delete still waiting. Returns how many are still stuck on the phone (offline, or the
+     * server is down) - signing out now loses them, and a stuck delete leaves that note on the
+     * server.
      */
     suspend fun flush(context: Context): Int {
         val app = context.applicationContext
@@ -70,13 +76,23 @@ object LocalData {
             } catch (_: IOException) {
             }
         }
-        return ReminderSync.unsentCount(app) + outbox.count()
+        val deletes = NotesDatabase.getInstance(app).pendingNoteDeleteDao()
+        for (pending in deletes.all()) {
+            try {
+                if (pending.id == PendingNoteDeleteEntity.ALL) NotesApiClient.deleteAll()
+                else NotesApiClient.delete(pending.id)
+                deletes.delete(pending.id)
+            } catch (_: IOException) {
+            }
+        }
+        return ReminderSync.unsentCount(app) + outbox.count() + deletes.all().size
     }
 
     /** How many reminder changes and notes haven't reached the account, without trying to send them. */
     suspend fun unsentCount(context: Context): Int {
         val app = context.applicationContext
-        return ReminderSync.unsentCount(app) + NotesDatabase.getInstance(app).pendingNoteDao().count()
+        val notes = NotesDatabase.getInstance(app)
+        return ReminderSync.unsentCount(app) + notes.pendingNoteDao().count() + notes.pendingNoteDeleteDao().all().size
     }
 
     /** Signing out: forget everything personal this phone keeps. */
@@ -87,8 +103,14 @@ object LocalData {
         val outbox = NotesDatabase.getInstance(app).pendingNoteDao()
         outbox.all().forEach { outbox.delete(it.id) }
         NotesDatabase.getInstance(app).noteRowDao().clear()
+        NotesDatabase.getInstance(app).pendingNoteDeleteDao().all().forEach {
+            NotesDatabase.getInstance(app).pendingNoteDeleteDao().delete(it.id)
+        }
         NoteAudioStore.deleteAll(app)
         ProfileRepository.clear(app)
+        DepartureStore.clear(app)
+        DepartureUnknownStore.clear(app)
+        DeviceCompass.clear(app)
         ConsolidationWorker.cancel(app)
         withContext(Dispatchers.Main) { KnowledgeRepository.clear() }
         app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_USER_ID).apply()

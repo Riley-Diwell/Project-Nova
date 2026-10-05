@@ -6,6 +6,7 @@ import com.example.novav2.state.DeviceButtonPolicy.Mode
 import com.example.novav2.state.DeviceButtonPolicy.ModeState
 import com.example.novav2.state.DeviceButtonPolicy.Situation
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DeviceButtonPolicyTest {
@@ -93,6 +94,92 @@ class DeviceButtonPolicyTest {
         assertEquals(null, IdleAction.decode("custom:   "))
         assertEquals(null, IdleAction.decode("garbage"))
         assertEquals(IdleAction.Custom("a: b"), IdleAction.decode("custom:a: b"))
+    }
+
+    private val yesNo = DeviceButtonPolicy.Question(listOf("Yes", "No"))
+    private val times = DeviceButtonPolicy.Question(listOf("Thursday at 10", "Friday at 2"))
+
+    @Test
+    fun yesNo_onePressRepeats_twoIsYes_threeIsNo() {
+        val s = situation(ModeState(Mode.CONFIRM, 8, null, "Delete it?", yesNo), departure, fired)
+        assertEquals(Action.Repeat("Delete it?"), DeviceButtonPolicy.resolve(s, 1))
+        assertEquals(Action.Answer("Yes"), DeviceButtonPolicy.resolve(s, 2))
+        assertEquals(Action.Answer("No"), DeviceButtonPolicy.resolve(s, 3))
+        assertEquals(Action.Nothing, DeviceButtonPolicy.resolve(s, 4))
+    }
+
+    @Test
+    fun choice_pressNPlusOnePicksOptionN_tooManyIsNothing() {
+        val s = situation(ModeState(Mode.CONFIRM, 8, null, "Which time?", times))
+        assertEquals(Action.Repeat("Which time?"), DeviceButtonPolicy.resolve(s, 1))
+        assertEquals(Action.Answer("Thursday at 10"), DeviceButtonPolicy.resolve(s, 2))
+        assertEquals(Action.Answer("Friday at 2"), DeviceButtonPolicy.resolve(s, 3))
+        assertEquals(Action.Nothing, DeviceButtonPolicy.resolve(s, 4))
+    }
+
+    @Test
+    fun aStaleQuestionsPress_answersThatQuestion_notTheNextOne() {
+        val first = ModeState(Mode.CONFIRM, 8, untilMillis = 1_000, replyText = "Which time?", question = times)
+        val next = ModeState(Mode.CONFIRM, 9, untilMillis = 5_000, replyText = "Delete it?", question = yesNo)
+        val pressedIn = DeviceButtonPolicy.modeAt(next, listOf(first), token = 8, nowMillis = 2_000)
+        assertEquals(Action.Answer("Friday at 2"), DeviceButtonPolicy.resolve(situation(pressedIn), 3))
+        // And once the answer window has run out with no token to go on, presses are idle again.
+        val gone = DeviceButtonPolicy.modeAt(first, emptyList(), token = null, nowMillis = 1_000)
+        assertEquals(Mode.IDLE, gone.mode)
+    }
+
+    @Test
+    fun question_onlyForYesNoAndChoices_openIsAReply() {
+        assertEquals(yesNo, DeviceButtonPolicy.question("yes_no", null))
+        assertEquals(times, DeviceButtonPolicy.question("choice", listOf("Thursday at 10", " ", "Friday at 2")))
+        assertEquals(3, DeviceButtonPolicy.question("choice", listOf("a", "b", "c", "d"))?.answers?.size)
+        assertEquals(null, DeviceButtonPolicy.question("choice", listOf("a")))
+        assertEquals(null, DeviceButtonPolicy.question("open", null))
+        assertEquals(null, DeviceButtonPolicy.question(null, null))
+    }
+
+    @Test
+    fun howToAnswer_matchesThePresses() {
+        assertEquals("Yes: press twice. No: press 3 times.", DeviceButtonPolicy.howToAnswer(yesNo))
+        assertEquals(
+            "Thursday at 10: press twice. Friday at 2: press 3 times.",
+            DeviceButtonPolicy.howToAnswer(times),
+        )
+    }
+
+    @Test
+    fun guide_hasARowForEveryMode_andAlert() {
+        val examples = DeviceButtonPolicy.guideSituations(DevicePreferences.DEFAULT_IDLE_ACTIONS).map { it.second }
+        Mode.entries.filter { it != Mode.IDLE }.forEach { mode ->
+            assertTrue("no guide row for $mode", examples.any { it.mode.mode == mode })
+        }
+        assertTrue("no guide row for a departure cue", examples.any { it.departure != null })
+        assertTrue("no guide row for a fired reminder", examples.any { it.firedReminders.isNotEmpty() })
+    }
+
+    @Test
+    fun guide_saysWhatThePolicyDoes() {
+        val custom = DevicePreferences.DEFAULT_IDLE_ACTIONS + (3 to IdleAction.Custom("Log a glass of water"))
+        val guide = DeviceButtonPolicy.guide(custom)
+        assertEquals(listOf("Busy buzz", "Busy buzz", "Busy buzz"), guide[0].presses)
+        assertEquals(listOf("Repeat it", "Done with it", "Nothing"), guide[1].presses)
+        assertEquals(listOf("Got it", "Got it", "Read it aloud"), guide[2].presses)
+        assertEquals(listOf("Mark it done", "Snooze it", "Read it aloud"), guide[3].presses)
+        assertEquals(listOf("Repeat it", "Answer: Yes", "Answer: No"), guide[4].presses)
+        assertEquals(listOf("Repeat it", "Answer: the first option", "Answer: the second option"), guide[5].presses)
+        assertEquals(
+            listOf("Buzz what's coming up", "What's next?", "“Log a glass of water”"),
+            guide.last().presses,
+        )
+    }
+
+    @Test
+    fun idleAction_ignoresAlerts_forTryIt() {
+        // "Try it" uses this directly: with reminders pulsing, a real 1 press would complete them.
+        assertEquals(Action.CompleteReminders(listOf("a", "b")), DeviceButtonPolicy.resolve(situation(fired = fired), 1))
+        assertEquals(Action.Status, DeviceButtonPolicy.idleAction(DevicePreferences.DEFAULT_IDLE_ACTIONS[1], "hi"))
+        assertEquals(Action.Repeat("hi"), DeviceButtonPolicy.idleAction(IdleAction.Use(IdleAction.Preset.REPEAT_LAST_REPLY), "hi"))
+        assertEquals(Action.Nothing, DeviceButtonPolicy.idleAction(IdleAction.Use(IdleAction.Preset.REPEAT_LAST_REPLY), null))
     }
 
     @Test

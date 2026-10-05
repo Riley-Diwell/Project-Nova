@@ -131,7 +131,7 @@ object ReminderNotifier {
 
     private fun base(context: Context, headsUp: Boolean): NotificationCompat.Builder =
         NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_nova)
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
             // Silent means no sound, no vibration and no heads-up peek - it is still in the

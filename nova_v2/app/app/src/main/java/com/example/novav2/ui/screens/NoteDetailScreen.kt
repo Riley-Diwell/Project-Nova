@@ -85,6 +85,7 @@ fun NoteDetailScreen(noteId: String, onClosed: () -> Unit, vm: NotesViewModel = 
     var playingFrom by remember { mutableStateOf<Double?>(null) }
     var editing by remember(noteId) { mutableStateOf(false) }
     var promoting by remember { mutableStateOf(false) }
+    var confirmingDelete by remember { mutableStateOf(false) }
 
     LaunchedEffect(noteId) { vm.openNote(noteId) }
     DisposableEffect(Unit) { onDispose { player.stop() } }
@@ -144,10 +145,7 @@ fun NoteDetailScreen(noteId: String, onClosed: () -> Unit, vm: NotesViewModel = 
                 OutlinedButton(onClick = { promoting = true }, enabled = !state.busy) { Text("Add to what Nova knows") }
             }
             OutlinedButton(
-                onClick = {
-                    vm.requestDelete(note.id)
-                    onClosed()
-                },
+                onClick = { confirmingDelete = true },
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
             ) { Text("Delete") }
         }
@@ -213,6 +211,30 @@ fun NoteDetailScreen(noteId: String, onClosed: () -> Unit, vm: NotesViewModel = 
             promoting = false
             vm.promote(category)
         })
+    }
+
+    // A hard delete: confirmed here instead of undone afterwards, because afterwards there is
+    // nothing left to restore (docs/plans/notes-hard-delete-plan.md phase 3).
+    if (confirmingDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmingDelete = false },
+            title = { Text("Delete this note?") },
+            text = {
+                Text(
+                    "This note, its recording, and the conversation it came from will be deleted " +
+                        "for good. Anything Nova learned from it is forgotten. Reminders you set " +
+                        "from it are kept. This can't be undone."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmingDelete = false
+                    vm.delete(note.id)
+                    onClosed()
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmingDelete = false }) { Text("Cancel") } },
+        )
     }
 }
 

@@ -26,10 +26,17 @@ class EventOut(BaseModel):
     # Set only when speech leaves a question dangling (intent_surface.py's
     # _classify_confirmation): "yes_no" if Android should offer Yes/No quick
     # replies alongside its usual text/voice input, "open" if it's a question
-    # but not one a Yes/No answer fits, None otherwise.
-    confirmation: Literal["yes_no", "open"] | None = None
+    # but not one a Yes/No answer fits, "choice" if the model asked the user
+    # to pick one of `options` (intent_surface's ask_choice), None otherwise.
+    confirmation: Literal["yes_no", "open", "choice"] | None = None
+    # The labels for a "choice" question, in order - 2 or 3 short phrases,
+    # each a complete answer on its own ("Thursday at 10"). The phone shows
+    # them as buttons and reads them out, and the device answers option N
+    # with N + 1 presses. Picking one sends its label as the next voice turn.
+    options: list[str] | None = None
     # {destination, mode, leave_in_minutes, minutes_until_start,
-    # event_title} when navigation_departure_time ran this turn and could
+    # event_title, destination_lat, destination_lng} when
+    # navigation_departure_time ran this turn and could
     # measure a countdown - see intent_surface.py's
     # TurnContext.scheduled_departure. Android schedules a precise local
     # alarm against leave_in_minutes rather than waiting for the next
@@ -37,12 +44,23 @@ class EventOut(BaseModel):
     # these fields - the model's speech is never used for it (see
     # AmbientCheckRunner.kt).
     scheduled_departure: dict[str, Any] | None = None
+    # {destination, event_title, minutes_until_start, reason} when
+    # navigation_departure_time ran this turn but could not measure a travel
+    # time - see intent_surface.py's TurnContext.departure_unknown. On an
+    # ambient check Android notifies the user that it couldn't work out when
+    # to leave, again in its own fixed wording.
+    departure_unknown: dict[str, Any] | None = None
     # True when enough has happened since NOVA last learned from this user's
     # activity (store/consolidation.due). The phone then asks for the pass in
     # the background (POST /persona/consolidate?if_due=true) - a request it
     # makes keeps its CPU on Cloud Run, where work the server started after
     # replying may never finish.
     consolidation_due: bool = False
+    # Notes whose words this turn holds without an Action naming them (the
+    # "yes" to a reminder offer - intent_surface's TurnContext.from_notes). The
+    # phone tags the turn's Voice history bubbles with them, so deleting the
+    # note deletes those bubbles too.
+    note_ids: list[str] = []
 
 
 class NeedMoreOut(BaseModel):

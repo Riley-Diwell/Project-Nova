@@ -177,10 +177,14 @@ object KnowledgeRepository {
         refresh()
     }
 
-    /** Deleting a note deletes every belief promoted from it (server-side); mirror that here. */
-    fun onNoteDeleted(noteId: String) {
+    /** Deleting a note deletes every belief promoted from it (server-side); mirror that here.
+     * [noteId] null is Delete all notes. The server also deletes beliefs it read out of the
+     * conversation the note came from, which only a refresh shows. */
+    fun onNoteDeleted(noteId: String?) {
         val graph = base ?: return
-        val promoted = graph.nodes.filter { it.noteId == noteId }.mapTo(HashSet()) { it.id }
+        val promoted = graph.nodes
+            .filter { it.noteId != null && (noteId == null || it.noteId == noteId) }
+            .mapTo(HashSet()) { it.id }
         if (promoted.isEmpty()) return
         base = graph.without(promoted)
         publish()

@@ -77,7 +77,7 @@ object AmbientNotifier {
             NotificationCompat.Builder(context, CHANNEL_ID)
                 .setContentTitle("Nova")
                 .setContentText(text)
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(R.drawable.ic_stat_nova)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
                 .build()

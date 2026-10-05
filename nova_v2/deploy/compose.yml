@@ -14,6 +14,10 @@ services:
   qwen:
     image: ghcr.io/syv-ai/qwen38-27b-rtx3090:latest
     restart: unless-stopped
+    # Bounded, like nova's below: a deleted note must not live on in a log.
+    logging: &bounded-log
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     ipc: host
     environment:
       SPEC: dflash2
@@ -61,6 +65,42 @@ services:
       POSTGRES_DB: postgres
       JWT_EXP: 3600
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf", "-c", "log_min_messages=fatal"]
+
+  # A throwaway copy of `db` for scrub-backups.sh: each backup is restored into
+  # it, has deleted rows removed, and is dumped back out (deleted notes leave
+  # the backups too - docs/plans/notes-hard-delete-plan.md phase 4). Same image
+  # as `db`, so a scrubbed dump is as faithful as any restore-and-dump. Its data
+  # lives in RAM (tmpfs) and is gone when it stops: a backup's contents are
+  # never written anywhere else on disk. Never started by `docker compose up` -
+  # only by the script, through the "scrub" profile. No ports, no other service
+  # talks to it.
+  scrub-db:
+    image: supabase/postgres:17.6.1.136
+    profiles: ["scrub"]
+    volumes:
+      - ./supabase/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:ro
+      - ./supabase/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:ro
+      - ./server/db:/nova-schema:ro
+      - ./data/backups:/backups
+    tmpfs:
+      - /var/lib/postgresql/data
+      - /etc/postgresql-custom
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      PGPORT: 5432
+      POSTGRES_PORT: 5432
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: postgres
+      POSTGRES_DB: postgres
+      JWT_EXP: 3600
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf", "-c", "log_min_messages=fatal"]
+    logging: *bounded-log
 
   # Supabase Auth (GoTrue): sign-up, password login, refresh-token rotation.
   # server/app/core/gotrue.py calls it exactly as it called hosted Supabase.
@@ -130,6 +170,10 @@ services:
     build: ./server
     image: nova-server:local
     restart: unless-stopped
+    # Docker keeps a container's stdout forever by default. The server logs no
+    # user content unless NOVA_LOG_CONTENT=1, and this bounds what's kept even
+    # then (docs/plans/notes-hard-delete-plan.md S7b).
+    logging: *bounded-log
     depends_on:
       auth:
         condition: service_healthy

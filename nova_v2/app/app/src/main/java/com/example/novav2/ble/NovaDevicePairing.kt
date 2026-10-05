@@ -4,9 +4,11 @@ import android.bluetooth.le.ScanFilter
 import android.companion.AssociationRequest
 import android.companion.BluetoothLeDeviceFilter
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.ParcelUuid
 import androidx.annotation.RequiresApi
+import com.example.novav2.service.NovaDeviceService
 
 /**
  * Pairing via CompanionDeviceManager rather than a hand-rolled scan+connect loop —
@@ -47,6 +49,15 @@ object NovaDevicePairing {
      * silently as a side effect of clearing local prefs. */
     fun clearPairedDevice(context: Context) {
         prefs(context).edit().remove(KEY_DEVICE_ADDRESS).apply()
+    }
+
+    /** "Forget device", and signing out: drops the link and forgets the device app-side
+     * ([clearPairedDevice] - the board itself keeps no record of this phone yet). */
+    fun forget(context: Context) {
+        context.stopService(Intent(context, NovaDeviceService::class.java))
+        clearPairedDevice(context)
+        NovaDeviceRepository.setConnectionState(NovaDeviceConnectionState.DISCONNECTED)
+        NovaDeviceRepository.setCommandSender(null)
     }
 
     /**

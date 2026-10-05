@@ -23,9 +23,11 @@ HOW, CHEAPEST FIRST
        - a contradicting belief is newer: the new one is REJECTED.
        - duplicates: merged into one fact, keeping the held wording and id and
          the union of their provenance.
-       - the new one is newer than every contradiction: it overwrites the
-         closest one IN PLACE - same id, so the Knowledge Map node stays put -
-         and any other contradictions are removed. REPLACED.
+       - the new one is newer than every contradiction: the contradictions
+         are removed and it is written as a belief of its own - a new id, so
+         its History starts when it was said, not when the belief it
+         overruled was first learned. REPLACED. (A Knowledge Map edit is the
+         exception: it keeps the edited belief's id.)
 
 SUPERSEDED IS NOT FORGOTTEN
 A belief that loses leaves a watermark (store.supersede), not a tombstone:
@@ -48,6 +50,7 @@ from typing import Any, Iterable, Optional
 
 from pydantic import BaseModel, Field
 
+from app.core.config import said
 from app.store.persona.judge import Judge, JudgeUnavailable
 from app.store.persona.models import Fact, Match, content_hash, source_keys
 from app.store.persona.store import (
@@ -124,7 +127,7 @@ def remember(
 
     with store.lock(user_id) as held:
         if not held:
-            print(f"[reconcile] Persona busy - writing {fact.text!r} unreconciled")
+            print(f"[reconcile] Persona busy - writing {said(fact.text)} unreconciled")
             result = _write_unreconciled(store, user_id, fact, None)
         else:
             result = _reconcile(store, user_id, fact, judge, candidate_limit)
@@ -276,14 +279,14 @@ def _reconcile_once(store: PersonaStore, user_id: UserId, new: Fact, judge: Judg
         if len(relations) != len(near):
             raise JudgeUnavailable(f"{len(relations)} verdicts for {len(near)} statements")
     except JudgeUnavailable as e:
-        print(f"[reconcile] judge unavailable ({e}) - {new.text!r} written unreconciled")
+        print(f"[reconcile] judge unavailable ({e}) - {said(new.text)} written unreconciled")
         if sweep:
             return RememberResult(action=RememberAction.UPDATED, fact_id=new.id, unreconciled=True)
         return _write_unreconciled(store, user_id, new, vector)
 
     for m, relation in zip(near, relations):
         print(f"[reconcile] {relation:<11} cos={m.similarity:.3f} lex={m.lexical:.3f} "
-              f"{new.text!r} vs {m.fact.text!r}")
+              f"{said(new.text)} vs {said(m.fact.text)}")
     dups = [m.fact for m, r in zip(near, relations) if r == "duplicate"]
     contras = [m.fact for m, r in zip(near, relations) if r == "contradicts"]
     if not dups and not contras:
@@ -308,40 +311,38 @@ def _apply(store: PersonaStore, user_id: UserId, new: Fact, target: Optional[Fac
             _supersede(store, user_id, target.metadata, _when(winner), winner.id)
             store.remove(user_id, target.id)
             lost.append(_superseded(target))
-        print(f"[reconcile] rejected {new.text!r}: {winner.text!r} is newer")
+        print(f"[reconcile] rejected {said(new.text)}: {said(winner.text)} is newer")
         return RememberResult(action=RememberAction.REJECTED, fact_id=winner.id,
                               superseded=lost, judged=judged)
 
+    # Only contradictions, and not an in-place write: no keeper - the new
+    # belief gets a row of its own rather than taking over the one it beat,
+    # whose created_at would otherwise date it.
+    keeper: Optional[Fact] = None
     if target is not None:
-        keeper, keep_new_body = target, True
+        keeper = target
+        body = new.model_copy(update={"id": target.id})
     elif dups:
-        keeper, keep_new_body = _pick_keeper(dups), False
-    else:
-        keeper, keep_new_body = contras[0], True
-
-    if keep_new_body:
-        body = new.model_copy(update={"id": keeper.id})
-    else:
+        keeper = _pick_keeper(dups)
         body = keeper.model_copy(update={"metadata": merge_provenance(keeper.metadata, new.metadata)})
+    else:
+        body = new
+    keeper_id = keeper.id if keeper is not None else None
 
     # Everything else goes. Removed before the keeper is written so the
     # keeper's text never collides with a row that is on its way out.
     merged: list[str] = []
     for dup in dups:
-        if dup.id == keeper.id:
+        if dup.id == keeper_id:
             continue
         body = body.model_copy(update={"metadata": merge_provenance(body.metadata, dup.metadata)})
         store.remove(user_id, dup.id)
         merged.append(dup.id)
 
-    # A contradiction overwritten in place (the keeper) or removed: either
-    # way its patterns are watermarked, except any the winner itself holds.
-    winning_keys = set(source_keys(body.metadata))
-    superseded: list[Superseded] = []
+    # Contradictions go too. Their patterns are watermarked once the winner
+    # has an id, except any the winner itself holds.
     for contra in contras:
-        _supersede(store, user_id, contra.metadata, when, keeper.id, keep=winning_keys)
-        superseded.append(_superseded(contra))
-        if contra.id != keeper.id:
+        if contra.id != keeper_id:
             store.remove(user_id, contra.id)
 
     # Contradictions are older by now; duplicates may not be.
@@ -350,14 +351,20 @@ def _apply(store: PersonaStore, user_id: UserId, new: Fact, target: Optional[Fac
     embedding = vector if body.text == new.text else None
     fact_id = store.upsert(user_id, body, embedding=embedding)
 
+    winning_keys = set(source_keys(body.metadata))
+    superseded: list[Superseded] = []
+    for contra in contras:
+        _supersede(store, user_id, contra.metadata, when, fact_id, keep=winning_keys)
+        superseded.append(_superseded(contra))
+
     if contras:
         action = RememberAction.REPLACED
     elif dups:
         action = RememberAction.MERGED
     else:
         action = RememberAction.UPDATED
-    print(f"[reconcile] {action.value} {fact_id}: {body.text!r}"
-          + (f" (was {[s.text for s in superseded]!r})" if superseded else ""))
+    print(f"[reconcile] {action.value} {fact_id}: {said(body.text)}"
+          + (f" (was {said([s.text for s in superseded])})" if superseded else ""))
     return RememberResult(action=action, fact_id=fact_id, superseded=superseded,
                           merged_ids=merged, judged=judged)
 

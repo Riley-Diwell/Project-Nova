@@ -10,6 +10,7 @@ import android.provider.Settings
 import com.example.novav2.data.NovaDatabase
 import com.example.novav2.data.ReminderEntity
 import com.example.novav2.service.ReminderAlarmReceiver
+import com.example.novav2.widget.WidgetUpdater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,10 +34,12 @@ import kotlinx.coroutines.sync.withLock
  * Place reminders are fired by geofences rather than this alarm, so reconcile also hands over to
  * [GeofenceRegistrar] - every caller that keeps the alarm right keeps the geofences right too.
  * The same goes for the device's reminder LED ([DeviceLayers.syncReminders]): it pulses while
- * something has fired unanswered, and every answer comes through here.
+ * something has fired unanswered, and every answer comes through here. And for the home-screen
+ * widget ([WidgetUpdater]), which shows the next reminders.
  *
  * PendingIntent request codes in this app: 100 = DepartureAlarmScheduler, 200 = this,
- * 400 = GeofenceRegistrar, 1001 = ActivitySignal, 3000+ = ReminderNotifier's per-reminder actions.
+ * 400 = GeofenceRegistrar, 500 = WidgetUpdater's boundary alarm, 1001 = ActivitySignal,
+ * 3000+ = ReminderNotifier's per-reminder actions.
  */
 object ReminderScheduler {
     private const val REQUEST_CODE = 200
@@ -55,6 +58,7 @@ object ReminderScheduler {
         reconcileAlarm(context)
         GeofenceRegistrar.reconcile(context)
         DeviceLayers.syncReminders(context)
+        WidgetUpdater.requestUpdate(context)
     }
 
     private suspend fun reconcileAlarm(context: Context) = mutex.withLock {

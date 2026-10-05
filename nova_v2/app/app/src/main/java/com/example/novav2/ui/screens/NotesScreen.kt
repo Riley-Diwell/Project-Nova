@@ -38,7 +38,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -88,12 +87,10 @@ fun NotesScreen(onOpenNote: (String) -> Unit, vm: NotesViewModel = notesViewMode
 
     LaunchedEffect(Unit) { vm.refresh() }
 
-    LaunchedEffect(state.pendingDelete?.id) {
-        if (state.pendingDelete == null) return@LaunchedEffect
-        val result = snackbar.showSnackbar(
-            message = "Note deleted", actionLabel = "Undo", duration = SnackbarDuration.Short,
-        )
-        if (result == SnackbarResult.ActionPerformed) vm.undoDelete()
+    // No Undo: the delete was confirmed before it ran, and it is final.
+    LaunchedEffect(state.deletedCount) {
+        if (state.deletedCount == 0) return@LaunchedEffect
+        snackbar.showSnackbar(message = "Note deleted", duration = SnackbarDuration.Short)
     }
 
     Scaffold(

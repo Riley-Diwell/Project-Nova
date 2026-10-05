@@ -190,6 +190,9 @@ dependencies {
     // The notes outbox (notes/NoteOutboxWorker.kt) - a note captured offline is sent when
     // there is a network, even if the app was closed in between.
     implementation(libs.androidx.work.runtime.ktx)
+    // The home-screen widget (widget/NovaWidget.kt).
+    implementation(libs.androidx.glance.appwidget)
+    implementation(libs.androidx.glance.material3)
     // Offline speech-to-text for the Nova device's BLE audio (see stt/VoskTranscriber.kt) -
     // Android's own SpeechRecognizer (used elsewhere in this app) can't accept a
     // pre-recorded buffer, only its own live mic, so BLE audio needs a separate
@@ -201,6 +204,11 @@ dependencies {
     // Android's org.json is a stub in local unit tests - the real one, for the wire parsers.
     testImplementation(libs.json)
     androidTestImplementation(libs.androidx.room.testing)
+    // room-testing reads app/schemas through room-migration, which is built against
+    // kotlinx-serialization 1.8. The app's own graph (lifecycle, navigation) settles on 1.7.3 and
+    // AGP pins the test classpath to the app's versions, so without this every MigrationTest case
+    // dies with an AbstractMethodError before a migration runs.
+    constraints { implementation(libs.kotlinx.serialization.core) }
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -12,11 +12,13 @@ import com.example.novav2.R
 import com.example.novav2.state.ActivitySignal
 import com.example.novav2.state.AmbientCheckRunner
 import com.example.novav2.state.AmbientNotifier
+import com.example.novav2.state.DeviceCompass
 import com.example.novav2.state.GeofenceRegistrar
 import com.example.novav2.state.LocationSignal
 import com.example.novav2.state.ReminderScheduler
 import com.example.novav2.state.SensorSignal
 import com.example.novav2.state.SignalRepository
+import com.example.novav2.widget.WidgetUpdater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -61,11 +63,17 @@ class SignalMonitorService : Service() {
                 SignalRepository.update(applicationContext)
                 // Location switched back on after the platform dropped the geofences, say.
                 GeofenceRegistrar.retryIfFailed(applicationContext)
+                // Re-aims the device's compass from the latest fix - the previous tick's, since
+                // refresh() above lands asynchronously. Nothing to do with no destination.
+                DeviceCompass.sync(applicationContext)
 
                 ticksSinceAmbientCheck++
                 if (ticksSinceAmbientCheck >= TICKS_PER_AMBIENT_CHECK) {
                     ticksSinceAmbientCheck = 0
                     maybePostAmbientEvent()
+                    // The widget has no calendar observer of its own; this cadence picks up
+                    // calendar edits within ~10 minutes while signed in.
+                    WidgetUpdater.requestUpdate(applicationContext)
                     SignalRepository.scheduleNextAmbientCheck(
                         System.currentTimeMillis() + SignalRepository.AMBIENT_CHECK_INTERVAL_MILLIS
                     )
@@ -112,7 +120,7 @@ class SignalMonitorService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Nova")
             .setContentText("Monitoring your signals in the background")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_nova)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()

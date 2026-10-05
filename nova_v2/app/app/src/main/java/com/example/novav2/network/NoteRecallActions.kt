@@ -11,12 +11,18 @@ import org.json.JSONArray
  * search is deterministic enough that the same query and bounds find the same notes.
  * [since]/[until] are the LOCAL times the model resolved ("yesterday" -> a date), exactly as
  * GET /notes accepts them with utc_offset_minutes.
+ *
+ * [noteIds] are the notes the recall actually read out (intent_surface records them since
+ * 2026-10-03, so that deleting a note deletes the turn that quoted it). Not used for the chips -
+ * see above - but for tagging the turn's Voice history bubbles the same way. Empty from an older
+ * server.
  */
 data class RecallAction(
     val query: String?,
     val since: String?,
     val until: String?,
     val kind: String?,
+    val noteIds: List<String> = emptyList(),
 )
 
 internal fun parseRecallActions(actions: JSONArray?): List<RecallAction> =
@@ -28,5 +34,8 @@ internal fun parseRecallActions(actions: JSONArray?): List<RecallAction> =
             since = input.optString("since").trim().takeIf { it.isNotEmpty() },
             until = input.optString("until").trim().takeIf { it.isNotEmpty() },
             kind = input.optString("kind").takeIf { it in setOf("quick", "dictation") },
+            noteIds = input.optJSONArray("note_ids")?.let { ids ->
+                (0 until ids.length()).mapNotNull { ids.optString(it).takeIf(String::isNotBlank) }
+            }.orEmpty(),
         )
     }

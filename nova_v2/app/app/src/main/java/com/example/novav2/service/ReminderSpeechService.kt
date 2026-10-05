@@ -89,7 +89,7 @@ class ReminderSpeechService : Service() {
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Nova")
             .setContentText("Reading a reminder")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_nova)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
         when {

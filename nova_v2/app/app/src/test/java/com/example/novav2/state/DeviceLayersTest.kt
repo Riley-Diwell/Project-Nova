@@ -5,6 +5,7 @@ import com.example.novav2.ble.NovaDeviceRepository
 import com.example.novav2.ble.NovaLedLayer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
@@ -68,6 +69,46 @@ class DeviceLayersTest {
         assertEquals(2, DeviceLayers.wireLayer(DeviceLayers.Cue.REMINDER, t0 + 1_001, t0)?.timeoutSeconds)
         assertNull(DeviceLayers.wireLayer(DeviceLayers.Cue.REMINDER, t0, t0))
         assertEquals(0, DeviceLayers.wireLayer(DeviceLayers.Cue.REMINDER, null, t0)?.timeoutSeconds)
+    }
+
+    @Test
+    fun mix_reachesEveryDefaultColour() {
+        // The slider must be able to show what each cue looks like before the user touches it.
+        DeviceLayers.Cue.entries.forEach { cue ->
+            val (red, green) = DeviceLayers.Mix.toColour(DeviceLayers.Mix.of(cue.red, cue.green))
+            assertTrue(
+                "$cue: ${cue.red}/${cue.green} came back as $red/$green",
+                kotlin.math.abs(red - cue.red) <= 3 && kotlin.math.abs(green - cue.green) <= 3,
+                )
+        }
+        assertEquals(Pair(0, 255), DeviceLayers.Mix.toColour(0))
+        assertEquals(Pair(255, 255), DeviceLayers.Mix.toColour(50))
+        assertEquals(Pair(255, 0), DeviceLayers.Mix.toColour(100))
+    }
+
+    @Test
+    fun colourOverride_isWhatGoesOnTheWire_andResendShowsItNow() {
+        DeviceLayers.show(DeviceLayers.Cue.REMINDER, null, t0)
+        DeviceLayers.setColours(mapOf(DeviceLayers.Cue.REMINDER to 0))
+        DeviceLayers.resend(t0)
+        val layer = layers().last()
+        assertEquals(DeviceLayers.Slot.REMINDER.id, layer.id)
+        assertEquals(0 to 255, layer.red to layer.green)
+        // Cues the user didn't touch keep their defaults.
+        val leave = DeviceLayers.wireLayer(DeviceLayers.Cue.LEAVE_NOW, null, t0)!!
+        assertEquals(255 to 0, leave.red to leave.green)
+    }
+
+    @Test
+    fun preview_usesItsOwnSlot_andLeavesTheRealAlertAlone() {
+        DeviceLayers.show(DeviceLayers.Cue.LEAVE_NOW, 300_000L, t0)
+        DeviceLayers.preview(DeviceLayers.Cue.LEAVE_SOON, t0)
+        val preview = layers().last()
+        assertEquals(DeviceLayers.Slot.PREVIEW.id, preview.id)
+        assertEquals(DeviceLayers.Rhythm.MEDIUM.periodMs, preview.periodMs)
+        assertEquals(5, preview.timeoutSeconds)
+        assertEquals(DeviceLayers.Cue.LEAVE_NOW, DeviceLayers.shown(DeviceLayers.Slot.DEPARTURE, t0)?.cue)
+        assertNull(DeviceLayers.shown(DeviceLayers.Slot.PREVIEW, t0))
     }
 
     @Test

@@ -60,3 +60,24 @@ class Settings:
             raise ConfigError(
                 "SUPABASE_URL and SUPABASE_ANON_KEY must be set for sign-up and sign-in."
             )
+
+
+# --- what the logs may say -----------------------------------------------------
+# The user's words - what they said, notes, facts, Nova's replies - stay out of
+# the server log unless NOVA_LOG_CONTENT=1. A deleted note has to be gone from
+# everywhere Nova keeps it (docs/plans/notes-hard-delete-plan.md S7), and a
+# Docker log keeps whatever was printed. Ids and lengths are always fine.
+# Read per call, not through settings(), so a test can switch it.
+
+def log_content() -> bool:
+    return os.environ.get("NOVA_LOG_CONTENT", "").strip() == "1"
+
+
+def said(value: object) -> str:
+    """`value` for a log line: its repr with NOVA_LOG_CONTENT=1, otherwise
+    only how long it was."""
+    if log_content():
+        return repr(value)
+    if value is None:
+        return "None"
+    return f"<{len(value if isinstance(value, str) else str(value))} chars>"

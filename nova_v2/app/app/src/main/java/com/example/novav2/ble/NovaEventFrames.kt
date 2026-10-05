@@ -20,6 +20,7 @@ object NovaEventFrames {
                 millivolts = byteAt(2)?.let { lo -> byteAt(3)?.let { hi -> lo or (hi shl 8) } },
             )
             NovaBleProtocol.EventType.HEARTBEAT -> NovaDeviceEvent.Heartbeat
+            NovaBleProtocol.EventType.CLEAR_HEADING -> NovaDeviceEvent.ClearHeading
             else -> null
         }
     }

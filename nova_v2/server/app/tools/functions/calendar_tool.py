@@ -60,25 +60,20 @@ _RECURRENCE_SCHEMA: dict[str, Any] = {
         },
         "interval": {
             "type": "integer",
-            "description": (
-                "Every how many frequency-units - 1 for 'every week', 2 for "
-                "'every other week'. Defaults to 1 if omitted."
-            ),
+            "description": "1 for 'every week', 2 for 'every other week'. Default 1.",
         },
         "count": {
             "type": "integer",
             "description": (
-                "Stop after this many occurrences, e.g. 10 for 'the next 10 "
-                "weeks'. Leave both count and until out for something with no "
-                "stated end, e.g. a standing weekly meeting."
+                "Stop after this many, e.g. 10 for 'the next 10 weeks'. Leave "
+                "count and until both out when they gave no end."
             ),
         },
         "until": {
             "type": "string",
             "description": (
-                "Last possible occurrence date, in the user's LOCAL time, same "
-                "format as start_time - e.g. 'through the end of August'. At "
-                "most one of count/until should be set, never both."
+                "Last date it can occur ('through the end of August'), LOCAL, "
+                "same format as the start. Never with count."
             ),
         },
     },
@@ -212,18 +207,11 @@ class AddCalendarEventTool(BaseTool):
         super().__init__(
             name="add_calendar_event",
             description=(
-                "Adds an event to the user's calendar. Use this when they ask "
-                "you to schedule, book or put something in their calendar, and "
-                "when a plan they state has a definite time. The event is "
-                "written on the device, so confirm it in speech as done rather "
-                "than as pending. Times are the user's LOCAL time, ISO 8601 "
-                "with no timezone suffix, exactly as get_calendar_range takes "
-                "them - work from the top-level local_time, never from the "
-                "triggering event's UTC timestamp. If they name a start but no "
-                "end, give it a sensible duration rather than asking. Always "
-                "set location when they name a building, room or address for "
-                "it - a class or meeting saved without one can't later be "
-                "given a departure time or directions."
+                "Adds an event to the user's calendar: when they ask to "
+                "schedule, book or put something in it, or state a plan with a "
+                "definite time. Times are LOCAL, worked out from the top-level "
+                "local_time, never the event's UTC timestamp. It is written on "
+                "the device, so confirm it as done, not pending."
             ),
             gain_description=(
                 "How readily Nova puts things in your calendar without being "
@@ -241,28 +229,21 @@ class AddCalendarEventTool(BaseTool):
                     },
                     "start_time": {
                         "type": "string",
-                        "description": (
-                            "Start in the user's LOCAL time, ISO 8601 with no "
-                            "timezone suffix - e.g. 2026-07-29T10:00:00."
-                        ),
+                        "description": "LOCAL, ISO 8601 with no timezone suffix - 2026-07-29T10:00:00.",
                     },
                     "end_time": {
                         "type": "string",
                         "description": (
-                            "End in the user's LOCAL time, same format. Required: "
-                            "pick a sensible duration if the user did not say one."
+                            "Same format. No end given: pick a sensible duration, "
+                            "don't ask."
                         ),
                     },
                     "location": {
                         "type": "string",
                         "description": (
-                            "Where it is, e.g. a building/room name or address - "
-                            "'CSIT Building 108', 'the library'. Capture it "
-                            "verbatim when the user names one; this is what "
-                            "navigation_departure_time later resolves to give "
-                            "directions, so leaving it out of a class or meeting "
-                            "with a stated location means Nova won't be able to "
-                            "say when to leave for it."
+                            "The building, room or address, verbatim - 'CSIT "
+                            "Building 108'. Always set it when they name one: "
+                            "without it Nova can't later say when to leave."
                         ),
                     },
                     "description": {
@@ -272,11 +253,9 @@ class AddCalendarEventTool(BaseTool):
                     "recurrence": {
                         **_RECURRENCE_SCHEMA,
                         "description": (
-                            "Only set this if the user described something repeating "
-                            "('every Monday', 'daily standup', 'monthly rent') - omit "
-                            "it entirely for a one-off event. The phone builds the "
-                            "actual recurrence rule from these fields, so give plain "
-                            "values rather than trying to construct one yourself."
+                            "Only for something repeating ('every Monday', 'monthly "
+                            "rent'); omit for a one-off. Plain values - the phone "
+                            "builds the rule."
                         ),
                     },
                 },
@@ -319,15 +298,11 @@ class EditCalendarEventTool(BaseTool):
         super().__init__(
             name="edit_calendar_event",
             description=(
-                "Changes an existing event on the user's calendar. Requires "
-                "the event's event_id, which only comes from a prior "
-                "get_calendar_range call this turn or in recent_episodes - "
-                "call get_calendar_range first if you don't already have it "
-                "for the event the user means. Never guess an event_id. Set "
-                "only the fields that are actually changing - leave the rest "
-                "out and they keep their current value. The change is written "
-                "on the device the same way add_calendar_event is, so confirm "
-                "it in speech as done rather than as pending."
+                "Changes an existing calendar event. event_id comes only from "
+                "get_calendar_range or recent_episodes - call get_calendar_range "
+                "first if you don't have it. Set only the fields that change; "
+                "the rest keep their value. It is written on the device, so "
+                "confirm it as done, not pending."
             ),
             gain_description=(
                 "How readily Nova changes an existing calendar entry without "
@@ -352,38 +327,26 @@ class EditCalendarEventTool(BaseTool):
                     },
                     "start_time": {
                         "type": "string",
-                        "description": (
-                            "New start, in the user's LOCAL time, same format "
-                            "as add_calendar_event - only if it's changing."
-                        ),
+                        "description": "New start, LOCAL, same format as add_calendar_event.",
                     },
                     "end_time": {
                         "type": "string",
                         "description": (
-                            "New end, same format - only if it's changing. If "
-                            "start_time moves but the event's length should "
-                            "stay the same, give the shifted end_time too "
-                            "rather than leaving it out."
+                            "New end. When the start moves and the length stays, "
+                            "give the shifted end too."
                         ),
                     },
                     "location": {
                         "type": "string",
-                        "description": (
-                            "New location, only if it's changing - same use as "
-                            "add_calendar_event's location."
-                        ),
+                        "description": "New location, as for add_calendar_event.",
                     },
                     "description": {
                         "type": "string",
-                        "description": "New detail text, only if it's changing.",
+                        "description": "New detail text.",
                     },
                     "recurrence": {
                         **_RECURRENCE_SCHEMA,
-                        "description": (
-                            "Only set this if the user wants to change how the "
-                            "event repeats - leave the whole field out to keep "
-                            "its recurrence as it is."
-                        ),
+                        "description": "Only to change how it repeats; omit to keep it.",
                     },
                 },
                 "required": ["event_id"],

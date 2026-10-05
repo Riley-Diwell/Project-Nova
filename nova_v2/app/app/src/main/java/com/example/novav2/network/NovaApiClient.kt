@@ -66,7 +66,8 @@ object NovaApiClient {
          * [confirmation] mirrors EventOut.confirmation (schemas/event_out.py):
          * "yes_no" when this turn left a yes/no question dangling (so the UI
          * can offer quick-reply buttons), "open" for a dangling question that
-         * isn't yes/no-shaped, null otherwise.
+         * isn't yes/no-shaped, "choice" when Nova asked the user to pick one of
+         * [options] (ask_choice), null otherwise.
          */
         data class Final(
             val speech: String,
@@ -90,6 +91,9 @@ object NovaApiClient {
              * present even when [speech] is empty (an ambient check that isn't urgent yet, but now
              * knows exactly when it will be). See [com.example.novav2.state.DepartureAlarmScheduler]. */
             val scheduledDeparture: ScheduledDeparture?,
+            /** Set instead when navigation_departure_time ran but had no travel time to give -
+             * see [com.example.novav2.state.DepartureUnknownNotice]. */
+            val departureUnknown: DepartureUnknown? = null,
             /** set_reminder Actions this turn - stored and scheduled via
              * [com.example.novav2.state.TurnActionApplier], no confirmation needed. */
             val reminderActions: List<ReminderAction> = emptyList(),
@@ -102,7 +106,29 @@ object NovaApiClient {
             /** Notes, memories and reminders this turn saved - the Voice tab's "Saved to …"
              * chips (see SavedActions.kt). */
             val savedActions: List<SavedAction> = emptyList(),
-        ) : EventResult()
+            /** Notes the turn quotes without an Action naming them (the "yes" to a reminder
+             * offer). Empty from an older server. */
+            val noteIds: List<String> = emptyList(),
+            /** A "choice" question's labels, in order. Picking one sends the label itself as
+             * the next turn. */
+            val options: List<String>? = null,
+        ) : EventResult() {
+            /** [speech] with a choice question's options on the end - what the chat shows, and
+             * what is spoken when there is no device to press. Built here from [options], never
+             * by the model, which is told the options are read out for it. */
+            val speechWithOptions: String
+                get() {
+                    val labels = options?.takeIf { confirmation == "choice" && it.isNotEmpty() } ?: return speech
+                    val list = if (labels.size == 1) labels[0] else labels.dropLast(1).joinToString(", ") + ", or " + labels.last()
+                    return "$speech $list?"
+                }
+
+            /** Every note whose words this turn holds - saved, read back, or quoted - so its
+             * Voice history bubbles go when one of them is deleted. */
+            val referencedNoteIds: List<String>
+                get() = (savedActions.mapNotNull { it.noteId } + recallActions.flatMap { it.noteIds } + noteIds)
+                    .distinct()
+        }
         data class NeedMore(
             val sessionId: String,
             val requestType: String,
@@ -114,7 +140,7 @@ object NovaApiClient {
     }
 
     /** Mirrors EventOut.scheduled_departure - {destination, mode, leave_in_minutes,
-     * minutes_until_start, event_title}. */
+     * minutes_until_start, event_title, destination_lat, destination_lng}. */
     data class ScheduledDeparture(
         val destination: String?,
         val mode: String?,
@@ -128,6 +154,21 @@ object NovaApiClient {
          * Same null condition as [minutesUntilStart]. Falls back to [destination] in the
          * notification text when absent (see AmbientCheckRunner.kt's leaveSoonText). */
         val eventTitle: String?,
+        /** Where the route ends - what the device's compass points at
+         * ([com.example.novav2.state.DeviceCompass]). Null when Directions gave none. */
+        val destinationLatitude: Double? = null,
+        val destinationLongitude: Double? = null,
+    )
+
+    /** Mirrors EventOut.departure_unknown - {destination, event_title, minutes_until_start,
+     * reason}. [minutesUntilStart] and [eventTitle] are null for a destination with no calendar
+     * anchor, the same as on [ScheduledDeparture]. */
+    data class DepartureUnknown(
+        val destination: String?,
+        val eventTitle: String?,
+        val minutesUntilStart: Double?,
+        /** The server's short reason, e.g. "no location from the phone" or "maps unavailable". */
+        val reason: String?,
     )
 
     /**
@@ -736,6 +777,9 @@ object NovaApiClient {
                 confirmation = json.optString("confirmation").takeIf {
                     json.has("confirmation") && !json.isNull("confirmation")
                 },
+                options = json.optJSONArray("options")?.let { array ->
+                    (0 until array.length()).map { array.optString(it) }.filter { it.isNotBlank() }
+                },
                 scheduledDeparture = json.optJSONObject("scheduled_departure")?.let {
                     ScheduledDeparture(
                         destination = it.optString("destination").takeIf { d -> d.isNotBlank() },
@@ -744,12 +788,26 @@ object NovaApiClient {
                         minutesUntilStart = it.optDouble("minutes_until_start")
                             .takeIf { v -> !v.isNaN() },
                         eventTitle = it.optString("event_title").takeIf { t -> t.isNotBlank() },
+                        destinationLatitude = it.optDouble("destination_lat").takeIf { v -> !v.isNaN() },
+                        destinationLongitude = it.optDouble("destination_lng").takeIf { v -> !v.isNaN() },
+                    )
+                },
+                departureUnknown = json.optJSONObject("departure_unknown")?.let {
+                    DepartureUnknown(
+                        destination = it.optString("destination").takeIf { d -> d.isNotBlank() },
+                        eventTitle = it.optString("event_title").takeIf { t -> t.isNotBlank() },
+                        minutesUntilStart = it.optDouble("minutes_until_start")
+                            .takeIf { v -> !v.isNaN() },
+                        reason = it.optString("reason").takeIf { r -> r.isNotBlank() },
                     )
                 },
                 reminderActions = parseReminderActions(json.optJSONArray("actions")),
                 updateReminderActions = parseUpdateReminderActions(json.optJSONArray("actions")),
                 recallActions = parseRecallActions(json.optJSONArray("actions")),
                 savedActions = parseSavedActions(json.optJSONArray("actions")),
+                noteIds = json.optJSONArray("note_ids")?.let { ids ->
+                    (0 until ids.length()).mapNotNull { ids.optString(it).takeIf(String::isNotBlank) }
+                }.orEmpty(),
             )
         }
     }

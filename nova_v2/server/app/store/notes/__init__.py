@@ -181,7 +181,9 @@ def set_promoted(user_id: UserId, note_id: str, fact_ids: list[str]) -> None:
 # --- deletion: the part that crosses stores ------------------------------------
 
 def delete(user_id: UserId, note_id: str) -> None:
-    """Forget a note everywhere, and keep it forgotten.
+    """Forget a note entirely: after this its words exist nowhere Nova keeps
+    them, and only content-free tombstones remain so it isn't re-learned
+    (docs/plans/notes-hard-delete-plan.md - "deleted notes are entirely gone").
 
     In order:
       1. every Persona fact promoted from it is deleted - persona.delete()
@@ -189,55 +191,188 @@ def delete(user_id: UserId, note_id: str) -> None:
          fact that is still this note's own: one the promotion was merged
          into, or that a newer belief has since overwritten in place, stands
          on something else too, and just loses this note from its provenance;
-      2. `note:<id>` is tombstoned directly, which covers a fact that was
-         already deleted from the Knowledge Map before the note was;
-      3. the voice turn the note came from (if the assistant saved it) is
-         tombstoned as an episode, so the statement pass never re-reads the
-         words the user just deleted;
-      4. the note and its chunks go.
+      2. the episodes holding its words are deleted: the voice turn that saved
+         it (origin_episode_id), and any later turn whose event or action
+         names it (read back, a reminder made from it) - by id, never by text;
+      3. facts the statement pass derived from those episodes go the same way
+         as step 1;
+      4. `note:<id>` and `episode:<id>` for each of them are tombstoned, which
+         covers a fact that was already deleted from the Knowledge Map before
+         the note was, and stops anything re-reading the episodes;
+      5. anything this user has pending in process memory (a reminder offer,
+         a question's thread) is dropped - it may quote the note;
+      6. the note and its chunks go;
+      7. every row removed or rewritten above is written to the deletion
+         journal (ids only), so deploy/scrub-backups.sh removes it from the
+         nightly backups too.
 
-    Persona failures are logged and do not stop the delete: the user asked for
-    the note to go, and leaving it on screen because a tombstone could not be
-    written is the worse failure (same stance as persona.delete itself).
+    Persona and episode failures are logged and do not stop the delete: the
+    user asked for the note to go, and leaving it on screen because a tombstone
+    could not be written is the worse failure (same stance as persona.delete
+    itself).
     """
-    from app.store import persona
+    from app.store import memory, persona
 
     store = get_store()
     note = store.get(user_id, note_id)  # NoteNotFound for someone else's note -> 404
+    words = {t for t in (note.text, note.interpreted_text) if t}
+
+    # For the backups (step 7): Persona rows deleted, and rows rewritten
+    # without this note.
+    facts_deleted: list[str] = []
+    facts_rewritten: list[str] = []
 
     for fact_id in note.promoted_fact_ids:
         try:
-            _unpromote(user_id, note_id, fact_id)
+            outcome = _unpromote(user_id, note_id, fact_id, words)
+            if outcome == "deleted":
+                facts_deleted.append(fact_id)
+            elif outcome == "rewritten":
+                facts_rewritten.append(fact_id)
         except Exception as e:
             print(f"[notes] promoted fact {fact_id} not deleted: {e}")
+
+    episode_ids: list[str] = []
+    if note.origin_episode_id:
+        try:
+            memory.delete_episode(user_id, note.origin_episode_id)
+        except Exception as e:
+            print(f"[notes] origin episode of {note_id} not deleted: {e}")
+        episode_ids.append(note.origin_episode_id)
+    try:
+        episode_ids += [e for e in memory.delete_referencing(user_id, note_id) if e not in episode_ids]
+    except Exception as e:
+        print(f"[notes] episodes referencing {note_id} not deleted: {e}")
+
+    if episode_ids:
+        try:
+            deleted, rewritten = _forget_derived(user_id, set(episode_ids))
+            facts_deleted += deleted
+            facts_rewritten += rewritten
+        except Exception as e:
+            print(f"[notes] facts derived from {note_id}'s episodes not deleted: {e}")
+
     try:
         persona.forget(user_id, persona.note_key(note_id))
-        if note.origin_episode_id:
-            persona.forget(user_id, f"episode:{note.origin_episode_id}")
+        for episode_id in episode_ids:
+            persona.forget(user_id, f"episode:{episode_id}")
     except Exception as e:
         print(f"[notes] tombstone for note {note_id} not recorded: {e}")
 
-    store.delete(user_id, note_id)
-    print(f"[notes] deleted {note_id} ({len(note.promoted_fact_ids)} promoted fact(s))")
+    try:
+        from app import intent_surface
+
+        intent_surface.forget_pending_for_user(user_id)
+    except Exception as e:
+        print(f"[notes] pending turn state not cleared: {e}")
+
+    try:
+        store.delete(user_id, note_id)
+    finally:
+        # Even if the note itself couldn't be deleted, what already went must
+        # leave the backups too.
+        _journal(user_id, note_id, episode_ids, facts_deleted, facts_rewritten,
+                 note_deleted=_is_gone(store, user_id, note_id))
+    print(f"[notes] deleted {note_id} ({len(facts_deleted)} fact(s) deleted, "
+          f"{len(facts_rewritten)} rewritten, {len(episode_ids)} episode(s))")
 
 
-def _unpromote(user_id: UserId, note_id: str, fact_id: str) -> None:
+def _is_gone(store, user_id: UserId, note_id: str) -> bool:
+    try:
+        store.get(user_id, note_id)
+        return False
+    except NoteNotFound:
+        return True
+    except Exception:
+        return True  # unknown: journalling a row that still exists only scrubs it from backups
+
+
+def _journal(
+    user_id: UserId, note_id: str, episode_ids: list[str],
+    facts_deleted: list[str], facts_rewritten: list[str], note_deleted: bool,
+) -> None:
+    """Step 7 of delete(). Logged loudly rather than raised: the live delete
+    has already happened, and failing it now would leave the user looking at a
+    note that is half gone."""
+    from app.store import deletion_journal
+
+    try:
+        if note_deleted:
+            deletion_journal.record(user_id, "notes", [note_id])  # chunks go by cascade
+        deletion_journal.record(user_id, "episodic_memory", episode_ids)
+        deletion_journal.record(user_id, "persona", facts_deleted)
+        deletion_journal.record(user_id, "persona", [f for f in facts_rewritten if f not in facts_deleted],
+                                kind="overwrite")
+    except Exception as e:
+        print(f"[notes] WARNING: deletion of {note_id} not journalled, so backups will keep it "
+              f"until they rotate out: {e}")
+
+
+def _unpromote(
+    user_id: UserId, note_id: str, fact_id: str, words: set[str] = frozenset(),
+) -> Optional[str]:
     """Take a deleted note's contribution out of one Persona fact: the whole
-    fact if the note is what it is, otherwise just the note's key."""
+    fact if the note is what it is, otherwise just the note's key - and any
+    History entry that quotes the note word for word. Returns "deleted",
+    "rewritten" or None (nothing to do)."""
     from app.store import persona
 
     try:
         fact = persona.get(user_id, fact_id)
     except persona.FactNotFound:
-        return
+        return None
     meta = fact.metadata or {}
     if meta.get("note_id") == note_id:
         persona.delete(user_id, fact_id)
-        return
+        return "deleted"
     key = persona.note_key(note_id)
     if key in (meta.get("also_keys") or []):
         kept = [k for k in meta["also_keys"] if k != key]
-        persona.upsert(user_id, fact.model_copy(update={"metadata": {**meta, "also_keys": kept}}))
+        persona.upsert(user_id, fact.model_copy(update={"metadata": {
+            **meta, "also_keys": kept, **_history_without(meta, words),
+        }}))
+        return "rewritten"
+    return None
+
+
+def _forget_derived(user_id: UserId, episode_ids: set[str]) -> tuple[list[str], list[str]]:
+    """Facts the statement pass read out of deleted episodes. A fact standing
+    only on them is deleted (and tombstoned, by persona.delete); one that
+    other surviving episodes said too keeps those, loses the deleted ones, and
+    drops its `quote` - the user's own words from the deleted turn. Returns
+    the ids (deleted, rewritten)."""
+    from app.store import persona
+
+    deleted: list[str] = []
+    rewritten: list[str] = []
+    for fact in persona.all_facts(user_id):
+        meta = fact.metadata or {}
+        own = meta.get("episode_id")
+        also = [e for e in (meta.get("also_from") or []) if e]
+        if own not in episode_ids and not episode_ids.intersection(also):
+            continue
+        surviving = [e for e in ([own] if own else []) + also if e not in episode_ids]
+        if not surviving and not meta.get("note_id") and not meta.get("also_keys") \
+                and not (meta.get("signal") and meta.get("value")):
+            persona.delete(user_id, fact.id)
+            deleted.append(fact.id)
+            continue
+        patch = {**meta, "also_from": [e for e in also if e not in episode_ids]}
+        if own in episode_ids:
+            patch["episode_id"] = surviving[0] if surviving else None
+            patch["quote"] = ""
+            patch["also_from"] = [e for e in patch["also_from"] if e != patch["episode_id"]]
+        persona.upsert(user_id, fact.model_copy(update={"metadata": patch}))
+        rewritten.append(fact.id)
+    return deleted, rewritten
+
+
+def _history_without(meta: dict, words: set[str]) -> dict:
+    """`history` minus the entries that quote one of `words` exactly."""
+    history = meta.get("history")
+    if not history or not words:
+        return {}
+    return {"history": [h for h in history if h.get("from") not in words and h.get("to") not in words]}
 
 
 def delete_all(user_id: UserId) -> int:

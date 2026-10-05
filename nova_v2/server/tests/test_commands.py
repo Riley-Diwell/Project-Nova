@@ -31,6 +31,18 @@ def test_reminder_asks_are_commands(text):
 
 
 @pytest.mark.parametrize("text", [
+    "write me a note with three tips for my presentation",
+    "write a list of things to pack",
+    "jot down that the lab moved to room 4",
+    "draft me a summary of today's lecture",
+])
+def test_note_writing_asks_are_commands(text):
+    # Not a command, the memory tool isn't offered and the model says it
+    # can't save notes.
+    assert classify(voice(text)) is not None
+
+
+@pytest.mark.parametrize("text", [
     "I need to email him",
     "I have to submit the form by 5",
     "coffee with Sam on Thursday at ten",
