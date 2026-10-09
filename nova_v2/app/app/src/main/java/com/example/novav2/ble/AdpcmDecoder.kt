@@ -49,6 +49,11 @@ class AdpcmDecoder {
      */
     fun decodeBlock(block: ByteArray): ShortArray {
         if (block.size <= 4) return ShortArray(0)
+        // Resync from the header every block, like firmware/audio_playback_test.py does. With no
+        // block lost this changes nothing (the encoder writes the same state the decoder would
+        // have carried). With one lost, carrying state forward turned the rest of the recording
+        // into noise - which the serial capture never showed, because the script resyncs.
+        seedFrom(block)
         val sampleCount = (block.size - 4) * 2
         val out = ShortArray(sampleCount)
         var outIdx = 0

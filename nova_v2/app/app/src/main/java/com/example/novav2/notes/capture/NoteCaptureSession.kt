@@ -36,9 +36,29 @@ class NoteCaptureSession(
     private val audio: NoteAudioWriter? =
         if (mode == RecordingMode.HOLD) null else NoteAudioStore.newWriter(appContext, noteId)
 
+    // Loudness of what the transcriber was fed - see [levelSummary].
+    private var peak = 0
+    private var sumSquares = 0.0
+    private var sampleCount = 0L
+
     fun onPcm(pcm: ShortArray, adpcm: ByteArray) {
+        for (s in pcm) {
+            val v = s.toInt()
+            val a = if (v < 0) -v else v
+            if (a > peak) peak = a
+            sumSquares += v.toDouble() * v
+        }
+        sampleCount += pcm.size
         transcriber.accept(pcm)
         audio?.write(adpcm)
+    }
+
+    /** For the log line after each recording. Speech Vosk can use typically peaks in the
+     * thousands with rms in the hundreds; peak under ~300 is near-silence, and a peak pinned at
+     * 32767 means the audio is clipping. */
+    fun levelSummary(): String {
+        val rms = if (sampleCount == 0L) 0.0 else kotlin.math.sqrt(sumSquares / sampleCount)
+        return "peak $peak / 32767, rms ${rms.toInt()}"
     }
 
     /** Transcribes whatever is left and returns the result - suspends if the STT model is still

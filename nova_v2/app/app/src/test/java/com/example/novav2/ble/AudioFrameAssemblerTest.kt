@@ -91,11 +91,27 @@ class AudioFrameAssemblerTest {
         // A second decoder seeded from a header carrying the first's end state decodes the
         // next block identically to one that ran from the start.
         val continuous = AdpcmDecoder().apply { decodeBlock(first) }
-        val next = ByteArray(260).also { for (i in 4 until 260) it[i] = 0x31 }
-        val expected = continuous.decodeBlock(next.copyOf())
-        val header = headerOf(AdpcmDecoder().apply { decodeBlock(first) })
-        val seeded = AdpcmDecoder().apply { seedFrom(header + next.copyOfRange(4, 260)) }
-        assertTrue(expected.contentEquals(seeded.decodeBlock(header + next.copyOfRange(4, 260))))
+        // As the firmware sends it: the header carries the state the encoder had going in.
+        val header = headerOf(continuous)
+        val next = header + ByteArray(256) { 0x31 }
+        val expected = continuous.decodeBlock(next)
+        val seeded = AdpcmDecoder().apply { seedFrom(next) }
+        assertTrue(expected.contentEquals(seeded.decodeBlock(next)))
+    }
+
+    @Test
+    fun `a lost block does not garble the blocks after it`() {
+        val first = ByteArray(260).also { for (i in 4 until 260) it[i] = 0x77 }
+        val lost = ByteArray(260).also { for (i in 4 until 260) it[i] = 0x52 }
+        // What the encoder's state was after `lost`, carried in the third block's header.
+        val reference = AdpcmDecoder().apply { decodeBlock(first) }
+        reference.decodeBlock(headerOf(reference) + lost.copyOfRange(4, 260))
+        val third = headerOf(reference) + ByteArray(256) { 0x31 }
+        val expected = reference.decodeBlock(third)
+
+        // The phone never saw `lost` - the third block must still decode the same.
+        val phone = AdpcmDecoder().apply { decodeBlock(first) }
+        assertTrue(expected.contentEquals(phone.decodeBlock(third)))
     }
 
     /** The 4-byte header the firmware would write for a decoder in this state. */

@@ -80,7 +80,11 @@ class DeviceRecordingRouter(
             if (session.mode != RecordingMode.HOLD) failureBuzz()
             return
         }
-        Log.i(TAG, "recording finished: ${session.mode}, ${result.durationS}s, ${result.text.length} chars")
+        Log.i(
+            TAG,
+            "recording finished: ${session.mode}, ${result.durationS}s, ${result.text.length} chars, " +
+                "${session.levelSummary()}, heard \"${result.text.take(60)}\"",
+        )
 
         when (session.mode) {
             RecordingMode.HOLD -> {
