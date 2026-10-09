@@ -59,6 +59,7 @@ import com.example.novav2.ble.NovaDeviceConnectionState
 import com.example.novav2.ble.NovaDeviceEvent
 import com.example.novav2.ble.NovaDevicePairing
 import com.example.novav2.ble.NovaDeviceRepository
+import com.example.novav2.ble.RecordingMode
 import com.example.novav2.service.NovaDeviceService
 import com.example.novav2.state.DeviceCompass
 import com.example.novav2.ui.theme.NovaOk
@@ -344,4 +345,15 @@ private fun describeEvent(event: NovaDeviceEvent?): String = when (event) {
     is NovaDeviceEvent.Battery -> "battery ${event.percent}%"
     is NovaDeviceEvent.Heartbeat -> "heartbeat"
     is NovaDeviceEvent.ClearHeading -> "compass cleared"
+    is NovaDeviceEvent.Recording -> {
+        val what = if (event.mode == RecordingMode.NOTE) "note" else "hold"
+        val ended = event.endedAtMillis
+        when {
+            ended == null -> "$what - recording…"
+            else -> {
+                val seconds = (ended - event.startedAtMillis) / 1000.0
+                "$what, ${"%.1f".format(seconds)} s" + if (event.truncated) " (cut off)" else ""
+            }
+        }
+    }
 }

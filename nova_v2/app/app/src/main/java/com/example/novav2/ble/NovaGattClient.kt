@@ -51,8 +51,28 @@ class NovaGattClient(
     val audioFrames: Flow<AudioFrame> = _audioFrames.receiveAsFlow()
 
     private val assemblerLock = Any()
+    // The open recording's Start, kept so its End can be reported with a duration.
+    private var openRecording: NovaDeviceEvent.Recording? = null
+
     private val assembler = AudioFrameAssembler(
-        emit = { _audioFrames.trySend(it) },
+        emit = { frame ->
+            _audioFrames.trySend(frame)
+            // Holds arrive only on the audio characteristic, never as an events frame, so the
+            // status line's "Last event" would otherwise never show one.
+            when (frame) {
+                is AudioFrame.Start -> NovaDeviceEvent.Recording(frame.mode, frame.startedAtMillis).also {
+                    openRecording = it
+                    NovaDeviceRepository.recordEvent(it)
+                }
+                is AudioFrame.End -> openRecording?.let {
+                    NovaDeviceRepository.recordEvent(
+                        it.copy(endedAtMillis = System.currentTimeMillis(), truncated = frame.truncated)
+                    )
+                    openRecording = null
+                }
+                is AudioFrame.Pcm -> Unit
+            }
+        },
         onSequenceGap = { expected, got ->
             // A notification was dropped somewhere between firmware and here - this is
             // exactly what the sequence number exists to catch (see docs/ble-protocol.md).
@@ -128,13 +148,39 @@ class NovaGattClient(
      * connect) — left as a caller decision, not hardcoded here.
      */
     fun connect(address: String, autoConnect: Boolean) {
+        lastAddress = address
+        lastAutoConnect = autoConnect
         val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
         val device: BluetoothDevice = adapter.getRemoteDevice(address)
         listener.onConnectionStateChanged(NovaDeviceConnectionState.CONNECTING)
         gatt = device.connectGatt(context, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
+    private var lastAddress: String? = null
+    private var lastAutoConnect = true
+
     fun disconnect() {
+        closeGatt()
+        listener.onConnectionStateChanged(NovaDeviceConnectionState.DISCONNECTED)
+    }
+
+    /**
+     * Throws the current [BluetoothGatt] away and opens a fresh one to the same device.
+     *
+     * autoConnect only keeps retrying while its BluetoothGatt is healthy. After a connect error
+     * (status 133/147/8...), Bluetooth being toggled off and on, or a bond the device no longer
+     * recognises, Android quietly stops trying and nothing ever calls back again - the phone sits
+     * at "Paired, not connected" until something builds a new connection. Before this existed
+     * the only thing that did was signing out (which stops [com.example.novav2.service.NovaDeviceService])
+     * and re-pairing. Keeps this instance, so [audioFrames] and its one collector carry on.
+     */
+    fun reconnect() {
+        val address = lastAddress ?: return
+        closeGatt()
+        connect(address, lastAutoConnect)
+    }
+
+    private fun closeGatt() {
         endOpenRecording()
         gatt?.disconnect()
         gatt?.close()
@@ -143,7 +189,6 @@ class NovaGattClient(
         audioCharacteristic = null
         commandsCharacteristic = null
         resetQueue()
-        listener.onConnectionStateChanged(NovaDeviceConnectionState.DISCONNECTED)
     }
 
     override fun sendHapticPulse(durationMs: Int) =
@@ -199,6 +244,9 @@ class NovaGattClient(
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            // A late callback from a BluetoothGatt that reconnect() already closed.
+            if (g !== gatt) return
+            android.util.Log.i("NovaGattClient", "connection state $newState (status $status)")
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     // First queued op after connect — discoverServices() and
@@ -228,10 +276,13 @@ class NovaGattClient(
             completeOperation()
             val service = g.getService(NovaBleProtocol.SERVICE_UUID)
             if (service == null) {
-                // Wrong device, or firmware not yet flashed with this profile —
-                // nothing recoverable from here; surface as disconnected rather
-                // than a connected-but-broken state the rest of the app has to
-                // special-case.
+                // Wrong device, firmware not yet flashed with this profile, or a stale
+                // service cache. Actually drop the link too - reporting DISCONNECTED while
+                // leaving it up kept the device connected (so not advertising) with the
+                // phone no longer talking to it. The service's watchdog builds a fresh
+                // connection after this.
+                android.util.Log.w("NovaGattClient", "Nova service not found (status $status)")
+                g.disconnect()
                 listener.onConnectionStateChanged(NovaDeviceConnectionState.DISCONNECTED)
                 return
             }

@@ -18,6 +18,14 @@ sealed class NovaDeviceEvent {
     /** Two taps then a hold - the user turned the compass off on the device
      * ([com.example.novav2.state.DeviceCompass.clear]). */
     data object ClearHeading : NovaDeviceEvent()
+    /** A held-button recording, seen on the audio characteristic rather than events (holds never
+     * send an events frame). Display only - [endedAtMillis] is null while it's still recording. */
+    data class Recording(
+        val mode: RecordingMode,
+        val startedAtMillis: Long,
+        val endedAtMillis: Long? = null,
+        val truncated: Boolean = false,
+    ) : NovaDeviceEvent()
 }
 
 /** What [com.example.novav2.service.NovaDeviceService] exposes so callers elsewhere
@@ -107,6 +115,9 @@ object NovaDeviceRepository {
                 _lastEvent.value = event
                 _events.tryEmit(event)
             }
+            // Status line only: the recording itself reaches DeviceRecordingRouter through
+            // NovaGattClient.audioFrames, and press handlers must not see it.
+            is NovaDeviceEvent.Recording -> _lastEvent.value = event
         }
     }
 }

@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.novav2.R
 import com.example.novav2.ble.NovaDeviceConnectionState
@@ -119,20 +120,39 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
     private suspend fun runKeepalive(client: NovaGattClient) {
         while (scope.isActive) {
             delay(PING_INTERVAL_MS)
-            if (NovaDeviceRepository.connectionState.value != NovaDeviceConnectionState.CONNECTED) continue
+            val now = System.currentTimeMillis()
 
-            val lastHeartbeat = NovaDeviceRepository.lastHeartbeatAtMillis.value
-            if (lastHeartbeat != null &&
-                System.currentTimeMillis() - lastHeartbeat > STALE_HEARTBEAT_TIMEOUT_MS
-            ) {
-                client.disconnect()
-                connectIfPaired()
-                return
+            // Not connected: autoConnect is meant to bring the link back on its own, but after a
+            // connect error, Bluetooth being toggled, or a bond problem it silently stops trying.
+            // Nothing used to notice - the only way back was signing out (which stops this
+            // service) and re-pairing. A fresh BluetoothGatt every RECONNECT_AFTER_MS fixes that;
+            // while the device is genuinely out of range it just re-arms a background connect.
+            if (NovaDeviceRepository.connectionState.value != NovaDeviceConnectionState.CONNECTED) {
+                if (now - stateSinceMillis > RECONNECT_AFTER_MS) {
+                    Log.i(TAG, "not connected for ${(now - stateSinceMillis) / 1000}s - reconnecting")
+                    client.reconnect()
+                }
+                continue
+            }
+
+            // Connected but silent. Measured from connecting when no heartbeat has arrived yet,
+            // so a link whose notifications never got switched on is caught too - that case used
+            // to sit at CONNECTED forever because the timestamp stayed null.
+            val heard = NovaDeviceRepository.lastHeartbeatAtMillis.value ?: stateSinceMillis
+            if (now - heard > STALE_HEARTBEAT_TIMEOUT_MS) {
+                Log.i(TAG, "no heartbeat for ${(now - heard) / 1000}s - reconnecting")
+                // Same client, fresh BluetoothGatt: the old disconnect()+connectIfPaired() built a
+                // second client and left another recording collector and keepalive loop behind.
+                client.reconnect()
+                continue
             }
 
             client.sendPing()
         }
     }
+
+    /** When [NovaDeviceRepository.connectionState] last changed - what the keepalive measures from. */
+    @Volatile private var stateSinceMillis = System.currentTimeMillis()
 
     /**
      * A held-button utterance that wasn't a note (DeviceRecordingRouter has already
@@ -145,6 +165,7 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
     }
 
     override fun onConnectionStateChanged(state: NovaDeviceConnectionState) {
+        if (state != NovaDeviceRepository.connectionState.value) stateSinceMillis = System.currentTimeMillis()
         NovaDeviceRepository.setConnectionState(state)
         NovaDeviceRepository.setCommandSender(
             if (state == NovaDeviceConnectionState.CONNECTED) gattClient else null
@@ -200,5 +221,10 @@ class NovaDeviceService : Service(), NovaGattClient.Listener {
         // 3x the heartbeat interval - enough slack for BLE latency/a missed
         // notification or two without false-tripping on a perfectly healthy link.
         private const val STALE_HEARTBEAT_TIMEOUT_MS = 15_000L
+        // How long to trust autoConnect before building a fresh connection - long enough not to
+        // interrupt a slow but working background connect, short enough that the device comes
+        // back within about half a minute of being in range again.
+        private const val RECONNECT_AFTER_MS = 30_000L
+        private const val TAG = "NovaDeviceService"
     }
 }

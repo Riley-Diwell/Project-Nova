@@ -40,4 +40,21 @@ class NovaDeviceRepositoryTest {
         NovaDeviceRepository.setConnectionState(NovaDeviceConnectionState.DISCONNECTED)
         assertNull(NovaDeviceRepository.battery.value)
     }
+
+    /** A hold shows as the last event, but press handlers never see it. */
+    @Test
+    fun recording_showsAsLastEvent_butIsNotAPress() = runBlocking {
+        val seen = mutableListOf<NovaDeviceEvent>()
+        val job = launch(start = CoroutineStart.UNDISPATCHED) {
+            NovaDeviceRepository.events.take(1).toList(seen)
+        }
+
+        val hold = NovaDeviceEvent.Recording(RecordingMode.HOLD, startedAtMillis = 1_000L)
+        NovaDeviceRepository.recordEvent(hold)
+        assertEquals(hold, NovaDeviceRepository.lastEvent.value)
+
+        NovaDeviceRepository.recordEvent(NovaDeviceEvent.Press(2))
+        job.join()
+        assertEquals(listOf(NovaDeviceEvent.Press(2)), seen)
+    }
 }
