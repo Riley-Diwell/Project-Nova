@@ -98,7 +98,7 @@ const uint8_t AUDIO_FLAG_NOTE      = 0x04; // on START: a dictated note (tap, th
 // for copy-pasting into firmware/audio_playback_test.py. That is ~520 chars
 // per block at 115200 baud - enough to stall the loop and drop audio.
 // Set to 1 only for that bench test.
-#define AUDIO_DEBUG_HEX 0
+#define AUDIO_DEBUG_HEX 1
 
 // How long setupBLE() waits for a USB serial monitor before carrying on. It
 // used to wait forever, which blocks boot on battery with no USB host.
@@ -194,11 +194,11 @@ uint8_t adpcmOut[4 + bufferLen / 2];
 static unsigned int haptic_level = 0;
 
 // --- leds
-#define LED_RED   D6
-#define LED_GREEN D3
+#define LED_RED   D3
+#define LED_GREEN D6
 // Both LED pins are driven with PWM (0-255) so the colour can fade red -> orange -> green.
 const int LED_PWM_FREQ = 5000;
-const int LED_PWM_BITS = 8;
+const int LED_PWM_BITS = 8;q
 
 // A timed green flash on the RG LED - the "recording stopped" confirmation,
 // and what the phone's COMMAND_LED_PULSE plays. updateLed() shows it over the
