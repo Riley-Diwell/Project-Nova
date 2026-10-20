@@ -198,7 +198,7 @@ static unsigned int haptic_level = 0;
 #define LED_GREEN D6
 // Both LED pins are driven with PWM (0-255) so the colour can fade red -> orange -> green.
 const int LED_PWM_FREQ = 5000;
-const int LED_PWM_BITS = 8;q
+const int LED_PWM_BITS = 8;
 
 // A timed green flash on the RG LED - the "recording stopped" confirmation,
 // and what the phone's COMMAND_LED_PULSE plays. updateLed() shows it over the
