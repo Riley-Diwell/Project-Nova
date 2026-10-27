@@ -18,6 +18,7 @@ WHO USES THIS
 import json
 import os
 import re
+import time
 import uuid
 from types import SimpleNamespace
 from dataclasses import dataclass, field
@@ -1511,10 +1512,12 @@ def _resume(pending: dict[str, Any], tool_result: Any) -> IntentResult | NeedMor
     # The authorisation comes with it, because it is part of the Turn: a hop is the
     # middle of one turn, and one turn is one situation, so re-deciding here would
     # let a dial moved while the phone was answering change what NOVA is allowed to
-    # finish saying.
+    # finish saying. The step budget comes too, for the same reason: a hop that
+    # handed out a fresh MAX_ITERATIONS let one turn run eight model steps (and
+    # three web searches) on 2026-10-27.
     return _run_loop(
-        messages, MAX_ITERATIONS, pending["event_id"], pending["ctx"],
-        is_voice=pending.get("is_voice", True),
+        messages, pending.get("iterations_left", MAX_ITERATIONS), pending["event_id"],
+        pending["ctx"], is_voice=pending.get("is_voice", True),
     )
 
 
@@ -1522,6 +1525,11 @@ def _resume(pending: dict[str, Any], tool_result: Any) -> IntentResult | NeedMor
 FORCED_ANSWER_TOKENS = 1024
 _WRAP_UP = "\n\nI've thought about this enough - time to act on it and give my answer."
 STUCK_SPEECH = "Sorry, I got tangled up working that out. Could you ask me again?"
+# Said to the model on a turn's last step (_loop): no more tool calls.
+_LAST_STEP = (
+    "(No more lookups this turn. Answer now from what you've found. If it "
+    "isn't there, say so briefly and, if it helps, where it might be.)"
+)
 
 
 def _force_answer(
@@ -1691,20 +1699,30 @@ def _loop(
     tool_spoken = ""
 
     # iterate until an appropriate answer is reached
-    for _ in range(iterations_left):
+    for step in range(iterations_left):
+        # The last step answers from whatever the tools have said so far. A
+        # model still searching here - five Canvas lookups for a weighting it
+        # couldn't find - otherwise ended the turn on STUCK_SPEECH, when "I
+        # couldn't find that" was the true answer. The tools stay in the
+        # request (tool_choice "none" forbids calling them) so the prefix cache
+        # still covers it; the nudge is for this request only, never the thread.
+        last = bool(tools) and step == iterations_left - 1
         # An ambient turn has nobody listening; it goes after any voice turn.
         llm.yield_to_voice()
         # call model
-        print(f"[loop] tools={[t['function']['name'] for t in tools]!r}")
+        print(f"[loop] tools={[t['function']['name'] for t in tools]!r}"
+              + (" (last step - answering)" if last else ""))
+        model_started = time.perf_counter()
         response = llm.client(LOOP_TIMEOUT_S, 1).chat.completions.create(
             model=llm.MODEL,
             # The system prompt goes first and never changes, so the model
             # server's prefix cache covers it (and the tools) across turns.
             # It isn't kept in `messages`, so parked and stashed threads don't
             # carry a copy of it.
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}, *messages],
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}, *messages,
+                      *([{"role": "user", "content": _LAST_STEP}] if last else [])],
             tools=tools,
-            tool_choice="auto",
+            tool_choice="none" if last else "auto",
             max_tokens=LOOP_MAX_TOKENS,
             temperature=0.3,
             # Thinking on: the server hands it back apart from the answer
@@ -1731,6 +1749,14 @@ def _loop(
             if calls:
                 print(f"[loop] cut off inside {[c['function']['name'] for c in calls]!r} - dropping it")
             assistant, calls, finish = _force_answer(messages, tools, llm.reasoning_of(choice.message))
+
+        # A call written out as text anyway, on a step that may not make one.
+        if last and calls:
+            print(f"[loop] last step called {[c['function']['name'] for c in calls]!r} - dropping it")
+            calls = []
+            assistant.pop("tool_calls", None)
+            if finish == "tool_calls":
+                finish = "stop"
 
         # if a tool is called. Checked before finish_reason: some servers
         # report "stop" on a reply that carries tool calls.
@@ -1848,6 +1874,8 @@ def _loop(
                     # and the calendar comes back a timezone out.
                     "utc_offset_minutes": ctx.utc_offset_minutes,
                     "is_voice": is_voice,
+                    # What's left of this turn's steps, for resume().
+                    "iterations_left": max(1, iterations_left - step - 1),
                 }
                 return NeedMoreResult(
                     event_id=event_id,
