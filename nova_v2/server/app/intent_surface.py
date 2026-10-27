@@ -1006,11 +1006,72 @@ def _stash_pending_confirmation(
     for stale in [k for k, v in _PENDING_CONFIRMATION.items() if v["expires_at"] < now]:
         _PENDING_CONFIRMATION.pop(stale, None)
     _PENDING_CONFIRMATION[key] = {
-        "messages": messages,
+        "messages": _compact_thread(messages),
         "note_ids": list(note_ids or []),
         "command": command,
         "expires_at": now + _PENDING_CONFIRMATION_TTL,
     }
+
+
+# What a carried thread keeps of a long tool result or tool-call argument.
+_CARRIED_TOOL_CHARS = 800
+_CARRIED_EXCERPT_CHARS = 300
+_TRIMMED_NOTE = ("Most of this result was dropped to keep the follow-up quick - "
+                 "call the tool again if the answer needs more of it.")
+
+
+def _compact_thread(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A stashed thread, cut down to what the follow-up needs. The follow-up
+    re-reads everything carried, so a thread kept whole snowballed: two Canvas
+    turns and a "yes" took the prompt from 14k tokens to 28k on 2026-10-27, and
+    the "yes" alone took 6.7 s. Kept: every message, in order, with its role
+    and tool-call ids (the model server needs the pairs intact), what the user
+    said, and what NOVA said. Cut: an earlier turn's context (user_state,
+    persona, recent_episodes - the new turn brings its own, fresher), and tool
+    results and call arguments past _CARRIED_TOOL_CHARS, to an excerpt."""
+    out = []
+    for message in messages:
+        message = dict(message)
+        role = message.get("role")
+        if role == "user":
+            message["content"] = _said_only(message.get("content"))
+        elif role == "tool":
+            content = message.get("content") or ""
+            if len(content) > _CARRIED_TOOL_CHARS:
+                message["content"] = json.dumps({
+                    "excerpt": content[:_CARRIED_EXCERPT_CHARS] + "…", "note": _TRIMMED_NOTE})
+        elif role == "assistant" and message.get("tool_calls"):
+            message["tool_calls"] = [_compact_call(c) for c in message["tool_calls"]]
+        out.append(message)
+    return out
+
+
+def _said_only(content: Any) -> Any:
+    """An earlier turn's payload as just what was said and when."""
+    try:
+        payload = json.loads(content) if isinstance(content, str) else None
+    except json.JSONDecodeError:
+        return content
+    if not isinstance(payload, dict) or "user_state" not in payload:
+        return content
+    return json.dumps({k: payload[k] for k in ("event", "local_time") if k in payload})
+
+
+def _compact_call(call: dict[str, Any]) -> dict[str, Any]:
+    """A tool call with any long string argument (a note NOVA wrote) cut to
+    an excerpt; still valid JSON."""
+    raw = call.get("function", {}).get("arguments") or "{}"
+    if len(raw) <= _CARRIED_TOOL_CHARS:
+        return call
+    try:
+        args = json.loads(raw)
+    except json.JSONDecodeError:
+        return call
+    if not isinstance(args, dict):
+        return call
+    args = {k: (v[:_CARRIED_EXCERPT_CHARS] + "…" if isinstance(v, str) and len(v) > _CARRIED_EXCERPT_CHARS else v)
+            for k, v in args.items()}
+    return {**call, "function": {**call["function"], "arguments": json.dumps(args)}}
 
 
 def _pop_pending_confirmation(user_id: UUID | str | None) -> list[dict[str, Any]] | None:
