@@ -27,6 +27,8 @@ WEB_SEARCH_TOOL: dict[str, Any] = {
         "Searches the web and returns the top results as title, url and "
         "snippet. Use it for anything current or local you don't already "
         "know: opening hours, news, weather, prices, places near the user. "
+        "Not for the user's own coursework or anything else only their "
+        "accounts hold - the web doesn't have it. "
         "Write a short spoken answer from the snippets; never read out URLs."
     ),
     "input_schema": {
