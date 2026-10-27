@@ -1550,6 +1550,7 @@ def _force_answer(
     finish reason to carry on the loop with.
     """
     print(f"[loop] thinking ran out after {len(reasoning)} chars - forcing an answer")
+    started = time.perf_counter()
     try:
         response = llm.client(LOOP_TIMEOUT_S, 1).chat.completions.create(
             model=llm.MODEL,
@@ -1574,7 +1575,8 @@ def _force_answer(
     if finish == "length" and assistant["content"] and not calls:
         finish = "stop"
     print(f"[loop] forced answer finish_reason={finish!r} "
-          f"tool_calls={[c['function']['name'] for c in calls]!r} speech={said(assistant['content'])}")
+          f"tool_calls={[c['function']['name'] for c in calls]!r} speech={said(assistant['content'])} "
+          f"model={(time.perf_counter() - started) * 1000:.0f}ms")
     return assistant, calls, finish
 
 
@@ -1737,7 +1739,8 @@ def _loop(
         print(f"[loop] finish_reason={choice.finish_reason!r} "
               f"tool_calls={[c['function']['name'] for c in calls]!r} "
               f"prompt={getattr(usage, 'prompt_tokens', None)} cached={cached} "
-              f"completion={getattr(usage, 'completion_tokens', None)}")
+              f"completion={getattr(usage, 'completion_tokens', None)} "
+              f"model={(time.perf_counter() - model_started) * 1000:.0f}ms")
 
         # Thinking used the budget before a whole answer came out: make it stop
         # thinking and answer, rather than end the turn in silence or speak
@@ -1785,6 +1788,8 @@ def _loop(
             # resume(). Its result is carried in _PENDING_SESSIONS and sent with
             # the device's answer there instead.
             tool_results = []
+            # How long each tool took, for the log: model time vs tool time.
+            tool_ms: list[str] = []
             # ask_choice's (question, options), once one is accepted - the turn
             # ends on it below, after every other call in this reply has run.
             asked: tuple[str, list[str]] | None = None
@@ -1814,9 +1819,11 @@ def _loop(
                     # Refused calls are recorded here; allowed ones are
                     # recorded by _run_local_tool once they return.
                     _record_action(name, tool_input, ctx, ran=False)
+                tool_started = time.perf_counter()
                 result = blocked if blocked is not None else _run_local_tool(
                     name, tool_input, ctx
                 )
+                tool_ms.append(f"{name}={(time.perf_counter() - tool_started) * 1000:.0f}ms")
                 if (name == "navigation_departure_time"
                         and isinstance(result, dict)
                         and "leave_in_minutes" in result):
@@ -1849,6 +1856,8 @@ def _loop(
                 if isinstance(result, dict) and result.get("spoken"):
                     tool_spoken = str(result["spoken"])
                 tool_results.append(_tool_message(call["id"], result))
+            if tool_ms:
+                print(f"[loop] tools ran: {', '.join(tool_ms)}")
 
             if client_authorised:
                 client_input = _arguments(client_call) or {}

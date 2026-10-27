@@ -286,11 +286,20 @@ def receive_event(input_wrapper: InputWrapper, user: AuthUser = Depends(current_
     us = input_wrapper.user_state
     print(f"[/event] calendar_ctx={us.calendar_ctx!r} "
           f"current_events={len(us.current_events)} upcoming_events={len(us.upcoming_events)}")
+    started = time.perf_counter()
     episode_id = _open_episode(user.id, input_wrapper.event, us)
     intent = intent_surface.run(user.id, input_wrapper.user_state, input_wrapper.event, episode_id)
     if isinstance(intent, IntentResult):
         _close_episode(user.id, intent)
-    return _with_consolidation_hint(user.id, _to_response(intent))
+    response = _with_consolidation_hint(user.id, _to_response(intent))
+    print(f"[/event] {_ended(intent)} in {(time.perf_counter() - started) * 1000:.0f}ms")
+    return response
+
+
+def _ended(intent: IntentResult | NeedMoreResult) -> str:
+    """How a request ended, for the timing line: answered, or handed to the
+    phone for a lookup (the time until /event/continue is the phone's)."""
+    return f"asked the phone for {intent.request_type}" if isinstance(intent, NeedMoreResult) else "answered"
 
 
 def _with_consolidation_hint(user_id: UUID, response: EventResponse) -> EventResponse:
@@ -702,6 +711,7 @@ def list_audit(
 @app.post("/event/continue", response_model=EventResponse)
 def continue_event(input_wrapper: ContinueWrapper, user: AuthUser = Depends(current_user)) -> EventResponse:
     print(f"[/event/continue] session_id={input_wrapper.session_id!r}")
+    started = time.perf_counter()
     try:
         # 404 for someone else's session too - see intent_surface.resume.
         intent = intent_surface.resume(user.id, input_wrapper.session_id, input_wrapper.result)
@@ -711,4 +721,6 @@ def continue_event(input_wrapper: ContinueWrapper, user: AuthUser = Depends(curr
     # other place an episode can close.
     if isinstance(intent, IntentResult):
         _close_episode(user.id, intent)
-    return _with_consolidation_hint(user.id, _to_response(intent))
+    response = _with_consolidation_hint(user.id, _to_response(intent))
+    print(f"[/event/continue] {_ended(intent)} in {(time.perf_counter() - started) * 1000:.0f}ms")
+    return response
