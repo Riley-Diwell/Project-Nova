@@ -52,6 +52,7 @@ This writes `.env` and only fills in what's missing, so re-running it never chan
 
 - `PUBLIC_URL` must be the machine's real tailnet name - compare it with `tailscale status`. If Tailscale wasn't up it will say `.local`; fix it by hand.
 - `QWEN_GPU` defaults to `1` (the second GPU). On a single-GPU machine set it to `0`. `nvidia-smi -L` lists them.
+- With two GPUs, add `COMPOSE_PROFILES=second-gpu` and `LLM_BG_BASE_URL=http://qwen-bg:18020/v1` to run a second copy of the model on the other GPU (`QWEN_BG_GPU`, default `0`) for background work, so it never slows a voice turn.
 
 **4. Start everything:**
 
@@ -168,6 +169,8 @@ docker compose exec -T db pg_restore -U supabase_admin -d postgres --clean /back
 |---|---|
 | `PUBLIC_URL` | The tailnet address. Must match the machine's real name |
 | `QWEN_GPU` | Which GPU the model uses (default `1`; `0` on a single-GPU machine) |
+| `QWEN_BG_GPU` | Which GPU the background model uses (default `0`; needs `COMPOSE_PROFILES=second-gpu`) |
+| `LLM_BG_BASE_URL` | Where the server sends work nobody is waiting on; `http://qwen-bg:18020/v1` with the profile on, empty to share the voice model |
 | `QWEN_CTX` | The context preset (default `fast`). Raise it if long turns get cut off |
 | `DISABLE_SIGNUP=true` | Stops new accounts from being created |
 | `NOVA_API_KEY` | Must match the key built into the app (`local.properties`) |

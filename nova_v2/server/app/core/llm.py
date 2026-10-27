@@ -2,9 +2,9 @@
 llm.py - the one model client NOVA uses.
 
 Every model call goes through here, over the OpenAI chat-completions protocol,
-so the model is whatever LLM_BASE_URL serves: the self-hosted Qwen on
-the self-hosted Qwen in deployment (deploy/compose.yml), anything compatible in
-development.
+so the model is whatever LLM_BASE_URL serves: the self-hosted Qwen in
+deployment (deploy/compose.yml), anything compatible in development. Calls
+outside a voice turn go to LLM_BG_BASE_URL instead when it's set.
 
 Two shapes of call:
     complete()  free text back (the phraser, extractor and titler parse their
@@ -32,6 +32,11 @@ from openai import BadRequestError, OpenAI
 from pydantic import BaseModel, ValidationError
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:18020/v1")
+# Work nobody is waiting on - consolidation, the Persona judge, notes, ambient
+# turns - goes to a second model server on its own GPU when this is set, so it
+# never slows a voice turn. Unset, everything shares LLM_BASE_URL.
+LLM_BG_BASE_URL = os.environ.get("LLM_BG_BASE_URL", "") or LLM_BASE_URL
+SEPARATE_BACKGROUND = LLM_BG_BASE_URL != LLM_BASE_URL
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "") or "local"
 MODEL = os.environ.get("LLM_MODEL", "qwen3.8-27b")
 
@@ -56,21 +61,30 @@ class LLMUnavailable(RuntimeError):
     token limit, or still not valid JSON after one retry."""
 
 
-@lru_cache(maxsize=8)
-def client(timeout: float = 60.0, max_retries: int = 1) -> OpenAI:
-    """A client per (timeout, retries) pair, shared - the voice path wants a
-    short leash, the background passes a long one."""
-    return OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY,
+def client(timeout: float = 60.0, max_retries: int = 1, *,
+           voice: Optional[bool] = None) -> OpenAI:
+    """A client for the voice server inside a voice turn (or with voice=True),
+    the background server otherwise. Shared per (server, timeout, retries) -
+    the voice path wants a short leash, the background passes a long one."""
+    if voice is None:
+        voice = _in_voice_turn.get()
+    return _client(LLM_BASE_URL if voice else LLM_BG_BASE_URL, timeout, max_retries)
+
+
+@lru_cache(maxsize=16)
+def _client(base_url: str, timeout: float, max_retries: int) -> OpenAI:
+    return OpenAI(base_url=base_url, api_key=LLM_API_KEY,
                   timeout=timeout, max_retries=max_retries)
 
 
 # --- voice first ---------------------------------------------------------------
-# One GPU serves every call, and two at once slow both: a warm voice step took
-# 6.4 s instead of 2.4 s beside a background request. So work nobody is
-# waiting on holds back while a voice turn runs - before each call, not
-# during one, since a request the server has started can't be paused. The
-# wait is capped so nothing starves, and so an ambient /event still answers
-# inside the phone's 60 s read timeout.
+# Two calls at once on one GPU slow both: a warm voice step took 6.4 s instead
+# of 2.4 s beside a background request. With a background server
+# (LLM_BG_BASE_URL) the two never meet. Without one, work nobody is waiting on
+# holds back while a voice turn runs - before each call, not during one, since
+# a request the server has started can't be paused. The wait is capped so
+# nothing starves, and so an ambient /event still answers inside the phone's
+# 60 s read timeout.
 VOICE_YIELD_MAX_S = 15.0
 
 _voice_turns = 0
@@ -98,8 +112,9 @@ def voice_turn() -> Iterator[None]:
 
 def yield_to_voice(max_wait: float = VOICE_YIELD_MAX_S) -> None:
     """Wait, at most max_wait seconds, until no voice turn is running. A call
-    from inside a voice turn goes straight through."""
-    if _in_voice_turn.get():
+    from inside a voice turn, or bound for a background server of its own,
+    goes straight through."""
+    if SEPARATE_BACKGROUND or _in_voice_turn.get():
         return
     deadline = time.monotonic() + max_wait
     with _voice_idle:

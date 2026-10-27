@@ -119,6 +119,14 @@ def _warm_up() -> None:
     except Exception as e:
         print(f"[warmup] model warm-up failed ({llm.LLM_BASE_URL}): {e}")
 
+    if llm.SEPARATE_BACKGROUND:
+        start = time.perf_counter()
+        try:
+            intent_surface.warm_prefix(voice=False)
+            print(f"[warmup] background model ready ({(time.perf_counter() - start) * 1000:.0f}ms)")
+        except Exception as e:
+            print(f"[warmup] background model warm-up failed ({llm.LLM_BG_BASE_URL}): {e}")
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:

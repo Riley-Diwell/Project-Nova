@@ -11,7 +11,7 @@ services:
   # Qwen 3.8 27B, OpenAI-compatible on :18020. The same image, flags and
   # volumes the hand-run qwen38-dev container used, so the weights aren't
   # downloaded again.
-  qwen:
+  qwen: &qwen
     image: ghcr.io/syv-ai/qwen38-27b-rtx3090:latest
     restart: unless-stopped
     # Bounded, like nova's below: a deleted note must not live on in a log.
@@ -36,6 +36,21 @@ services:
           devices:
             - driver: nvidia
               device_ids: ["${QWEN_GPU:-1}"]
+              capabilities: [gpu]
+
+  # A second copy of the model on the other GPU, for work nobody is waiting on
+  # (consolidation, Persona, notes, ambient turns), so it never slows a voice
+  # turn. Off unless COMPOSE_PROFILES=second-gpu and
+  # LLM_BG_BASE_URL=http://qwen-bg:18020/v1 are both in .env.
+  qwen-bg:
+    <<: *qwen
+    profiles: ["second-gpu"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${QWEN_BG_GPU:-0}"]
               capabilities: [gpu]
 
   # Postgres 17 + pgvector, with Supabase's roles and auth schema, so
@@ -191,6 +206,7 @@ services:
       SUPABASE_ANON_KEY: ${ANON_KEY}
       SUPABASE_JWT_SECRET: ${JWT_SECRET}
       LLM_BASE_URL: http://qwen:18020/v1
+      LLM_BG_BASE_URL: ${LLM_BG_BASE_URL:-}
       LLM_MODEL: ${LLM_MODEL:-qwen3.8-27b}
       SEARXNG_URL: http://searxng:8080
       google_maps_api_key: ${GOOGLE_MAPS_API_KEY}

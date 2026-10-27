@@ -68,3 +68,22 @@ def test_a_thread_started_inside_a_voice_turn_still_waits():
         time.sleep(0.2)
     thread.join()
     assert waited[0] > 0.1
+
+
+def test_voice_turn_calls_go_to_the_voice_server(monkeypatch):
+    monkeypatch.setattr(llm, "LLM_BASE_URL", "http://voice/v1")
+    monkeypatch.setattr(llm, "LLM_BG_BASE_URL", "http://bg/v1")
+    with llm.voice_turn():
+        assert str(llm.client().base_url).startswith("http://voice/")
+    assert str(llm.client().base_url).startswith("http://bg/")
+    assert str(llm.client(voice=True).base_url).startswith("http://voice/")
+
+
+def test_a_separate_background_server_never_waits(monkeypatch):
+    monkeypatch.setattr(llm, "SEPARATE_BACKGROUND", True)
+    turn = _hold_voice_turn(0.5)
+    start = time.monotonic()
+    llm.yield_to_voice()
+    waited = time.monotonic() - start
+    turn.join()
+    assert waited < 0.05
