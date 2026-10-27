@@ -110,3 +110,17 @@ def test_no_signed_in_user_means_no_notes(stores):
     with as_user(None):
         assert recall(query="Q3")["success"] is False
         assert save("anything")["success"] is False
+
+
+def test_a_written_note_is_not_handed_back_to_be_read_out(stores):
+    # A note Nova wrote is on the phone in full; the model gets its title and
+    # an instruction to sum it up, not the text to read aloud.
+    body = "## Week 9\n" + "- point\n" * 50
+    result = save(body, title="DSP week 9 notes")
+    assert result["success"] and result["title"] == "DSP week 9 notes"
+    assert "note" not in result and "Don't read it out" in result["say"]
+    assert [n.text for n in notes.all_notes(USER)] == [body.strip()]
+
+
+def test_a_short_note_still_comes_back(stores):
+    assert save("Parked on level 3")["note"] == "Parked on level 3"

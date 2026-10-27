@@ -364,6 +364,21 @@ def _save_note(
 
     print(f"[memory tool] saved note {note.id}: {said(text)}")
     _process(note)
+    if title:
+        # A note Nova wrote can run to a page, and it's on the phone in full
+        # the moment this returns (the "Saved to Notes" chip). Handing the text
+        # back invited the model to read all of it out - 842 characters, about
+        # 45 s of speech, on 2026-10-27 - so it gets the title and an
+        # instruction instead.
+        return {
+            "success": True,
+            "note_id": note.id,
+            "title": title,
+            "indexed": False,
+            "say": ("Saved - it's in their Notes. Don't read it out: say in one "
+                    "short sentence what it covers."),
+            "spoken": f"I've saved a note: {title}.",
+        }
     return {
         "success": True,
         "note_id": note.id,
