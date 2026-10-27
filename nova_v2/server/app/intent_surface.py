@@ -1602,6 +1602,8 @@ def warm_prefix(voice: bool = True) -> None:
             max_tokens=1,
             extra_body=llm.THINKING,
         )
+    if voice:
+        llm.prompt_cached = True
 
 
 def _tool_message(call_id: str, result: Any) -> dict[str, Any]:

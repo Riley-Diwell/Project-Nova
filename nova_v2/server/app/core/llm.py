@@ -110,6 +110,19 @@ def voice_turn() -> Iterator[None]:
         _in_voice_turn.reset(token)
 
 
+def voice_idle() -> bool:
+    """No voice turn is running right now."""
+    return _voice_turns == 0
+
+
+# Whether the voice server has the system prompt and tools in its prefix cache:
+# None until main.py's keep-warm first tries (and in tests), False while it
+# hasn't managed to - after a restart, or with the model server down or still
+# loading - and True once it has (intent_surface.warm_prefix). A turn while
+# it's False pays the whole ~12 s prefill; control/ack.py says so.
+prompt_cached: Optional[bool] = None
+
+
 def yield_to_voice(max_wait: float = VOICE_YIELD_MAX_S) -> None:
     """Wait, at most max_wait seconds, until no voice turn is running. A call
     from inside a voice turn, or bound for a background server of its own,

@@ -109,23 +109,52 @@ def _warm_up() -> None:
     except Exception as e:
         print(f"[warmup] persona warm-up skipped: {e}")
 
-    # One token from the model, over the real system prompt and tools: a stopped
-    # or unreachable model server shows up in the log at start-up rather than
-    # on the first voice turn, and that turn finds the prompt already cached.
-    start = time.perf_counter()
-    try:
-        intent_surface.warm_prefix()
-        print(f"[warmup] model {llm.MODEL} ready ({(time.perf_counter() - start) * 1000:.0f}ms)")
-    except Exception as e:
-        print(f"[warmup] model warm-up failed ({llm.LLM_BASE_URL}): {e}")
+    _keep_warm()
 
-    if llm.SEPARATE_BACKGROUND:
+
+# A warm read of the prompt costs well under a second; a cold one ~12 s.
+KEEP_WARM_S = 300
+WARM_RETRY_S = 30
+
+
+def _keep_warm() -> None:
+    """One token from the model, over the real system prompt and tools, at
+    start-up and then every KEEP_WARM_S: a stopped or unreachable model server
+    shows up in the log rather than on a voice turn, and a prompt pushed out of
+    the server's cache (other people's requests on the shared /v1 can do it)
+    is read back in while nobody is waiting. Never during a voice turn. Until
+    a read succeeds, llm.prompt_cached is False and control/ack.py tells the
+    user NOVA is waking up. Runs for the life of the process."""
+    llm.prompt_cached = False
+    first, failing = True, False
+    while True:
+        if not first and not llm.voice_idle():
+            time.sleep(WARM_RETRY_S)
+            continue
         start = time.perf_counter()
         try:
-            intent_surface.warm_prefix(voice=False)
-            print(f"[warmup] background model ready ({(time.perf_counter() - start) * 1000:.0f}ms)")
+            intent_surface.warm_prefix()
         except Exception as e:
-            print(f"[warmup] background model warm-up failed ({llm.LLM_BG_BASE_URL}): {e}")
+            llm.prompt_cached = False
+            if not failing:
+                print(f"[warmup] model warm-up failed ({llm.LLM_BASE_URL}): {e} - retrying every {WARM_RETRY_S}s")
+            failing = True
+            time.sleep(WARM_RETRY_S)
+            continue
+        ms = (time.perf_counter() - start) * 1000
+        if first or failing:
+            print(f"[warmup] model {llm.MODEL} ready ({ms:.0f}ms)")
+        elif ms > 3000:
+            print(f"[warmup] the prompt had left the model's cache - read back in ({ms:.0f}ms)")
+        if llm.SEPARATE_BACKGROUND:
+            try:
+                intent_surface.warm_prefix(voice=False)
+                if first:
+                    print("[warmup] background model ready")
+            except Exception as e:
+                print(f"[warmup] background model warm-up failed ({llm.LLM_BG_BASE_URL}): {e}")
+        first, failing = False, False
+        time.sleep(KEEP_WARM_S)
 
 
 @asynccontextmanager

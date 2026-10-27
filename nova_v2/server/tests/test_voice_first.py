@@ -87,3 +87,10 @@ def test_a_separate_background_server_never_waits(monkeypatch):
     waited = time.monotonic() - start
     turn.join()
     assert waited < 0.05
+
+
+def test_voice_idle():
+    assert llm.voice_idle()
+    with llm.voice_turn():
+        assert not llm.voice_idle()
+    assert llm.voice_idle()
