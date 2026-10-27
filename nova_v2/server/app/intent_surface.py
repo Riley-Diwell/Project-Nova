@@ -60,11 +60,15 @@ MAX_ITERATIONS = 5
 # A voice turn waits on this; the model is local, so a generous timeout still
 # fails fast when the box is down.
 LOOP_TIMEOUT_S = 45.0
-# Thinking plus answer, per model call in the loop. The model generates about
-# 130 tokens a second, so this bounds one step at ~12 s; most think for a few
-# hundred tokens. One that runs out is made to answer (_force_answer) rather
-# than given more - a voice turn is better quick than exhaustively considered.
-LOOP_MAX_TOKENS = 1536
+# Thinking plus answer, per model call in the loop. One that runs out is made
+# to answer (_force_answer) rather than given more - a voice turn is better
+# quick than exhaustively considered. Was 1536 (~10-12 s a step) until
+# 2026-10-27, when the timing log showed a turn spend 9.8 s of its 15.6 s
+# thinking about how to say an answer it already had, with two standing
+# instructions to weave in. Most steps think for a few hundred tokens, so 512
+# (~4-5 s at the ~110 tokens/s the server manages) leaves room for those and
+# cuts the long ones short.
+LOOP_MAX_TOKENS = 512
 
 # web_search runs locally now (tools/web_search.py), so its cap is ours to
 # enforce - the hosted tool's max_uses did this before.
