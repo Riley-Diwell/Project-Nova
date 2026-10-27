@@ -62,6 +62,8 @@ _LEADING_POLITENESS = re.compile(r"^\s*(?:please|pls|um|uh|so|and)\b[\s,]*", re.
 _WH_WORDS = frozenset({
     "what", "whats", "when", "whens", "where", "wheres", "who", "whos",
     "which", "why", "how", "hows", "whose", "whom",
+    # "how'd I go", "what'd she say" - apostrophes are dropped before the check.
+    "howd", "whatd", "whered", "whend", "whod", "whyd",
 })
 _AUXILIARIES = frozenset({
     "is", "are", "am", "was", "were", "do", "does", "did", "have", "has",
@@ -190,6 +192,30 @@ def _is_request(spoken: str) -> bool:
         return True
 
     return any(frame in text for frame in _REQUEST_FRAMES)
+
+
+def is_request(spoken: str) -> bool:
+    """The rule on bare words, for a caller holding a transcript rather than
+    an Event (control/ack.py)."""
+    return bool(spoken and spoken.strip()) and _is_request(spoken)
+
+
+def is_question(spoken: str) -> bool:
+    """Asking about something ("what's on tomorrow", "am I free at 3") rather
+    than asking for something to be done. "Can you add..." is the second,
+    whatever its question mark: an auxiliary before "you" is a polite
+    imperative."""
+    text = _strip_address(spoken.strip().lower())
+    words = re.findall(r"[a-z']+", text)
+    if not words:
+        return False
+    first = words[0].replace("'", "")
+    polite_imperative = first in _AUXILIARIES and len(words) > 1 and words[1] == "you"
+    if polite_imperative:
+        return False
+    # A trailing "?" settles it when the first word doesn't - including a
+    # misheard one ("whaat do I have due?").
+    return first in _WH_WORDS or first in _AUXILIARIES or text.endswith("?")
 
 
 def _strip_address(text: str) -> str:

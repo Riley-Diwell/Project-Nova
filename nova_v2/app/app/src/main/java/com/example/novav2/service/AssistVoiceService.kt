@@ -34,6 +34,7 @@ import com.example.novav2.state.DeviceInteraction
 import com.example.novav2.state.AppForegroundState
 import com.example.novav2.state.CalendarWriter
 import com.example.novav2.state.ReminderRepository
+import com.example.novav2.state.TurnAck
 import com.example.novav2.state.TurnActionApplier
 import com.example.novav2.state.UserStateCollector
 import com.example.novav2.state.parseIsoToEpochMillis
@@ -72,6 +73,14 @@ class AssistVoiceService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
+    // Null until the engine's asynchronous start finishes; then whether it started. Until then
+    // [ttsWaiting] holds what asked for it. Main thread only, like the rest of this state.
+    private var ttsStarted: Boolean? = null
+    private val ttsWaiting = mutableListOf<(TextToSpeech?) -> Unit>()
+    // Replies queued on the engine and not yet finished, by utterance id, with the episode each
+    // is scored against.
+    private val pendingReplies = mutableMapOf<String, String?>()
+    private var replyCount = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -208,9 +217,11 @@ class AssistVoiceService : Service() {
                 val userState = ReminderRepository.attachWindow(
                     applicationContext, UserStateCollector.snapshot(applicationContext),
                 )
-                val result = TurnActionApplier.resolveNeedMore(
-                    applicationContext, NovaApiClient.postVoiceEvent(text, userState),
-                )
+                val result = TurnAck.around(text, ::sayAck) {
+                    TurnActionApplier.resolveNeedMore(
+                        applicationContext, NovaApiClient.postVoiceEvent(text, userState),
+                    )
+                }
 
                 val finalResult = result as? NovaApiClient.EventResult.Final
                 if (CalendarWriter.hasPermission(applicationContext)) {
@@ -302,12 +313,44 @@ class AssistVoiceService : Service() {
         val limit = TextToSpeech.getMaxSpeechInputLength()
         val utterance = if (text.length > limit) text.take(limit) else text
 
-        val tts = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                textToSpeech?.speak(utterance, TextToSpeech.QUEUE_FLUSH, null, "nova-assist-response")
-            } else {
+        withTts { tts ->
+            if (tts == null) {
                 DeviceInteraction.replyFinished()
                 stopSelfSafely()
+                return@withTts
+            }
+            val id = "$RESPONSE_UTTERANCE-${++replyCount}"
+            pendingReplies[id] = episodeId
+            // Queued, not flushed: an acknowledgement still being said finishes first rather
+            // than being cut off mid-word.
+            tts.speak(utterance, TextToSpeech.QUEUE_ADD, null, id)
+        }
+    }
+
+    /** "Sure, checking your calendar now." while a slow turn runs (see [TurnAck]). Said only -
+     * not a reply, so it isn't written to the chat thread, notified or scored. */
+    private fun sayAck(line: String) {
+        withTts { it?.speak(line, TextToSpeech.QUEUE_FLUSH, null, ACK_UTTERANCE) }
+    }
+
+    /** Runs [block] on the main thread with the engine once it's up, or with null if it failed
+     * to start. One engine for the service's life, started on first use, so an acknowledgement
+     * and the reply after it share one queue. */
+    private fun withTts(block: (TextToSpeech?) -> Unit) {
+        ttsStarted?.let { started ->
+            block(textToSpeech.takeIf { started })
+            return
+        }
+        ttsWaiting += block
+        if (textToSpeech != null) return
+        val tts = TextToSpeech(this) { status ->
+            scope.launch {
+                val started = status == TextToSpeech.SUCCESS
+                ttsStarted = started
+                val engine = textToSpeech.takeIf { started }
+                val waiting = ttsWaiting.toList()
+                ttsWaiting.clear()
+                waiting.forEach { it(engine) }
             }
         }
         textToSpeech = tts
@@ -315,21 +358,30 @@ class AssistVoiceService : Service() {
             override fun onStart(utteranceId: String?) {}
 
             override fun onDone(utteranceId: String?) {
-                // Heard out to the end - same accept signal VoiceScreen's silence-based
-                // reportOutcome uses, there being no stop button here to reject with instead.
-                if (episodeId != null) {
-                    scope.launch { NovaApiClient.postOutcome(episodeId, accepted = true) }
-                }
-                DeviceInteraction.replyFinished()
-                stopSelfSafely()
+                scope.launch { replyEnded(utteranceId, heard = true) }
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
-                DeviceInteraction.replyFinished()
-                stopSelfSafely()
+                scope.launch { replyEnded(utteranceId, heard = false) }
             }
         })
+    }
+
+    /** A reply finished. Once the last one queued has, the service is done. The
+     * acknowledgement's ending changes nothing - the reply is still to come. */
+    private fun replyEnded(utteranceId: String?, heard: Boolean) {
+        if (utteranceId == null || !pendingReplies.containsKey(utteranceId)) return
+        val episodeId = pendingReplies.remove(utteranceId)
+        // Heard out to the end - same accept signal VoiceScreen's silence-based
+        // reportOutcome uses, there being no stop button here to reject with instead.
+        if (heard && episodeId != null) {
+            scope.launch { NovaApiClient.postOutcome(episodeId, accepted = true) }
+        }
+        if (pendingReplies.isEmpty()) {
+            DeviceInteraction.replyFinished()
+            stopSelfSafely()
+        }
     }
 
     private fun stopSelfSafely() {
@@ -375,6 +427,8 @@ class AssistVoiceService : Service() {
         // saw it stuck without the heads-up peek this now depends on.
         private const val STATUS_CHANNEL_ID = "assist_voice_status_v2"
         private const val NOTIFICATION_ID = 44
+        private const val RESPONSE_UTTERANCE = "nova-assist-response"
+        private const val ACK_UTTERANCE = "nova-assist-ack"
 
         /** String extra: a transcript NovaDeviceService already produced from the Nova
          * device's BLE audio. Its presence is what routes onStartCommand straight to

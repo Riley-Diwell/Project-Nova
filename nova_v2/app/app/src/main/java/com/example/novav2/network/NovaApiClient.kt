@@ -6,9 +6,13 @@ import com.example.novav2.knowledge.KnowledgeRepository
 import com.example.novav2.model.CalendarEventInfo
 import com.example.novav2.model.ReminderSummary
 import com.example.novav2.model.UserState
+import com.example.novav2.state.TurnAck
 import org.json.JSONArray
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import com.example.novav2.network.NovaHttp.withNovaAuth
@@ -25,6 +29,7 @@ import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
 
 /**
  * Talks to the backend's POST /event seam (DESIGN.md Sections 5.1/5.3/6:
@@ -233,6 +238,49 @@ object NovaApiClient {
             put("type", "voice")
             put("text", transcript)
         }
+
+    // Only worth anything in the first second or two of a turn - see [getAck].
+    private val ackClient by lazy { client.newBuilder().callTimeout(3, TimeUnit.SECONDS).build() }
+
+    /**
+     * The line to say while a turn runs ("Sure, checking your calendar now."), or null for
+     * anything that isn't a request - POST /event/ack (server: app/control/ack.py). Enqueued
+     * rather than executed so that cancelling the coroutine cancels the call: a reply that lands
+     * first never waits on this. Any failure is null - the line is a nicety, never a reason for
+     * a turn to go wrong.
+     */
+    suspend fun getAck(transcript: String): String? = suspendCancellableCoroutine { cont ->
+        val body = JSONObject().apply { put("text", transcript) }
+        val call = ackClient.newCall(
+            Request.Builder()
+                .url("$BASE_URL/event/ack")
+                .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+        )
+        cont.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (!call.isCanceled()) {
+                    android.util.Log.d(TurnAck.TAG, "line request failed: ${e.javaClass.simpleName}")
+                }
+                cont.resume(null)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val ack = response.use { r ->
+                    if (!r.isSuccessful) {
+                        android.util.Log.d(TurnAck.TAG, "line request got HTTP ${r.code}")
+                        return@use null
+                    }
+                    runCatching {
+                        val json = JSONObject(r.body?.string().orEmpty())
+                        if (json.isNull("ack")) null else json.getString("ack").takeIf { it.isNotBlank() }
+                    }.getOrNull()
+                }
+                cont.resume(ack)
+            }
+        })
+    }
 
     /**
      * Posts a bare "timestamp" Event (schemas/event.py's TimeEvent) - no user speech, just this

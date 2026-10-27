@@ -50,6 +50,7 @@ from app.tools.functions.notification_management import start_batchers, stop_bat
 from app.store import memory
 from app.store import notes
 from app.store import persona
+from app.api import ack as ack_api
 from app.api import auth as auth_api
 from app.api import me as me_api
 from app.api import notes as notes_api
@@ -189,6 +190,9 @@ app.include_router(auth_api.router)
 app.include_router(me_api.router)
 app.include_router(reminders_api.router)
 app.include_router(canvas_api.router)
+
+# The "Sure, checking your calendar" line said while a turn runs.
+app.include_router(ack_api.router)
 
 _API_KEY = os.environ.get("NOVA_API_KEY", "").strip()
 if not _API_KEY:

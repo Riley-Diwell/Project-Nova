@@ -206,13 +206,16 @@ def parse(
     max_retries: int = 1,
     llm: Optional[OpenAI] = None,
     model: Optional[str] = None,
+    wait_for_voice: bool = True,
 ) -> M:
     """A reply validated into `model_cls`.
 
     Asks for the schema through response_format (llama.cpp, vLLM and SGLang
     all constrain decoding to it); a server that rejects response_format gets
     the schema in the prompt instead. Either way the reply is validated, and a
-    reply that doesn't validate is retried once with the error attached."""
+    reply that doesn't validate is retried once with the error attached.
+    wait_for_voice=False skips yield_to_voice, for a call that is itself part
+    of answering someone (control/ack.py) rather than background work."""
     llm = llm or client(timeout, max_retries)
     schema = model_cls.model_json_schema()
     system_full = (
@@ -229,7 +232,8 @@ def parse(
     }
     last_error = ""
     for attempt in range(2):
-        yield_to_voice()
+        if wait_for_voice:
+            yield_to_voice()
         kwargs: dict[str, Any] = dict(
             model=model or MODEL, messages=messages, max_tokens=max_tokens,
             temperature=0, extra_body=NO_THINKING,

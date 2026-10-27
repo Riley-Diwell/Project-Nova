@@ -36,6 +36,7 @@ import com.example.novav2.state.CalendarWriter
 import com.example.novav2.state.DeviceButtonPolicy
 import com.example.novav2.state.DeviceInteraction
 import com.example.novav2.state.ReminderRepository
+import com.example.novav2.state.TurnAck
 import com.example.novav2.state.TurnActionApplier
 import com.example.novav2.state.UserStateCollector
 import com.example.novav2.state.parseIsoToEpochMillis
@@ -185,6 +186,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         textToSpeech.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
             override fun onDone(utteranceId: String?) {
+                // The reply follows the acknowledgement; neither is scored on it.
+                if (utteranceId == ACK_UTTERANCE) return
                 // Heard out to the end. Silence is the accept signal - the user had a stop
                 // button and did not reach for it.
                 reportOutcome(accepted = true)
@@ -193,6 +196,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
+                if (utteranceId == ACK_UTTERANCE) return
                 // The engine failed, which says nothing about whether the user wanted this.
                 // Drop the turn rather than scoring it either way.
                 speakingEpisode.set(null)
@@ -303,12 +307,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun speakNow(utterance: String) {
-        val result = textToSpeech.speak(utterance, TextToSpeech.QUEUE_FLUSH, null, "nova-response")
+        // Queued, not flushed: an acknowledgement still being said finishes first rather than
+        // being cut off mid-word. Anything older was already stopped when the turn was sent.
+        val result = textToSpeech.speak(utterance, TextToSpeech.QUEUE_ADD, null, "nova-response")
         if (result != TextToSpeech.SUCCESS) {
             statusText = "Couldn't speak that - tap to try again."
             voiceState = VoiceState.IDLE
             speakingEpisode.set(null)
         }
+    }
+
+    /**
+     * "Sure, checking your calendar now." while a slow turn runs (see [TurnAck]). Shown as the
+     * status line, and said unless muted. Not a reply: it isn't added to the transcript or
+     * scored, and the state stays THINKING until the real reply arrives.
+     */
+    private fun sayAck(line: String) {
+        statusText = line
+        if (muted || !ttsReady.get()) return
+        textToSpeech.speak(line, TextToSpeech.QUEUE_FLUSH, null, ACK_UTTERANCE)
     }
 
     /**
@@ -353,18 +370,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         recallChips = emptyList()
         savedChips = emptyList()
         voiceState = VoiceState.THINKING
-        statusText = "Sending to Nova…"
+        // Just "Thinking…" until there is something real to say: the acknowledgement
+        // ([sayAck]) if the turn runs long, then the reply itself.
+        statusText = WAITING
         viewModelScope.launch {
             val userState = ReminderRepository.attachWindow(app, UserStateCollector.snapshot(app))
             try {
                 // The Intent Surface can pause on a client-executed tool (get_calendar_range,
                 // get_reminders) it needs on-device data for; TurnActionApplier resolves it
                 // locally and hands the result back until there's a final answer.
-                val result = TurnActionApplier.resolveNeedMore(
-                    app, NovaApiClient.postVoiceEvent(text, userState),
-                ) { need ->
-                    statusText = if (need.requestType == "get_reminders") "Checking your reminders…"
-                    else "Checking your calendar…"
+                val result = TurnAck.around(text, ::sayAck) {
+                    // No status of its own for a phone-side lookup: whatever is showing -
+                    // "Thinking…" or the acknowledgement - stays until the reply.
+                    TurnActionApplier.resolveNeedMore(
+                        app, NovaApiClient.postVoiceEvent(text, userState),
+                    )
                 }
                 val finalResult = result as? NovaApiClient.EventResult.Final
                 val calendarActions = finalResult?.actions.orEmpty()
@@ -500,13 +520,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Force-finishes the utterance now instead of waiting for the recognizer's silence timeout. */
     fun finishListening() {
-        statusText = "Sending to Nova…"
+        statusText = WAITING
         speechRecognizer?.stopListening()
     }
 
     private companion object {
         const val PREFS = "nova_chat"
         const val KEY_MUTED = "tts_muted"
+        const val ACK_UTTERANCE = "nova-ack"
+        const val WAITING = "Thinking…"
     }
 }
 
