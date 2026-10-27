@@ -22,13 +22,14 @@ INPUT
 
 API SETUP
 Needs google_maps_api_key in .env (same key as get_current_address's
-reverse-geocode call). Without it, or when the Directions call fails, the tool
+reverse-geocode call), with the Routes API and Places API (New) enabled on its
+Google Cloud project. Without it, or when the Routes call fails, the tool
 says it can't work out the travel time (see _travel_unknown) rather than
-inventing one. There is no travel time anywhere in this file that Directions
+inventing one. There is no travel time anywhere in this file that Routes
 didn't measure, on purpose.
 
 DISTANCE OVERRIDES
-  - Short enough to walk (see WALKING_OVERRIDE_METERS) re-queries Directions
+  - Short enough to walk (see WALKING_OVERRIDE_METERS) re-queries Routes
     with mode=walking regardless of what was actually asked for - waiting for a
     bus or finding parking costs more time than just walking it.
   - Already there (see ARRIVED_METERS) skips duration/leave_in_minutes
@@ -51,8 +52,24 @@ import re
 import requests
 
 from app.tools.core.base import BaseTool
+from app.tools.functions.places import SEARCH_RADIUS_M, TEXT_SEARCH_URL, parse_latlng
 
 MAPS_API_KEY = os.environ.get("google_maps_api_key")
+
+# Routes API - the legacy Directions API's replacement, which new Google Cloud
+# projects can't enable any more. The field mask is required, and is also what
+# Routes bills by, so it asks only for what _directions_result reads.
+ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
+ROUTES_FIELD_MASK = (
+    "routes.legs.distanceMeters,routes.legs.duration,routes.legs.endLocation,"
+    "routes.legs.localizedValues,routes.legs.steps.navigationInstruction,"
+    "routes.legs.steps.staticDuration,routes.legs.steps.transitDetails"
+)
+TRAVEL_MODES = {"transit": "TRANSIT", "walking": "WALK", "driving": "DRIVE"}
+# Routes' errors for a destination it couldn't place - worth a Places fuzzy
+# match before giving up. Anything else (a denied key, no billing, over quota)
+# means maps are unavailable instead.
+NO_ROUTE_ERRORS = ("INVALID_ARGUMENT", "NOT_FOUND")
 
 # There is deliberately no default origin. This used to fall back to a fixed
 # point in Canberra city when the phone sent no location, which produced a
@@ -298,101 +315,84 @@ def _leave_in_minutes(minutes_until_start: Any, travel_minutes: float) -> float 
     return round(minutes_until_start - travel_minutes, 1)
 
 
-def _prefer_walking_if_close(origin: str, destination: str, data: dict, mode: str) -> tuple[dict, str]:
-    """Re-queries Directions with mode=walking when the route actually asked for
+def _prefer_walking_if_close(origin: str, destination: str, leg: dict, mode: str) -> tuple[dict, str]:
+    """Re-queries Routes with mode=walking when the route actually asked for
     turns out to be short enough that walking beats it regardless of what the
     model or the user's preferred_travel_mode chose - see WALKING_OVERRIDE_METERS.
     A no-op when mode is already "walking": there's nothing shorter to prefer it
-    over. `destination` must be the same param _query_google_maps already resolved
-    (a place_id: reference or the raw string), not the original user-facing label.
+    over. `destination` must be the same waypoint _query_google_maps already
+    resolved (a place_id: reference or the raw string), not the original
+    user-facing label.
     """
     if mode == "walking":
-        return data, mode
-    leg = data["routes"][0]["legs"][0]
-    if leg["distance"]["value"] > WALKING_OVERRIDE_METERS:
-        return data, mode
+        return leg, mode
+    if leg.get("distanceMeters", 0) > WALKING_OVERRIDE_METERS:
+        return leg, mode
     try:
-        r = requests.get(
-            "https://maps.googleapis.com/maps/api/directions/json",
-            params={"origin": origin, "destination": destination, "mode": "walking", "key": MAPS_API_KEY},
-            timeout=5,
-        )
-        walking_data = r.json()
-        if walking_data.get("status") == "OK":
-            return walking_data, "walking"
-        print(f"[NavigationTool] walking-override retry status={walking_data.get('status')!r}")
+        walking_leg, error = _compute_route(origin, destination, "walking")
+        if walking_leg is not None:
+            return walking_leg, "walking"
+        print(f"[NavigationTool] walking-override retry error={error!r}")
     except Exception as e:
         print(f"[NavigationTool] walking-override query failed: {e}")
-    return data, mode
+    return leg, mode
 
 
 def _query_google_maps(origin: str, destination: str, arrival_time: str | None,
                         mode: str, minutes_until_start: Any = None,
                         utc_offset_minutes: int = 0) -> dict:
-    """Call Google Maps Directions API and return departure time result."""
+    """Call the Routes API and return departure time result."""
     cached = _RESOLVED_PLACE_CACHE.get(_cache_key(destination))
-    directions_destination = f"place_id:{cached[0]}" if cached else destination
+    route_destination = f"place_id:{cached[0]}" if cached else destination
 
-    params = {
-        "origin": origin,
-        "destination": directions_destination,
-        "mode": mode,
-        "key": MAPS_API_KEY,
-    }
-
+    arrival_utc = None
     if arrival_time:
         try:
             arr_hour, arr_min = _parse_time(arrival_time)
             local_wall_clock = _user_local_now(utc_offset_minutes).replace(
                 hour=arr_hour, minute=arr_min, second=0, microsecond=0
             )
-            arr_dt = _user_local_clock_to_utc(local_wall_clock, utc_offset_minutes)
-            params["arrival_time"] = int(arr_dt.timestamp())
+            arrival_utc = _user_local_clock_to_utc(local_wall_clock, utc_offset_minutes)
         except Exception as e:
             print(f"[NavigationTool] couldn't parse arrival_time {arrival_time!r}: {e}")
 
     try:
-        r = requests.get(
-            "https://maps.googleapis.com/maps/api/directions/json",
-            params=params, timeout=5,
-        )
-        data = r.json()
-        status = data.get("status")
-        if status == "OK":
-            data, mode = _prefer_walking_if_close(origin, directions_destination, data, mode)
+        leg, error = _compute_route(origin, route_destination, mode, arrival_utc)
+        if leg is not None:
+            leg, mode = _prefer_walking_if_close(origin, route_destination, leg, mode)
             # A cache hit already asked the user's forgiveness for guessing once
             # ("Assuming you meant...") the first time this destination came up -
             # a recurring weekly class shouldn't repeat that caveat every ask.
             label = cached[1] if cached else destination
-            return _directions_result(data, label, mode, arrival_time, minutes_until_start)
+            return _directions_result(leg, label, mode, arrival_time, minutes_until_start, utc_offset_minutes)
 
-        # Directions couldn't resolve the destination as given (e.g. ZERO_RESULTS,
-        # NOT_FOUND) - this is exactly the shape a misheard voice transcript takes
-        # ("77 Scandalbrooke Crescent" for "77 Scantlebury Crescent"), so before
-        # giving up, ask Places' Find Place From Text for its best fuzzy match on
-        # the same text and retry Directions against that resolved place instead.
-        print(f"[NavigationTool] Directions API status={status!r} "
-              f"error_message={data.get('error_message')!r} destination={destination!r}")
+        # A key, billing or quota problem - no other spelling of the destination
+        # will get past it, so don't spend a Places lookup finding out.
+        if error is not None and error not in NO_ROUTE_ERRORS:
+            return _maps_unavailable(destination)
 
-        match = _find_place_from_text(destination)
+        # Routes couldn't resolve the destination as given - this is exactly the
+        # shape a misheard voice transcript takes ("Questercon" for "Questacon"), so
+        # before giving up, ask Places' Text Search for its best fuzzy match on the
+        # same text and retry Routes against that resolved place instead.
+        print(f"[NavigationTool] no route, error={error!r} destination={destination!r}")
+
+        match = _find_place_from_text(destination, origin)
         if match is not None:
             place_id, matched_address = match
-            params["destination"] = f"place_id:{place_id}"
-            r2 = requests.get(
-                "https://maps.googleapis.com/maps/api/directions/json",
-                params=params, timeout=5,
-            )
-            data2 = r2.json()
-            if data2.get("status") == "OK":
+            leg2, error2 = _compute_route(origin, f"place_id:{place_id}", mode, arrival_utc)
+            if leg2 is not None:
                 print(f"[NavigationTool] resolved {destination!r} -> {matched_address!r} via Places")
                 _RESOLVED_PLACE_CACHE[_cache_key(destination)] = (place_id, matched_address)
-                data2, mode = _prefer_walking_if_close(origin, params["destination"], data2, mode)
-                result = _directions_result(data2, matched_address, mode, arrival_time, minutes_until_start)
+                leg2, mode = _prefer_walking_if_close(origin, f"place_id:{place_id}", leg2, mode)
+                result = _directions_result(
+                    leg2, matched_address, mode, arrival_time, minutes_until_start, utc_offset_minutes
+                )
                 result["resolved_from"] = destination
                 result["spoken"] = f"(Assuming you meant {matched_address}) " + result["spoken"]
                 return result
-            print(f"[NavigationTool] Directions retry against Places match "
-                  f"{matched_address!r} status={data2.get('status')!r}")
+            print(f"[NavigationTool] Routes retry against Places match "
+                  f"{matched_address!r} error={error2!r}")
 
         result = _travel_unknown(
             destination,
@@ -406,6 +406,51 @@ def _query_google_maps(origin: str, destination: str, arrival_time: str | None,
         print(f"[NavigationTool] Maps API failed: {e}")
 
     return _maps_unavailable(destination)
+
+
+def _waypoint(value: str) -> dict:
+    """A Routes API waypoint: a "place_id:" reference, location_ctx's "lat,lng",
+    or anything else as an address for Routes to geocode itself."""
+    if value.startswith("place_id:"):
+        return {"placeId": value[len("place_id:"):]}
+    latlng = parse_latlng(value)
+    if latlng is not None:
+        return {"location": {"latLng": {"latitude": latlng[0], "longitude": latlng[1]}}}
+    return {"address": value}
+
+
+def _compute_route(origin: str, destination: str, mode: str,
+                   arrival_utc: datetime | None = None) -> tuple[dict | None, str | None]:
+    """The first route's leg from the Routes API, or (None, why). `why` is None
+    when Routes answered but found no route, and the error's status otherwise
+    (see NO_ROUTE_ERRORS). Network failures raise, for the caller to report as
+    maps being unavailable."""
+    body: dict[str, Any] = {
+        "origin": _waypoint(origin),
+        "destination": _waypoint(destination),
+        "travelMode": TRAVEL_MODES.get(mode, TRAVEL_MODES[DEFAULT_TRAVEL_MODE]),
+        "units": "METRIC",
+        "languageCode": "en",
+    }
+    # Routes only plans to an arrival time on transit, and rejects the field
+    # for any other mode - the legacy Directions API quietly ignored it there.
+    if arrival_utc is not None and body["travelMode"] == "TRANSIT":
+        body["arrivalTime"] = arrival_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    r = requests.post(ROUTES_URL, json=body, timeout=5, headers={
+        "X-Goog-Api-Key": MAPS_API_KEY or "",
+        "X-Goog-FieldMask": ROUTES_FIELD_MASK,
+    })
+    data = r.json()
+    if "error" in data:
+        err = data["error"]
+        print(f"[NavigationTool] Routes API status={err.get('status')!r} "
+              f"error_message={err.get('message')!r} destination={destination!r}")
+        return None, err.get("status") or "UNKNOWN"
+    routes = data.get("routes") or []
+    if not routes or not routes[0].get("legs"):
+        return None, None
+    return routes[0]["legs"][0], None
 
 
 def _travel_unknown(destination: str, spoken: str, reason: str) -> dict:
@@ -426,7 +471,7 @@ def _travel_unknown(destination: str, spoken: str, reason: str) -> dict:
 
 
 def _maps_unavailable(destination: str) -> dict:
-    """No API key, or the Directions call itself failed."""
+    """No API key, or the Routes call itself failed."""
     result = _travel_unknown(
         destination,
         f"I can't work out how long it takes to get to {destination} right now - "
@@ -458,12 +503,12 @@ def _clean_campus_location(destination: str) -> str:
     return f"{match.group('building').strip()}, Australian National University, Canberra ACT"
 
 
-def _directions_result(data: dict, destination: str, mode: str, arrival_time: str | None,
-                        minutes_until_start: Any = None) -> dict:
-    """Builds the success dict from a Directions API OK response."""
-    leg = data["routes"][0]["legs"][0]
-
-    if leg["distance"]["value"] <= ARRIVED_METERS:
+def _directions_result(leg: dict, destination: str, mode: str, arrival_time: str | None,
+                        minutes_until_start: Any = None, utc_offset_minutes: int = 0) -> dict:
+    """Builds the success dict from a Routes API leg."""
+    # proto3 JSON leaves zero-valued fields out, so a zero-length leg has no
+    # distanceMeters at all.
+    if leg.get("distanceMeters", 0) <= ARRIVED_METERS:
         # Already there. Deliberately no leave_in_minutes - there is nothing left
         # to leave for, so Android's DepartureAlarmScheduler gets nothing to set
         # an alarm against, and the system prompt's ambient case (only speak if
@@ -478,12 +523,14 @@ def _directions_result(data: dict, destination: str, mode: str, arrival_time: st
             "arrived": True,
         }
 
-    duration = leg["duration"]["text"]
-    duration_minutes = leg["duration"]["value"] / 60
-    depart = leg.get("departure_time", {}).get("text")
-    arrive = leg.get("arrival_time", {}).get("text")
-    steps = leg.get("steps", [])
-    first_step = steps[0].get("html_instructions", "").replace("<b>", "").replace("</b>", "") if steps else ""
+    duration_minutes = _seconds(leg.get("duration")) / 60
+    duration = (
+        (leg.get("localizedValues") or {}).get("duration", {}).get("text")
+        or f"{round(duration_minutes)} mins"
+    )
+    depart, arrive = _transit_times(leg, utc_offset_minutes)
+    steps = leg.get("steps") or []
+    first_step = (steps[0].get("navigationInstruction") or {}).get("instructions", "") if steps else ""
 
     if depart:
         spoken = f"Leave {depart} — takes {duration} to {destination}"
@@ -506,45 +553,95 @@ def _directions_result(data: dict, destination: str, mode: str, arrival_time: st
         "api_used": True,
     }
     # Where the route ends - what the device's compass points at while this
-    # departure is live (Android's DeviceCompass). Only real Directions results
+    # departure is live (Android's DeviceCompass). Only real Routes results
     # have it.
-    end = leg.get("end_location") or {}
-    if "lat" in end and "lng" in end:
-        result["destination_lat"] = end["lat"]
-        result["destination_lng"] = end["lng"]
+    end = (leg.get("endLocation") or {}).get("latLng") or {}
+    if "latitude" in end and "longitude" in end:
+        result["destination_lat"] = end["latitude"]
+        result["destination_lng"] = end["longitude"]
     leave_in = _leave_in_minutes(minutes_until_start, duration_minutes)
     if leave_in is not None:
         result["leave_in_minutes"] = leave_in
     return result
 
 
-def _find_place_from_text(text: str) -> tuple[str, str] | None:
+def _transit_times(leg: dict, utc_offset_minutes: int) -> tuple[str | None, str | None]:
+    """When to leave and when the trip gets in, as the user's clock reads them -
+    (None, None) unless the leg rides transit. Routes gives a timetable only for
+    the transit steps themselves, so the walks before the first one and after
+    the last one are added on either side, which is what the legacy Directions
+    API's departure_time/arrival_time already were."""
+    steps = leg.get("steps") or []
+    transit = [i for i, step in enumerate(steps) if step.get("transitDetails")]
+    if not transit:
+        return None, None
+    try:
+        first = steps[transit[0]]["transitDetails"]["stopDetails"]["departureTime"]
+        last = steps[transit[-1]]["transitDetails"]["stopDetails"]["arrivalTime"]
+        walk_before = sum(_seconds(step.get("staticDuration")) for step in steps[:transit[0]])
+        walk_after = sum(_seconds(step.get("staticDuration")) for step in steps[transit[-1] + 1:])
+        depart = _timestamp(first) - timedelta(seconds=walk_before)
+        arrive = _timestamp(last) + timedelta(seconds=walk_after)
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    return _clock(depart, utc_offset_minutes), _clock(arrive, utc_offset_minutes)
+
+
+def _seconds(duration: Any) -> float:
+    """A protobuf Duration as Routes sends it ("1234s") in seconds; 0 if absent."""
+    if not isinstance(duration, str) or not duration.endswith("s"):
+        return 0.0
+    try:
+        return float(duration[:-1])
+    except ValueError:
+        return 0.0
+
+
+def _timestamp(value: str) -> datetime:
+    """An RFC 3339 timestamp from Routes, which may carry nanoseconds - more
+    digits than fromisoformat takes - so the fraction is dropped."""
+    return datetime.fromisoformat(re.sub(r"\.\d+", "", value).replace("Z", "+00:00"))
+
+
+def _clock(instant: datetime, utc_offset_minutes: int) -> str:
+    """"9:05am" on the user's wall clock - the legacy Directions API's own format."""
+    local = instant.astimezone(timezone.utc) + timedelta(minutes=utc_offset_minutes)
+    hour = local.hour % 12 or 12
+    return f"{hour}:{local.minute:02d}{'am' if local.hour < 12 else 'pm'}"
+
+
+def _find_place_from_text(text: str, origin: str | None = None) -> tuple[str, str] | None:
     """
     Best-effort fuzzy resolve of a raw (possibly misheard) destination string via
-    Places' Find Place From Text, which tolerates typos/mishearings that the
-    Directions API's stricter geocoding rejects outright. Returns
+    Places' Text Search, which tolerates typos/mishearings that Routes' stricter
+    geocoding rejects outright. Biased towards the user's own location when
+    `origin` is one, so "Woolworths" is the nearby one. Returns
     (place_id, formatted_address) or None if Places couldn't find a candidate
     either, or the request itself failed.
     """
+    body: dict[str, Any] = {"textQuery": text, "pageSize": 1}
+    latlng = parse_latlng(origin)
+    if latlng is not None:
+        body["locationBias"] = {"circle": {
+            "center": {"latitude": latlng[0], "longitude": latlng[1]},
+            "radius": float(SEARCH_RADIUS_M),
+        }}
     try:
-        r = requests.get(
-            "https://maps.googleapis.com/maps/api/place/findplacefromtext/json",
-            params={
-                "input": text,
-                "inputtype": "textquery",
-                "fields": "place_id,formatted_address",
-                "key": MAPS_API_KEY,
-            },
-            timeout=5,
-        )
+        r = requests.post(TEXT_SEARCH_URL, json=body, timeout=5, headers={
+            "X-Goog-Api-Key": MAPS_API_KEY or "",
+            "X-Goog-FieldMask": "places.id,places.formattedAddress",
+        })
         data = r.json()
-        if data.get("status") == "OK" and data.get("candidates"):
-            candidate = data["candidates"][0]
-            return candidate["place_id"], candidate["formatted_address"]
-        print(f"[NavigationTool] Find Place From Text status={data.get('status')!r} "
-              f"for {text!r}")
+        if "error" in data:
+            print(f"[NavigationTool] Places Text Search error: {data['error'].get('message')!r} "
+                  f"for {text!r}")
+            return None
+        places = data.get("places") or []
+        if places and places[0].get("id") and places[0].get("formattedAddress"):
+            return places[0]["id"], places[0]["formattedAddress"]
+        print(f"[NavigationTool] Places Text Search found nothing for {text!r}")
     except Exception as e:
-        print(f"[NavigationTool] Find Place From Text failed: {e}")
+        print(f"[NavigationTool] Places Text Search failed: {e}")
     return None
 
 

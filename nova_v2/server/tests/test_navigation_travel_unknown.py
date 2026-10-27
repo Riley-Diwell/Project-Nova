@@ -52,7 +52,7 @@ def test_maps_failure_says_it_cannot_work_it_out(monkeypatch):
     def boom(*args, **kwargs):
         raise ConnectionError("down")
 
-    monkeypatch.setattr(navigation.requests, "get", boom)
+    monkeypatch.setattr(navigation.requests, "post", boom)
     result = navigation.NavigationTool()._execute(
         {"destination": "ANU", "origin": "-35.28,149.13", "minutes_until_start": 45})
     assert result["travel_unknown"] is True
