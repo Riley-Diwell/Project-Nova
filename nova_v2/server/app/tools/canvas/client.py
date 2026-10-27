@@ -225,6 +225,17 @@ class CanvasClient:
             ("include[]", "submission"), ("order_by", "due_at"), ("per_page", "100"),
         ], cache=True)
 
+    def course(self, course_id: str) -> dict[str, Any]:
+        """One course with its syllabus, and whether it weights assignment groups."""
+        return self.get(f"/courses/{course_id}", params=[("include[]", "syllabus_body")], cache=True)
+
+    def assignment_groups(self, course_id: str) -> list[dict[str, Any]]:
+        """The course's assessment categories ("Assignments", "Exam"), each with its
+        weighting and the assignments in it."""
+        return self.get_all(f"/courses/{course_id}/assignment_groups", params=[
+            ("include[]", "assignments"), ("per_page", "50"),
+        ], cache=True)
+
     def assignment(self, course_id: str, assignment_id: str) -> dict[str, Any]:
         return self.get(f"/courses/{course_id}/assignments/{assignment_id}",
                         params=[("include[]", "submission")])

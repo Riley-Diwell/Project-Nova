@@ -14,6 +14,9 @@ ACTIONS
              assignments, quizzes, discussions - with whether each is submitted.
   grades     course totals; with `assignment`, that one assignment's score,
              grade and the marker's comments.
+  weights    how much each part of a course counts towards the final mark -
+             Canvas's assignment group weightings, or the syllabus if the
+             course keeps them there instead.
   classes    events on the courses' Canvas calendars. Most timetables live in
              the phone calendar instead; this is for what only Canvas has.
   materials  a course's modules and what's in them, optionally filtered by
@@ -38,7 +41,7 @@ from app.store.canvas import CanvasConnection
 from app.tools.canvas import text as doc_text
 from app.tools.canvas.client import CanvasClient, CanvasError, iter_items
 
-ACTIONS = ("upcoming", "grades", "classes", "materials", "read")
+ACTIONS = ("upcoming", "grades", "weights", "classes", "materials", "read")
 
 MAX_LIST = 25
 MAX_MATERIALS = 60
@@ -50,7 +53,9 @@ CANVAS_TOOL: dict[str, Any] = {
         "Reads the user's university Canvas (read-only). Actions: "
         "'upcoming' - assignments, quizzes and other work due soon, with whether "
         "each is submitted; 'grades' - course grades, or with 'assignment' one "
-        "assignment's mark and the marker's comments; 'classes' - events on the "
+        "assignment's mark and the marker's comments; 'weights' - how much each "
+        "assignment or assessment counts towards a course's final mark; "
+        "'classes' - events on the "
         "Canvas course calendars; 'materials' - a course's modules and files; "
         "'read' - the text of one file, page or assignment so you can answer "
         "'question' from it. "
@@ -59,6 +64,8 @@ CANVAS_TOOL: dict[str, Any] = {
         "(or get_calendar_range) - its title usually holds the course code - "
         "then call 'materials' for that course with a query such as the class "
         "type and week, and 'read' the best match with the user's question. "
+        "If two lookups haven't found something, say it isn't in Canvas rather "
+        "than searching on. "
         "Answer in a few spoken sentences from what the tool returns; never read "
         "out URLs or ids, and never invent content the text doesn't contain."
     ),
@@ -70,7 +77,7 @@ CANVAS_TOOL: dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "Course code or name, e.g. 'COMP2100', 'PHYS1101', 'physics'. "
-                    "Required for materials and read; optional elsewhere (all courses)."
+                    "Required for weights, materials and read; optional elsewhere (all courses)."
                 ),
             },
             "days": {
@@ -80,7 +87,7 @@ CANVAS_TOOL: dict[str, Any] = {
             "assignment": {
                 "type": "string",
                 "description": (
-                    "grades: the assignment's name or words from it. For 'my "
+                    "grades/weights: the assignment's name or words from it. For 'my "
                     "assignment' with nothing more specific, pass 'assignment' - "
                     "that means the one marked most recently."
                 ),
@@ -417,6 +424,45 @@ class _Run:
             **({} if graded else {"note": "not marked yet (or the mark isn't released)"}),
         }
 
+    # weights ----------------------------------------------------------------
+
+    def weights(self, course_query: Optional[str], assignment: Optional[str]) -> dict[str, Any]:
+        """How much each part of a course counts. Canvas holds this as assignment
+        groups with a percentage each - but only when the course turns weighting
+        on, and many leave it off and put the weightings in the syllabus or the
+        course outline instead. So the syllabus comes too when Canvas has none."""
+        course = self.one_course(course_query)
+        if course.get("success") is False:
+            return course
+        cid = str(course["id"])
+        detail = self.client.course(cid)
+        groups = self.client.assignment_groups(cid)
+        weighted = bool(detail.get("apply_assignment_group_weights")) and any(
+            g.get("group_weight") for g in groups)
+        result: dict[str, Any] = {
+            "success": True,
+            "course": _course_label(course),
+            "weighted_in_canvas": weighted,
+            "groups": [{
+                "group": g.get("name"),
+                "weight_percent": g.get("group_weight") if weighted else None,
+                "assignments": [
+                    {"name": a.get("name"), "points": a.get("points_possible")}
+                    for a in (g.get("assignments") or [])[:MAX_LIST]
+                ],
+            } for g in groups],
+        }
+        if not weighted:
+            syllabus = doc_text.html_to_text(detail.get("syllabus_body"))
+            if syllabus:
+                result["syllabus"], _ = doc_text.excerpt(
+                    syllabus, f"assessment weighting weight percent worth {assignment or ''}", limit=2500)
+            result["note"] = (
+                "Canvas sets no weightings for this course. If the syllabus doesn't "
+                "give them, try materials with query 'assessment' or 'course outline' "
+                "once - otherwise say they aren't in Canvas.")
+        return result
+
     # classes ----------------------------------------------------------------
 
     def classes(self, course: Optional[str], days: int) -> dict[str, Any]:
@@ -633,6 +679,8 @@ def run_canvas(
             return run.upcoming(tool_input.get("course"), tool_input.get("days") or 14)
         if action == "grades":
             return run.grades(tool_input.get("course"), tool_input.get("assignment"))
+        if action == "weights":
+            return run.weights(tool_input.get("course"), tool_input.get("assignment"))
         if action == "classes":
             return run.classes(tool_input.get("course"), tool_input.get("days") or 7)
         if action == "materials":
